@@ -1,8 +1,28 @@
-# SEO Article Agent
+# Humanly
 
-An AI agent that writes publication-ready SEO articles. You give it a topic and a goal — it does the research, finds images, and produces a finished article in Markdown, HTML, and DOCX. It also learns from your existing articles, so the output matches your voice and style rather than sounding generic.
+**An AI agent that writes publication-ready SEO articles — and then argues with itself about them.**
 
-The pipeline runs in 10 stages: live SERP research, title refinement, key takeaways, outline, writing, a three-pass humanization stage that strips AI patterns, a direct-answer block for answer engines, an adversarial verification stage where a second model audits the draft and the writer gets to argue back, meta description, and image sourcing. Everything is automated.
+You give it a topic and a goal. It does the research, writes the draft, strips the AI tells, and then hands the result to a second model on a different vendor whose only job is to find what's wrong with it. The writer gets to argue back. A third model settles what's still contested. Only what survives the argument reaches the file on disk.
+
+The pipeline runs in 10 stages: live SERP research, title refinement, key takeaways, outline, writing, a three-pass humanization stage that strips AI patterns, a direct-answer block for answer engines, an adversarial verification stage where a second model audits the draft and the writer gets to argue back, meta description, and image sourcing. Three more optional stages write a LinkedIn post, a video script and a share card from the finished article. Everything is automated.
+
+### See it
+
+| | |
+|---|---|
+| **[Walk the whole flow →](docs/flow.html)** | Every screen, all eleven stages, and the argument the three agents have — drawn out. Open it locally, or via [htmlpreview](https://htmlpreview.github.io/?https://github.com/imtauqir9/humanly/blob/main/docs/flow.html). |
+| **[Read an article it wrote →](examples/)** | A full 3,000-word piece with its metadata, exactly as the pipeline produced it. Nothing was touched by hand. |
+| **Run it yourself** | `pip install -r requirements.txt && python app.py` — then [localhost:8080](http://localhost:8080). |
+
+<!-- SCREENSHOTS — drop three PNGs in docs/screenshots/ and uncomment. In order of impact:
+     1. review.png    — /review/<slug>, the three voices arguing over one finding. Nothing else in this space has this.
+     2. progress.png  — the live log mid-run, [STEP 6.5] Writer responding to 4 finding(s)
+     3. form.png      — the generate form with the length dropdown and the three extras
+
+![The three agents arguing over a finding](docs/screenshots/review.png)
+![The pipeline running live](docs/screenshots/progress.png)
+![The generate form](docs/screenshots/form.png)
+-->
 
 ---
 
@@ -365,13 +385,19 @@ passed `--apply`.
 ## Project structure
 
 ```
-SEO-writer/
-├── seo_writer.py       # Core agent + CLI
-├── app.py              # Web UI (Flask)
+humanly/
+├── seo_writer.py       # Core agent + CLI — the whole pipeline lives here
+├── app.py              # Web UI (Flask): jobs, streaming log, auth, usage
 ├── requirements.txt
 ├── .env.example        # Copy to .env and fill in keys
 ├── templates/
-│   └── index.html
+│   ├── index.html      # The form, the live log, the article library
+│   ├── review.html     # /review/<slug> — the argument, with all three voices
+│   ├── deck.html       # /deck/<slug> — the video script as timed slides
+│   ├── usage.html      # /usage — tokens and cost
+│   └── login.html
+├── docs/flow.html      # End-to-end walkthrough of how a run works
+├── examples/           # A real article the pipeline produced, untouched
 ├── sample-articles/    # Your reference articles — agent uses these for style
 └── n8n/                # Original n8n workflow this was built from
 ```
