@@ -10,7 +10,7 @@ The pipeline runs in 10 stages: live SERP research, title refinement, key takeaw
 
 | | |
 |---|---|
-| **[Walk the whole flow →](docs/flow.html)** | Every screen, all eleven stages, and the argument the three agents have — drawn out. Open it locally, or via [htmlpreview](https://htmlpreview.github.io/?https://github.com/imtauqir9/humanly/blob/main/docs/flow.html). |
+| **[Walk the whole flow →](docs/flow.html)** | Every screen, all ten stages, and the argument the three agents have — drawn out. Open it locally, or via [htmlpreview](https://htmlpreview.github.io/?https://github.com/imtauqir9/humanly/blob/main/docs/flow.html). |
 | **[Read an article it wrote →](examples/)** | A full 3,000-word piece with its metadata, exactly as the pipeline produced it. Nothing was touched by hand. |
 | **Run it yourself** | `pip install -r requirements.txt && python app.py` — then [localhost:8080](http://localhost:8080). |
 
