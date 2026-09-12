@@ -479,6 +479,8 @@ def _completion_payload(slug: str | None, external_id: str, status: str,
         "review_md": f"{slug}_review.md",
         "review_json": f"{slug}_review.json",
         "facts": f"{slug}_facts.json",
+        "diagram_png": f"{slug}_diagram_1.png",
+        "diagram_svg": f"{slug}_diagram_1.svg",
         "usage": f"{slug}_usage.json",
     }.items():
         if (OUTPUT_DIR / name).exists():

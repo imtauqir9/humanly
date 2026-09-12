@@ -810,16 +810,18 @@ def load_style_samples(limit_words: int = STYLE_SAMPLE_WORDS,
     return "\n".join(blocks)
 
 
-def style_block(samples: str) -> str:
-    if not samples:
-        return ""
-    return f"""
+def style_block(samples: str, profile: str = "") -> str:
+    parts = []
+    if samples:
+        parts.append(f"""
 STYLE TO MATCH
 Below are excerpts from articles this author actually published. Match their
 sentence rhythm, their level of directness, how they open sections, and how
 often they use first person. Do not copy sentences or facts from them.
 {samples}
-"""
+""")
+    parts.append(voice_block(profile))
+    return "".join(parts)
 
 
 def take_block(take: str) -> str:
@@ -836,7 +838,9 @@ article theirs rather than a summary of what everyone else wrote.
 Rules: every item must appear in the article, in first person, in the section
 where it belongs, with its substance intact. Do not soften an opinion into a
 neutral observation. Do not quarantine them in one "my view" section; put each
-where a reader would want to hear it.
+where a reader would want to hear it. First person is the point, not a hedge:
+"I think the X track is underrated" is correct; "The X track is underrated" is
+the neutralised form that fails this rule.
 """
 
 
@@ -848,6 +852,676 @@ def read_take(value: str | None) -> str:
     if p.exists() and p.is_file():
         return p.read_text(encoding="utf-8", errors="ignore")
     return value
+
+
+# ---------------------------------------------------------------------------
+# The author's voice, described
+# ---------------------------------------------------------------------------
+#
+# Style samples show the model what the prose looks like; they do not say what
+# makes it that way, and only the writer sees them. A short description of the
+# voice - how sentences run, how the reader is addressed, what the author never
+# does - is built once from the samples, cached beside them, and sent to every
+# call that touches the prose, so the humanizer and the fix pass pull in the
+# same direction as the writer instead of sanding the voice back off.
+
+VOICE_PROFILE_PATH = SAMPLE_DIR / ".voice_profile.json"
+
+
+def _voice_stats(samples: str) -> dict:
+    """Numbers the profile is anchored to, so it is not just adjectives."""
+    lengths = _sentence_lengths(samples.split("\n"))
+    if not lengths:
+        return {}
+    words = max(1, len(samples.split()))
+    return {
+        "median_sentence_words": sorted(lengths)[len(lengths) // 2],
+        "share_under_10_words": round(sum(1 for n in lengths if n <= 10) / len(lengths), 2),
+        "share_over_25_words": round(sum(1 for n in lengths if n >= 25) / len(lengths), 2),
+        "you_per_100_words": round(100 * len(re.findall(r"\b[Yy]ou(?:r|'ll|'re)?\b", samples)) / words, 1),
+        "i_per_100_words": round(100 * len(re.findall(r"\b(?:I|I'm|I've|I'd|[Mm]y)\b", samples)) / words, 1),
+    }
+
+
+def build_voice_profile(samples: str) -> str:
+    """One Claude call describing how the author writes. Cached next to the
+    samples and rebuilt only when they change."""
+    if not samples or not samples.strip():
+        return ""
+    import hashlib
+    key = hashlib.sha256(samples.encode("utf-8")).hexdigest()[:16]
+    try:
+        cached = json.loads(VOICE_PROFILE_PATH.read_text(encoding="utf-8"))
+        if cached.get("key") == key and cached.get("profile"):
+            print("  Voice profile: loaded from cache.")
+            return cached["profile"]
+    except Exception:
+        pass
+    stats = _voice_stats(samples)
+    prompt = f"""Read these excerpts from one author's published articles and describe their
+voice precisely enough that a ghostwriter could reproduce it.
+
+{samples}
+
+MEASURED ON THE EXCERPTS
+{json.dumps(stats)}
+
+Ignore any newsletter greeting, edition number or promotional boilerplate at the
+top of an excerpt; describe the body prose only.
+
+Write 120-180 words as instructions to the ghostwriter. Cover: sentence rhythm
+(typical length, how often a very short sentence lands); how the reader is
+addressed; how a new idea is introduced; how technical terms are handled; how
+first person is used; how much hedging there is; and three things this author
+never does. Quote two short phrases from the excerpts that are unmistakably
+theirs. Plain prose, no headings, no bullets."""
+    try:
+        profile = call_claude(prompt, max_tokens=1500).strip()
+    except ClaudeError as e:
+        print(f"  Voice profile skipped ({str(e)[:80]}).")
+        return ""
+    if len(profile.split()) < 40:
+        return ""
+    try:
+        VOICE_PROFILE_PATH.write_text(
+            json.dumps({"key": key, "stats": stats, "profile": profile}, indent=2),
+            encoding="utf-8")
+    except Exception:
+        pass
+    print("  Voice profile: built and cached.")
+    return profile
+
+
+def voice_block(profile: str) -> str:
+    if not profile or not profile.strip():
+        return ""
+    return f"""
+THE AUTHOR'S VOICE (write in it; the editor and the auditor check for it)
+{profile.strip()}
+One exception: if this profile says first person is rare, the AUTHOR'S TAKE items
+are still written in first person. "I think X" and "in my experience" on a take
+item are the required form, not hedges; do not flatten them into third person.
+"""
+
+
+# ---------------------------------------------------------------------------
+# Teach in layers: the simple version first, then up a level
+# ---------------------------------------------------------------------------
+#
+# The shipped articles were flat: every section pitched at the same reader,
+# which is nobody. An instructor does it differently - the plain version first,
+# with a picture, so a newcomer leaves knowing what the thing is; then the
+# mechanics for people who will build it; then the part only experience
+# teaches. The outline, the writer and the auditor all hold to this shape.
+
+LEVELS_BLOCK = """
+TEACH IN LAYERS (mandatory shape)
+The article climbs three levels, in this order. Every H2 belongs to one of them.
+
+LEVEL 1 - The simple version. The first H2 after the introduction. A good
+  instructor explaining it to a smart person who has never met the topic: one
+  everyday analogy, one concrete example, every term of art defined in plain
+  words the first time it appears, sentences mostly under 15 words. It holds
+  exactly one diagram marker:
+  [DIAGRAM: <title> | Shows: <the one thing the picture must make obvious>]
+LEVEL 2 - How it actually works. The middle H2s, for a practitioner: the moving
+  parts, the numbers, the comparison table, the tradeoffs. Technical terms are
+  fine here, and the fact pack does the talking.
+LEVEL 3 - Where it gets hard. The last H2 before the FAQ. What experienced
+  people argue about, where it breaks, what the author has seen first-hand.
+  Most of the AUTHOR'S TAKE belongs here.
+
+A reader who stops after Level 1 should still know what the thing is. A reader
+who finishes should learn something a beginner's guide would never say.
+"""
+
+EXPLAINER_MAX_MEAN = 17        # words per sentence, averaged over the Level 1 section
+EXPLAINER_MAX_SENTENCE = 30    # no single sentence longer than this
+
+
+def explainer_section(article: str) -> tuple[str, str] | None:
+    """(heading, body) of the Level 1 section: the H2 that holds the first
+    diagram marker. Returns None when the article has no such section."""
+    lines = article.split("\n")
+    marker_at = next((i for i, l in enumerate(lines)
+                      if l.lstrip().startswith("[DIAGRAM:")), None)
+    if marker_at is None:
+        return None
+    start = next((i for i in range(marker_at, -1, -1) if lines[i].startswith("## ")), None)
+    if start is None:
+        return None
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")),
+               len(lines))
+    return lines[start][3:].strip(), "\n".join(lines[start + 1:end])
+
+
+def check_explainer(article: str) -> dict:
+    """Is the Level 1 section actually simple? Measured, not asked."""
+    found = explainer_section(article)
+    if not found:
+        return {"found": False, "ok": True}
+    heading, body = found
+    lengths = _sentence_lengths(_scannable_lines(body))
+    if not lengths:
+        return {"found": True, "ok": True, "heading": heading}
+    mean = sum(lengths) / len(lengths)
+    long_count = sum(1 for n in lengths if n > EXPLAINER_MAX_SENTENCE)
+    return {
+        "found": True, "heading": heading, "sentences": len(lengths),
+        "mean": round(mean, 1), "longest": max(lengths), "long_count": long_count,
+        "ok": mean <= EXPLAINER_MAX_MEAN and long_count == 0,
+    }
+
+
+def simplify_explainer(article: str, stats: dict, research: dict | None = None) -> str:
+    """Rewrite only the Level 1 section so it reads like an instructor talking."""
+    heading = stats["heading"]
+    log("STEP 6.2", f"Simplifying the Level 1 section: {stats['mean']} words per sentence, "
+                    f"{stats['long_count']} over {EXPLAINER_MAX_SENTENCE}")
+    prompt = f"""The section "## {heading}" is the article's simple version: the part a smart
+beginner reads first. Its sentences average {stats['mean']} words and {stats['long_count']}
+run past {EXPLAINER_MAX_SENTENCE}. Rewrite ONLY that section so an instructor could read it
+aloud to a newcomer: sentences mostly under 15 words and none over {EXPLAINER_MAX_SENTENCE},
+one idea per sentence, every technical term explained in plain words the first time it
+appears, the analogy and the example kept.
+{voice_block((research or {}).get("voice_profile", ""))}
+Change nothing outside that section. Keep its heading, its [DIAGRAM: ...] marker, every
+"(Source: ...)" citation and every number exactly as they are.
+
+ARTICLE
+{article}
+
+Return ONLY the full revised article."""
+    return call_claude(prompt, max_tokens=16000)
+
+
+# ---------------------------------------------------------------------------
+# Diagrams: drawn by the pipeline, not searched for
+# ---------------------------------------------------------------------------
+#
+# A stock photo next to "the simple version" explains nothing. The writer
+# leaves one [DIAGRAM: title | Shows: ...] marker in that section; Claude turns
+# it into a small structured spec - boxes and arrows, a cycle, stacked layers or
+# side-by-side columns, never free-form drawing - and one layout is emitted
+# twice: SVG inline in the HTML, PNG for the Markdown and the DOCX. No browser,
+# no cairo, no fonts to install: Pillow ships a scalable face of its own.
+
+DIAGRAM_MARKER_RE = re.compile(
+    r"\[DIAGRAM:\s*([^|\]]+?)\s*\|\s*Shows:\s*([^\]]+?)\s*\]", re.IGNORECASE)
+DIAGRAM_MAX_NODES = 8
+
+DIAGRAM_SPEC_SCHEMA = """{
+  "type": "flow | cycle | layers | compare",
+  "title": "<what the diagram is called, under 60 characters>",
+  "nodes": [ {"label": "<2-5 words>", "note": "<optional detail, under 12 words>"} ],
+  "edges": [ {"from": 0, "to": 2, "label": "<optional, under 4 words>"} ],
+  "columns": [ {"title": "<column title>", "items": ["<under 8 words>", "..."]} ],
+  "caption": "<the one sentence a reader should take away, under 20 words>"
+}"""
+
+
+def _section_around(content: str, pos: int) -> str:
+    """The section text a marker sits in: from the nearest heading above it to
+    the next H2 below."""
+    before, after = content[:pos], content[pos:]
+    start = max(before.rfind("\n## "), before.rfind("\n### "), 0)
+    end = after.find("\n## ")
+    return (before[start:] + (after if end < 0 else after[:end])).strip()
+
+
+def _clean_diagram_spec(spec: dict) -> dict | None:
+    if not isinstance(spec, dict):
+        return None
+    kind = str(spec.get("type", "flow")).strip().lower()
+    if kind not in {"flow", "cycle", "layers", "compare"}:
+        kind = "flow"
+    out = {
+        "type": kind,
+        "title": " ".join(str(spec.get("title", "")).split())[:70],
+        "caption": " ".join(str(spec.get("caption", "") or "").split())[:160],
+        "nodes": [], "edges": [], "columns": [],
+    }
+    if kind == "compare":
+        for c in (spec.get("columns") or [])[:3]:
+            if not isinstance(c, dict):
+                continue
+            title = " ".join(str(c.get("title", "")).split())[:40]
+            items = [" ".join(str(i).split())[:60]
+                     for i in (c.get("items") or []) if str(i).strip()][:5]
+            if title and items:
+                out["columns"].append({"title": title, "items": items})
+        return out if len(out["columns"]) >= 2 else None
+    for n in (spec.get("nodes") or [])[:DIAGRAM_MAX_NODES]:
+        if isinstance(n, str):
+            n = {"label": n}
+        if not isinstance(n, dict):
+            continue
+        label = " ".join(str(n.get("label", "")).split())[:40]
+        if label:
+            out["nodes"].append({"label": label,
+                                 "note": " ".join(str(n.get("note", "") or "").split())[:70]})
+    if len(out["nodes"]) < 2:
+        return None
+    count = len(out["nodes"])
+    for e in (spec.get("edges") or []):
+        try:
+            a, b = int(e.get("from")), int(e.get("to"))
+        except Exception:
+            continue
+        if 0 <= a < count and 0 <= b < count and a != b:
+            out["edges"].append({"from": a, "to": b,
+                                 "label": " ".join(str(e.get("label", "") or "").split())[:24]})
+    return out
+
+
+def generate_diagram_spec(title: str, shows: str, section_text: str) -> dict | None:
+    prompt = f"""Design a simple explanatory diagram for an article section.
+
+DIAGRAM TITLE: {title}
+IT MUST MAKE OBVIOUS: {shows}
+
+THE SECTION IT SITS IN
+{section_text[:3500]}
+
+Pick the one shape that fits:
+- "flow": 3-{DIAGRAM_MAX_NODES} steps in order (a process, a pipeline, a request's path)
+- "cycle": 3-6 steps that repeat (a loop, a lifecycle)
+- "layers": 3-6 stacked levels (a stack, tiers, a hierarchy; top level first)
+- "compare": 2-3 columns of 3-5 short items each (this versus that). If the
+  section really contrasts just two things, this is the shape: a two-node flow
+  or two-layer stack shows nothing.
+
+Rules: labels are 2-5 words a beginner understands; a note adds one detail only
+when it earns its place; no fact, price or figure that is not in the section;
+at most {DIAGRAM_MAX_NODES} nodes. For "compare" fill "columns" and leave "nodes"
+empty. For the others fill "nodes" and leave "columns" empty; "edges" is optional
+and only for arrows that are not simply step-to-next-step.
+
+Return ONLY valid JSON in exactly this shape:
+{DIAGRAM_SPEC_SCHEMA}"""
+    try:
+        spec = extract_json(call_claude(prompt, max_tokens=2000))
+    except Exception as e:
+        print(f"  Diagram spec failed ({str(e)[:80]}).")
+        return None
+    if isinstance(spec, dict) and not spec.get("title"):
+        spec["title"] = title
+    return _clean_diagram_spec(spec)
+
+
+# -- layout: one geometry, two renderers ------------------------------------
+
+_DG_W = 1200
+_DG_PAD = 48
+_DG_FONT = {"title": 26, "label": 19, "note": 14, "item": 15, "col": 20,
+            "edge": 13, "caption": 15, "credit": 12}
+_DG_COLORS = {"bg": "#ffffff", "box": "#eef3fb", "border": "#3b5bdb",
+              "text": "#1a1a1a", "muted": "#555555", "accent": "#3b5bdb",
+              "headtext": "#ffffff", "credit": "#999999"}
+
+
+def _wrap_chars(text: str, max_chars: int, max_lines: int) -> list[str]:
+    words, lines, current = str(text).split(), [], ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if len(candidate) <= max_chars:
+            current = candidate
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        lines[-1] = lines[-1][:max(1, max_chars - 1)].rstrip() + "…"
+    return lines or [""]
+
+
+def _dg_wrap(text: str, box_w: float, size: int, max_lines: int = 3) -> list[str]:
+    # 0.55em is a fair average glyph width for a sans face; good enough to wrap on.
+    return _wrap_chars(text, max(6, int((box_w - 24) / (size * 0.55))), max_lines)
+
+
+def _t(x, y, text, role, bold=False, color=None, anchor="middle") -> dict:
+    return {"kind": "text", "x": x, "y": y, "text": text, "size": _DG_FONT[role],
+            "bold": bold, "color": color or _DG_COLORS["text"], "anchor": anchor}
+
+
+def _r(x, y, w, h, fill=None, stroke=None, rx=10) -> dict:
+    return {"kind": "rect", "x": x, "y": y, "w": w, "h": h,
+            "fill": fill, "stroke": stroke, "rx": rx}
+
+
+def _a(x1, y1, x2, y2, label="", dashed=False) -> dict:
+    return {"kind": "arrow", "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+            "label": label, "dashed": dashed}
+
+
+def _tint(t: float) -> str:
+    """Blend from a deeper to a paler blue-grey as t goes 0 -> 1."""
+    a, b = (0xDC, 0xE6, 0xFA), (0xF7, 0xF9, 0xFD)
+    return "#" + "".join(f"{int(round(a[i] + (b[i] - a[i]) * t)):02x}" for i in range(3))
+
+
+def _clip_to_rect(cx, cy, w, h, tx, ty):
+    """Where the line from a box's centre (cx, cy) towards (tx, ty) leaves the box."""
+    dx, dy = tx - cx, ty - cy
+    if not dx and not dy:
+        return cx, cy
+    t = min((w / 2) / abs(dx) if dx else float("inf"),
+            (h / 2) / abs(dy) if dy else float("inf"))
+    return cx + dx * t, cy + dy * t
+
+
+def _node_box(els: list, x, y, w, h, node: dict):
+    els.append(_r(x, y, w, h, fill=_DG_COLORS["box"], stroke=_DG_COLORS["border"]))
+    label_lines = _dg_wrap(node["label"], w, _DG_FONT["label"], 2)
+    note_lines = _dg_wrap(node["note"], w, _DG_FONT["note"], 2) if node.get("note") else []
+    lh, nh = _DG_FONT["label"] + 4, _DG_FONT["note"] + 3
+    total = len(label_lines) * lh + (len(note_lines) * nh + 6 if note_lines else 0)
+    ty = y + (h - total) / 2 + _DG_FONT["label"] - 3
+    for line in label_lines:
+        els.append(_t(x + w / 2, ty, line, "label", bold=True))
+        ty += lh
+    if note_lines:
+        ty += 4
+        for line in note_lines:
+            els.append(_t(x + w / 2, ty, line, "note", color=_DG_COLORS["muted"]))
+            ty += nh
+
+
+def _lay_flow(spec: dict, els: list, y: float, cycle: bool = False) -> float:
+    nodes, W, pad = spec["nodes"], _DG_W, _DG_PAD
+    n = len(nodes)
+    per_row = min(4, n)
+    gap, row_gap = 60, 64
+    box_w = (W - 2 * pad - (per_row - 1) * gap) / per_row
+    box_h = 96 if any(nd["note"] for nd in nodes) else 76
+    rows = -(-n // per_row)
+    pos = []
+    for i, nd in enumerate(nodes):
+        r, c = divmod(i, per_row)
+        if r % 2 == 1:
+            c = per_row - 1 - c          # snake, so step i+1 sits next to step i
+        x = pad + c * (box_w + gap)
+        yy = y + r * (box_h + row_gap)
+        pos.append((x, yy))
+        _node_box(els, x, yy, box_w, box_h, nd)
+    for i in range(n - 1):
+        (x1, y1), (x2, y2) = pos[i], pos[i + 1]
+        if abs(y1 - y2) < 1:
+            if x2 > x1:
+                els.append(_a(x1 + box_w, y1 + box_h / 2, x2, y2 + box_h / 2))
+            else:
+                els.append(_a(x1, y1 + box_h / 2, x2 + box_w, y2 + box_h / 2))
+        else:
+            els.append(_a(x1 + box_w / 2, y1 + box_h, x2 + box_w / 2, y2))
+    for e in spec.get("edges", []):
+        a, b = e["from"], e["to"]
+        if b == a + 1:
+            continue
+        (x1, y1), (x2, y2) = pos[a], pos[b]
+        c1 = (x1 + box_w / 2, y1 + box_h / 2)
+        c2 = (x2 + box_w / 2, y2 + box_h / 2)
+        # Start and end on the box borders, not at the centres, so the arrowhead
+        # never lands on a label.
+        sx, sy = _clip_to_rect(*c1, box_w, box_h, *c2)
+        ex, ey = _clip_to_rect(*c2, box_w, box_h, *c1)
+        els.append(_a(sx, sy, ex, ey, label=e["label"], dashed=True))
+    bottom = y + (rows - 1) * (box_h + row_gap) + box_h
+    if cycle and n >= 2:
+        (xl, yl), (xf, yf) = pos[-1], pos[0]
+        drop = bottom + 30
+        els.append({"kind": "path", "label": "repeats", "points": [
+            (xl + box_w / 2, yl + box_h), (xl + box_w / 2, drop), (pad / 2, drop),
+            (pad / 2, yf + box_h / 2), (xf, yf + box_h / 2)]})
+        bottom = drop + 18
+    return bottom
+
+
+def _lay_layers(spec: dict, els: list, y: float) -> float:
+    nodes, W, pad = spec["nodes"], _DG_W, _DG_PAD
+    band_w, gap = W - 2 * pad, 10
+    n = len(nodes)
+    for i, nd in enumerate(nodes):
+        h = 84 if nd["note"] else 62
+        els.append(_r(pad, y, band_w, h, fill=_tint(i / max(1, n - 1)),
+                      stroke=_DG_COLORS["border"], rx=8))
+        block = _DG_FONT["label"] + 4 + (_DG_FONT["note"] + 3 if nd["note"] else 0)
+        ty = y + (h - block) / 2 + _DG_FONT["label"] - 3
+        els.append(_t(pad + 24, ty, nd["label"], "label", bold=True, anchor="start"))
+        if nd["note"]:
+            ty += _DG_FONT["label"] + 6
+            els.append(_t(pad + 24, ty, _dg_wrap(nd["note"], band_w - 120, _DG_FONT["note"], 1)[0],
+                          "note", color=_DG_COLORS["muted"], anchor="start"))
+        els.append(_t(W - pad - 20, y + h / 2 + 7, str(i + 1), "label",
+                      color=_DG_COLORS["muted"], anchor="end"))
+        y += h + gap
+    return y - gap
+
+
+def _lay_compare(spec: dict, els: list, y: float) -> float:
+    cols, W, pad = spec["columns"], _DG_W, _DG_PAD
+    k, gap = len(cols), 36
+    col_w = (W - 2 * pad - (k - 1) * gap) / k
+    head_h, line_h, item_gap = 52, _DG_FONT["item"] + 6, 12
+    wrapped = [[_dg_wrap(it, col_w - 40, _DG_FONT["item"], 2) for it in c["items"]] for c in cols]
+    max_items = max(len(w) for w in wrapped)
+    # Rows align across columns, so a two-line item in one column pads the others.
+    per_item = [max(len(wrapped[j][i]) if i < len(wrapped[j]) else 1 for j in range(k))
+                for i in range(max_items)]
+    body_h = 16 + sum(lines * line_h + item_gap for lines in per_item)
+    for j, c in enumerate(cols):
+        x = pad + j * (col_w + gap)
+        els.append(_r(x, y, col_w, head_h + body_h, fill=_DG_COLORS["bg"], stroke=None))
+        els.append(_r(x, y, col_w, head_h, fill=_DG_COLORS["accent"], stroke=None))
+        els.append(_r(x, y + head_h / 2, col_w, head_h / 2, fill=_DG_COLORS["accent"],
+                      stroke=None, rx=0))
+        els.append(_t(x + col_w / 2, y + head_h / 2 + 7,
+                      _dg_wrap(c["title"], col_w, _DG_FONT["col"], 1)[0],
+                      "col", bold=True, color=_DG_COLORS["headtext"]))
+        ty = y + head_h + 16
+        for i, lines in enumerate(wrapped[j]):
+            ty += line_h
+            els.append(_t(x + 18, ty, "•", "item", color=_DG_COLORS["accent"], anchor="start"))
+            for li, line in enumerate(lines):
+                if li:
+                    ty += line_h
+                els.append(_t(x + 36, ty, line, "item", anchor="start"))
+            ty += item_gap + (per_item[i] - len(lines)) * line_h
+        els.append(_r(x, y, col_w, head_h + body_h, fill=None, stroke=_DG_COLORS["border"]))
+    return y + head_h + body_h
+
+
+def layout_diagram(spec: dict) -> dict:
+    """Turn a cleaned spec into primitives (rects, text lines, arrows) on a
+    1200-wide canvas. Both renderers draw exactly this."""
+    W, pad = _DG_W, _DG_PAD
+    els, y = [], pad
+    if spec.get("title"):
+        for line in _dg_wrap(spec["title"], W - 2 * pad, _DG_FONT["title"], 2):
+            y += _DG_FONT["title"]
+            els.append(_t(W / 2, y, line, "title", bold=True))
+        y += 24
+    kind = spec["type"]
+    if kind == "compare":
+        y = _lay_compare(spec, els, y)
+    elif kind == "layers":
+        y = _lay_layers(spec, els, y)
+    else:
+        y = _lay_flow(spec, els, y, cycle=(kind == "cycle"))
+    if spec.get("caption"):
+        y += 26
+        for line in _dg_wrap(spec["caption"], W - 2 * pad, _DG_FONT["caption"], 2):
+            y += _DG_FONT["caption"] + 5
+            els.append(_t(W / 2, y, line, "caption", color=_DG_COLORS["muted"]))
+    y += 22
+    els.append(_t(W - pad, y, f"Diagram: {AUTHOR_NAME}", "credit",
+                  color=_DG_COLORS["credit"], anchor="end"))
+    return {"w": W, "h": int(y + pad - 10), "elements": els}
+
+
+def diagram_svg(layout: dict) -> str:
+    """The layout as one self-contained SVG, on a single line so it survives
+    Markdown's raw-HTML handling."""
+    W, H = layout["w"], layout["h"]
+    stroke = _DG_COLORS["accent"]
+    out = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" '
+        f'viewBox="0 0 {W} {H}" role="img" font-family="Arial, Helvetica, sans-serif">',
+        '<defs><marker id="dgArrow" viewBox="0 0 10 10" refX="9" refY="5" '
+        'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
+        f'<path d="M0,0 L10,5 L0,10 z" fill="{stroke}"/></marker></defs>',
+        f'<rect x="0" y="0" width="{W}" height="{H}" fill="{_DG_COLORS["bg"]}"/>',
+    ]
+    for e in layout["elements"]:
+        k = e["kind"]
+        if k == "rect":
+            out.append(f'<rect x="{e["x"]:.1f}" y="{e["y"]:.1f}" width="{e["w"]:.1f}" '
+                       f'height="{e["h"]:.1f}" rx="{e["rx"]}" fill="{e["fill"] or "none"}" '
+                       f'stroke="{e["stroke"] or "none"}" stroke-width="2"/>')
+        elif k == "text":
+            weight = ' font-weight="bold"' if e["bold"] else ""
+            out.append(f'<text x="{e["x"]:.1f}" y="{e["y"]:.1f}" font-size="{e["size"]}" '
+                       f'text-anchor="{e["anchor"]}" fill="{e["color"]}"{weight}>'
+                       f'{_svg_escape(e["text"])}</text>')
+        elif k == "arrow":
+            dash = ' stroke-dasharray="7 5"' if e["dashed"] else ""
+            out.append(f'<line x1="{e["x1"]:.1f}" y1="{e["y1"]:.1f}" x2="{e["x2"]:.1f}" '
+                       f'y2="{e["y2"]:.1f}" stroke="{stroke}" stroke-width="2.5"{dash} '
+                       'marker-end="url(#dgArrow)"/>')
+            if e["label"]:
+                mx, my = (e["x1"] + e["x2"]) / 2, (e["y1"] + e["y2"]) / 2 - 8
+                out.append(f'<text x="{mx:.1f}" y="{my:.1f}" font-size="{_DG_FONT["edge"]}" '
+                           f'text-anchor="middle" fill="{_DG_COLORS["muted"]}">'
+                           f'{_svg_escape(e["label"])}</text>')
+        elif k == "path":
+            pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in e["points"])
+            out.append(f'<polyline points="{pts}" fill="none" stroke="{stroke}" '
+                       'stroke-width="2.5" marker-end="url(#dgArrow)"/>')
+            if e.get("label"):
+                (x1, y1), (x2, y2) = e["points"][1], e["points"][2]
+                out.append(f'<text x="{(x1 + x2) / 2:.1f}" y="{y1 + 17:.1f}" '
+                           f'font-size="{_DG_FONT["edge"]}" text-anchor="middle" '
+                           f'fill="{_DG_COLORS["muted"]}">{_svg_escape(e["label"])}</text>')
+    out.append("</svg>")
+    return "".join(out)
+
+
+def _png_arrow(draw, pts: list, scale: float, color: str):
+    draw.line(pts, fill=color, width=max(2, int(2.5 * scale)), joint="curve")
+    (x1, y1), (x2, y2) = pts[-2], pts[-1]
+    dx, dy = x2 - x1, y2 - y1
+    length = (dx * dx + dy * dy) ** 0.5 or 1.0
+    ux, uy = dx / length, dy / length
+    size = 11 * scale
+    base_x, base_y = x2 - ux * size, y2 - uy * size
+    px, py = -uy * size * 0.55, ux * size * 0.55
+    draw.polygon([(x2, y2), (base_x + px, base_y + py), (base_x - px, base_y - py)], fill=color)
+
+
+def diagram_png(layout: dict, path: Path, scale: float = 1.5) -> bool:
+    """Rasterise the layout with Pillow. False when Pillow is missing, in which
+    case the SVG stands alone."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        print("  Pillow not installed; diagram PNG skipped, SVG still written.")
+        return False
+    W, H = int(layout["w"] * scale), int(layout["h"] * scale)
+    im = Image.new("RGB", (W, H), _DG_COLORS["bg"])
+    draw = ImageDraw.Draw(im)
+    fonts: dict = {}
+
+    def font(size: int, bold: bool):
+        key = (size, bold)
+        if key not in fonts:
+            px = int(size * scale)
+            face, faux_bold = None, bold
+            for name in (("arialbd.ttf", "DejaVuSans-Bold.ttf") if bold
+                         else ("arial.ttf", "DejaVuSans.ttf")):
+                try:
+                    face, faux_bold = ImageFont.truetype(name, px), False
+                    break
+                except Exception:
+                    continue
+            if face is None:
+                face = ImageFont.load_default(size=px)   # Pillow's bundled scalable face
+            fonts[key] = (face, faux_bold)
+        return fonts[key]
+
+    S = lambda v: v * scale
+    for e in layout["elements"]:
+        k = e["kind"]
+        if k == "rect":
+            draw.rounded_rectangle(
+                [S(e["x"]), S(e["y"]), S(e["x"] + e["w"]), S(e["y"] + e["h"])],
+                radius=S(e["rx"]), fill=e["fill"], outline=e["stroke"],
+                width=max(2, int(2 * scale)) if e["stroke"] else 0)
+        elif k == "text":
+            face, faux = font(e["size"], e["bold"])
+            draw.text((S(e["x"]), S(e["y"])), e["text"], font=face, fill=e["color"],
+                      anchor={"middle": "ms", "start": "ls", "end": "rs"}[e["anchor"]],
+                      stroke_width=1 if faux else 0, stroke_fill=e["color"])
+        elif k == "arrow":
+            _png_arrow(draw, [(S(e["x1"]), S(e["y1"])), (S(e["x2"]), S(e["y2"]))],
+                       scale, _DG_COLORS["accent"])
+            if e["label"]:
+                face, _ = font(_DG_FONT["edge"], False)
+                draw.text((S((e["x1"] + e["x2"]) / 2), S((e["y1"] + e["y2"]) / 2 - 8)),
+                          e["label"], font=face, fill=_DG_COLORS["muted"], anchor="ms")
+        elif k == "path":
+            _png_arrow(draw, [(S(x), S(y)) for x, y in e["points"]], scale, _DG_COLORS["accent"])
+            if e.get("label"):
+                (x1, y1), (x2, _) = e["points"][1], e["points"][2]
+                face, _ = font(_DG_FONT["edge"], False)
+                draw.text((S((x1 + x2) / 2), S(y1 + 17)), e["label"], font=face,
+                          fill=_DG_COLORS["muted"], anchor="ms")
+    im.save(path, "PNG", optimize=True)
+    return True
+
+
+def render_diagrams(content: str, slug: str, output_dir: Path) -> dict[str, dict]:
+    """Every [DIAGRAM: ...] marker -> a spec from Claude -> SVG and PNG on disk.
+    Returns marker -> {alt, caption, svg, png, svg_name}."""
+    markers = list(DIAGRAM_MARKER_RE.finditer(content))
+    if not markers:
+        print("  No [DIAGRAM: ...] markers found in article.")
+        return {}
+    log("STEP 8.5", f"Drawing {len(markers)} diagram(s)")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out = {}
+    for n, m in enumerate(markers, 1):
+        title, shows = m.group(1).strip(), m.group(2).strip()
+        spec = generate_diagram_spec(title, shows, _section_around(content, m.start()))
+        if not spec:
+            print(f"  Diagram {n}: no usable spec; the marker will be dropped.")
+            continue
+        layout = layout_diagram(spec)
+        svg_name, png_name = f"{slug}_diagram_{n}.svg", f"{slug}_diagram_{n}.png"
+        svg = diagram_svg(layout)
+        (output_dir / svg_name).write_text(svg, encoding="utf-8")
+        png_ok = diagram_png(layout, output_dir / png_name)
+        parts = len(spec["nodes"]) or len(spec["columns"])
+        out[m.group(0)] = {
+            "alt": spec["title"] or title, "caption": spec["caption"] or shows,
+            "type": spec["type"], "svg": svg, "svg_name": svg_name,
+            "png": png_name if png_ok else None,
+        }
+        print(f"  Diagram {n}: {spec['type']} with {parts} parts -> "
+              f"{png_name if png_ok else svg_name}")
+    return out
+
+
+def inject_diagrams(content: str, diagrams: dict[str, dict]) -> str:
+    """Replace each marker with an image block that points at the rendered file.
+    The caption line starts with *Diagram: so the HTML and DOCX writers can tell
+    it from a sourced photo."""
+    for marker, d in diagrams.items():
+        src = d["png"] or d["svg_name"]
+        content = content.replace(marker, f"\n![{d['alt']}]({src})\n*Diagram: {d['caption']}*\n")
+    return content
 
 
 # ---------------------------------------------------------------------------
@@ -1209,6 +1883,7 @@ Key Takeaways (must be featured prominently):
 Build the sections around the evidence that actually exists in the fact pack. A
 section the pack cannot support with at least one specific should be cut or
 reframed, not padded. Note next to each section which fact ids it will use.
+{LEVELS_BLOCK}
 {date_context()}
 
 SEO KEYWORD STRATEGY
@@ -1221,9 +1896,14 @@ OUTLINE REQUIREMENTS
 Produce a detailed markdown outline with:
 1. H1 (the article title)
 2. Introduction section ({profile['intro']} words)
-3. {profile['sections']} H2 main sections, each with {profile['subsections']} H3 subsections
+3. {profile['sections']} H2 main sections, each with {profile['subsections']} H3 subsections,
+   arranged as the three LEVELS above: the first H2 is Level 1, the last H2 before
+   the FAQ is Level 3, the rest are Level 2. Write "Level: 1", "Level: 2" or
+   "Level: 3" directly under each H2 so the writer knows the altitude.
 4. For each section: brief description of what to cover (1–2 sentences)
-5. {profile['images']} image placement markers formatted as:
+5. Exactly one diagram marker, inside the Level 1 section, formatted as:
+   [DIAGRAM: <title> | Shows: <the one thing the picture must make obvious>]
+   and {profile['images']} image placement markers elsewhere (never in Level 1), formatted as:
    [IMAGE: <descriptive alt text> | Query: <google image search query>]
 6. At least one comparison table, placed in whichever section it genuinely belongs
    to. Note its columns in the outline. Tables are the passage an answer engine is
@@ -1259,7 +1939,7 @@ def write_content(title: str, keywords: str, outline: str, research: dict,
     secondary_kws = ", ".join(kw_data.get("secondary_keywords", []))
 
     system = f"""You are an expert content writer with a point of view. Write clear, structured, value-driven articles that rank well in search engines. Use active voice, short paragraphs (3–4 sentences max), and cite sources inline as 'Source: https://...' when referencing external data or studies. You never state a figure you cannot cite, and you never hedge a figure you can. {date_context()}
-{style_block(research.get("style_samples", ""))}"""
+{style_block(research.get("style_samples", ""), research.get("voice_profile", ""))}"""
 
     prompt = f"""Write a complete, high-quality SEO article based on the inputs below.
 
@@ -1273,7 +1953,7 @@ Outline to follow strictly:
 Key Takeaways (must be reflected in writing):
 {key_takeaways}
 {fact_pack_text(research)}
-{take_block(research.get("take", ""))}
+{take_block(research.get("take", ""))}{LEVELS_BLOCK}
 WRITING CONTEXT
 Writing Style: {research.get("writing_style")}
 Writing Tone: {research.get("writing_tone")}
@@ -1287,7 +1967,7 @@ INSTRUCTIONS
 2. Keep each paragraph to 3–4 sentences maximum.
 3. Integrate keywords naturally — no stuffing.
 4. Cite sources inline where relevant: "Source: https://..."
-5. Preserve all [IMAGE: ...] markers from the outline exactly as-is — do not remove them.
+5. Preserve all [IMAGE: ...] and [DIAGRAM: ...] markers from the outline exactly as-is — do not remove them.
 6. Include the FAQ section and Conclusion from the outline. Every FAQ question must
    be an H3 ending in a question mark, and its answer must make sense quoted on its
    own - those pairs become FAQPage structured data.
@@ -1302,6 +1982,12 @@ INSTRUCTIONS
     "typically", "approximately" or "several hundred" where a real number exists.
 12. The AUTHOR'S TAKE items are not optional and not to be neutralised. Write them
     in first person where they belong.
+13. Teach in layers, as the outline marks them. Level 1 is the simple version: an
+    instructor talking to a smart beginner, one analogy, one concrete example, every
+    term defined in plain words on first use, sentences mostly under 15 words. Level 2
+    is for practitioners. Level 3 is where it gets hard, and where most of the
+    AUTHOR'S TAKE belongs. Do not write "Level: n" into the article itself.
+14. Keep the [DIAGRAM: ... | Shows: ...] marker exactly where the outline puts it.
 
 Write the full article now. Output the article content ONLY."""
 
@@ -1403,7 +2089,7 @@ _HUMANIZER_PATTERNS = """
 """
 
 
-def humanize_content(content: str) -> str:
+def humanize_content(content: str, research: dict | None = None) -> str:
     log("STEP 6", "Humanizing content (pass 1 — pattern removal)")
 
     system = (
@@ -1416,7 +2102,7 @@ def humanize_content(content: str) -> str:
 
 STRUCTURAL CONSTRAINTS (never break these):
 - Preserve ALL markdown headings (H1, H2, H3) exactly as written
-- Preserve ALL [IMAGE: alt text | Query: ...] markers exactly — do not move, rename, or remove them
+- Preserve ALL [IMAGE: ...] and [DIAGRAM: ...] markers exactly — do not move, rename, or remove them
 - Preserve ALL "Source: ..." citations exactly
 - Keep short paragraphs (3–4 sentences max)
 - Do NOT remove any sections or change the article structure
@@ -1425,6 +2111,7 @@ STRUCTURAL CONSTRAINTS (never break these):
 - Do NOT soften, hedge or remove first-person opinions ("I think", "in my experience"):
   those are the author's own and are the point
 
+{voice_block((research or {}).get("voice_profile", ""))}
 AI PATTERN CHECKLIST — fix every instance you find:
 {_HUMANIZER_PATTERNS}
 
@@ -1445,11 +2132,11 @@ QUESTION 1: What still makes this obviously AI-generated? List the remaining tel
 
 QUESTION 2: Now rewrite the article fixing those remaining tells. Apply the same structural constraints:
 - Preserve ALL markdown headings (H1, H2, H3) exactly
-- Preserve ALL [IMAGE: ...] markers exactly
+- Preserve ALL [IMAGE: ...] and [DIAGRAM: ...] markers exactly
 - Preserve ALL "Source: ..." citations exactly
 - Keep paragraphs to 3–4 sentences max
 - Do NOT add new factual claims or remove sections
-
+{voice_block((research or {}).get("voice_profile", ""))}
 Output format — use these exact labels:
 REMAINING TELLS:
 <bullet list or "None found">
@@ -1519,7 +2206,7 @@ synonym should stay. Judge each one, then fix the genuine ones.
 STRUCTURAL CONSTRAINTS (never break these):
 - Preserve ALL markdown headings unless the finding is that a heading is title-cased,
   in which case change only its capitalisation
-- Preserve ALL [IMAGE: alt text | Query: ...] markers exactly
+- Preserve ALL [IMAGE: ...] and [DIAGRAM: ...] markers exactly
 - Preserve ALL "Source: ..." citations exactly
 - Do NOT add new factual claims, and do NOT remove sections
 - Do NOT rewrite sentences that contain none of the phrases above, except where the
@@ -1554,7 +2241,7 @@ def _strip_em_dashes(text: str) -> str:
     result = []
     for line in lines:
         stripped = line.lstrip()
-        if (stripped.startswith("[IMAGE:")
+        if (stripped.startswith(("[IMAGE:", "[DIAGRAM:"))
                 or stripped.startswith("*Source:")
                 or stripped.startswith("Source:")
                 or stripped == "---"):
@@ -1701,7 +2388,7 @@ def _scannable_lines(text: str) -> list[str]:
             continue
         if in_code:
             continue
-        if (stripped.startswith("[IMAGE:")
+        if (stripped.startswith(("[IMAGE:", "[DIAGRAM:"))
                 or stripped.startswith("Source:")
                 or stripped.startswith("*Source:")
                 or stripped.startswith("> Source:")):
@@ -2009,9 +2696,11 @@ def strip_orphan_image_markers(article: str) -> str:
     Markers without the "| Query:" half never match the resolver and used to
     ship verbatim in the body ("[IMAGE: Difficulty progression chart ...]").
     """
-    cleaned = re.sub(r"^[ \t]*\[IMAGE:[^\]\n]*\][ \t]*\n?", "", article, flags=re.MULTILINE)
-    cleaned = re.sub(r"\[IMAGE:[^\]\n]*\]", "", cleaned)
-    removed = article.count("[IMAGE:") - cleaned.count("[IMAGE:")
+    cleaned = re.sub(r"^[ \t]*\[(?:IMAGE|DIAGRAM):[^\]\n]*\][ \t]*\n?", "", article,
+                     flags=re.MULTILINE)
+    cleaned = re.sub(r"\[(?:IMAGE|DIAGRAM):[^\]\n]*\]", "", cleaned)
+    removed = (article.count("[IMAGE:") + article.count("[DIAGRAM:")
+               - cleaned.count("[IMAGE:") - cleaned.count("[DIAGRAM:"))
     if removed:
         print(f"  Orphan image markers removed: {removed}")
     return re.sub(r"\n{3,}", "\n\n", cleaned)
@@ -2103,7 +2792,7 @@ def parse_faq(article: str) -> list[dict]:
                 faqs.append({"question": question, "answer": " ".join(answer).strip()})
             question, answer = clean(bold_q.group(1)), []
             continue
-        if question and line.strip() and not line.strip().startswith(("[IMAGE:", "Source:", "!")):
+        if question and line.strip() and not line.strip().startswith(("[IMAGE:", "[DIAGRAM:", "Source:", "!")):
             answer.append(line.strip())
 
     if question and answer:
@@ -2136,7 +2825,7 @@ def build_jsonld(slug: str, article: str, meta: dict, images: dict,
     if canonical:
         article_node["url"] = canonical
         article_node["mainEntityOfPage"] = {"@type": "WebPage", "@id": canonical}
-    image_urls = [v["url"] for v in images.values() if v.get("url")]
+    image_urls = [v["url"] for v in images.values() if str(v.get("url", "")).startswith("http")]
     if image_urls:
         article_node["image"] = image_urls[:6]
     citations = extract_sources(article)
@@ -2545,7 +3234,8 @@ def wrap_with_branding(article: str, edition: int) -> str:
     return intro + article + sources + AUTHOR_CTA
 
 
-def write_outputs(slug: str, article: str, meta: dict, images: dict, output_dir: Path, edition: int = 0):
+def write_outputs(slug: str, article: str, meta: dict, images: dict, output_dir: Path,
+                  edition: int = 0, diagrams: dict | None = None):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Wrap with author branding + sources
@@ -2579,7 +3269,7 @@ def write_outputs(slug: str, article: str, meta: dict, images: dict, output_dir:
 
     # HTML export
     html_path = _write_html(slug, branded, output_dir, meta=meta, images=images,
-                            generated_at=generated_at)
+                            generated_at=generated_at, diagrams=diagrams)
     print(f"  HTML saved:     {html_path}")
     print(f"  Structured data: Article"
           + (f" + FAQPage ({len(faqs)} questions)" if faqs else " (no FAQ found)")
@@ -2608,7 +3298,8 @@ def _esc(text: str) -> str:
 
 
 def _write_html(slug: str, branded: str, output_dir: Path, meta: dict | None = None,
-                images: dict | None = None, generated_at: str = "") -> Path:
+                images: dict | None = None, generated_at: str = "",
+                diagrams: dict | None = None) -> Path:
     try:
         import markdown as md_lib
     except ImportError:
@@ -2626,10 +3317,27 @@ def _write_html(slug: str, branded: str, output_dir: Path, meta: dict | None = N
             f'</figcaption></figure>'
         )
 
+    # A diagram block carries the SVG inline: crisp at any width, no file to host.
+    by_src = {(d.get("png") or d.get("svg_name")): d for d in (diagrams or {}).values()}
+
+    def replace_diagram_block(m):
+        alt, src, cap = m.group(1), m.group(2), m.group(3).strip().rstrip("*").strip()
+        d = by_src.get(src)
+        inner = d["svg"] if d else (
+            f'<img src="{src}" alt="{_esc(alt)}" style="max-width:100%;height:auto;">')
+        return (f'<figure class="diagram">{inner}'
+                f'<figcaption style="font-size:0.85em;color:#555;">Diagram: {cap}</figcaption>'
+                f'</figure>')
+
+    with_diagrams = re.sub(
+        r'!\[([^\]]*)\]\(([^\)]+)\)\n\*Diagram:([^\n]+)\*',
+        replace_diagram_block,
+        branded,
+    )
     src_patched = re.sub(
         r'!\[([^\]]*)\]\(([^\)]+)\)\n\*Source:([^\n]+)\*',
         replace_image_block,
-        branded,
+        with_diagrams,
     )
     html_body = md_lib.markdown(src_patched, extensions=['tables', 'fenced_code'])
     html_body = _linkify(html_body)
@@ -2637,7 +3345,8 @@ def _write_html(slug: str, branded: str, output_dir: Path, meta: dict | None = N
     canonical = f"{SITE_URL}/{slug}" if SITE_URL else ""
     seo_title = (meta or {}).get("title") or slug.replace("-", " ").title()
     description = (meta or {}).get("description") or ""
-    og_image = next((v["url"] for v in (images or {}).values() if v.get("url")), "")
+    og_image = next((v["url"] for v in (images or {}).values()
+                     if str(v.get("url", "")).startswith("http")), "")
 
     head = [
         '<meta charset="utf-8">',
@@ -2686,6 +3395,7 @@ def _write_html(slug: str, branded: str, output_dir: Path, meta: dict | None = N
   blockquote {{ border-left: 4px solid #ccc; margin: 0; padding: 0.5em 1em; color: #555; }}
   figure {{ margin: 1.5em 0; }}
   figcaption {{ margin-top: 6px; }}
+  figure.diagram svg {{ max-width: 100%; height: auto; }}
   code {{ background: #f4f4f4; padding: 2px 5px; border-radius: 3px; font-size: 0.9em; }}
   ol li {{ margin-bottom: 4px; word-break: break-all; }}
 </style>
@@ -2737,7 +3447,19 @@ def _write_docx(slug: str, branded: str, output_dir: Path) -> Path:
             else:
                 r = para.add_run(part); set_arial(r)
 
-    def embed_image(img_url, alt, src_txt):
+    def embed_image(img_url, alt, src_txt, kind="Source"):
+        # A diagram the pipeline drew lives next to the article, not on the web.
+        local = output_dir / img_url
+        if not img_url.startswith("http") and local.exists():
+            try:
+                doc.add_paragraph().add_run().add_picture(str(local), width=Inches(5.5))
+                cap = doc.add_paragraph()
+                cap.paragraph_format.space_after = Pt(12)
+                r1 = cap.add_run(f"{kind}: {src_txt}"); r1.italic = True
+                r1.font.color.rgb = RGBColor(0x55,0x55,0x55); set_arial(r1, Pt(9))
+                return
+            except Exception:
+                pass
         try:
             resp = req.get(img_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
             resp.raise_for_status()
@@ -2766,11 +3488,13 @@ def _write_docx(slug: str, branded: str, output_dir: Path) -> Path:
         img_m = re.match(r'!\[([^\]]*)\]\(([^\)]+)\)', line.strip())
         if img_m:
             alt, url = img_m.group(1), img_m.group(2)
-            src_txt = url
-            if i+1 < len(lines) and lines[i+1].strip().startswith('*Source:'):
-                src_txt = re.sub(r'^\*Source:\s*', '', lines[i+1].strip()).rstrip('*'); i += 1
-            embed_image(url, alt, src_txt); i += 1; continue
-        if line.strip().startswith('*Source:'): i += 1; continue
+            src_txt, kind = url, "Source"
+            cap_m = (re.match(r'^\*(Source|Diagram):\s*(.*?)\*?$', lines[i+1].strip())
+                     if i+1 < len(lines) else None)
+            if cap_m:
+                kind, src_txt = cap_m.group(1), cap_m.group(2); i += 1
+            embed_image(url, alt, src_txt, kind); i += 1; continue
+        if line.strip().startswith(('*Source:', '*Diagram:')): i += 1; continue
         if line.startswith('*') and line.endswith('*') and not line.startswith('**'):
             p = doc.add_paragraph(); r = p.add_run(line.strip('*')); r.italic = True; set_arial(r); i += 1; continue
         if line.startswith('# ') and not line.startswith('## '):
@@ -2869,6 +3593,8 @@ What is currently ranking for this keyword:
 {serp_context}
 {fact_pack_text(research)}
 {take_block(research.get("take", ""))}
+{voice_block(research.get("voice_profile", ""))}
+{LEVELS_BLOCK}
 {date_context()}
 
 WHAT TO CHECK
@@ -2886,9 +3612,16 @@ WHAT TO CHECK
    past-year projection presented as a forecast; "in {CURRENT_YEAR - 1}" used to mean now.
 9. VOICE - If an AUTHOR'S TAKE is given above, every item must appear in the body in
    first person with its substance intact. A missing or neutralised item is high
-   severity. If no take is given, skip this check.
+   severity. "I think", "I'd" and "in my experience" on a take item are the
+   required first person, never a hedge to flag. If no take is given, skip this check. Where THE AUTHOR'S VOICE is
+   described above, flag passages that read nothing like it (medium).
+10. LAYERING - The first H2 after the introduction must be the simple version: a
+   beginner could follow it, it has an analogy and a concrete example, it defines
+   its terms, and it holds the [DIAGRAM: ...] marker. Flag jargon left undefined
+   there, sentences a newcomer would have to reread, and a Level 3 section that
+   never rises above what a beginner's guide would say.
 3. STRUCTURE - Sections in the outline that are missing, merged, or renamed beyond
-   recognition. Count the [IMAGE: ... | Query: ...] markers still present and compare
+   recognition. Count the [IMAGE: ...] and [DIAGRAM: ...] markers still present and compare
    with the outline.
 4. AI TELLS - Patterns that survived editing: significance inflation, vague attribution
    ("experts say"), participle padding, title case headings, em dashes inside headings,
@@ -2912,7 +3645,7 @@ Return ONLY valid JSON in exactly this shape:
   "issues": [
     {{
       "id": "i1",
-      "category": "factual|citation|structure|ai_tell|coverage|contradiction|precision|date|voice",
+      "category": "factual|citation|structure|ai_tell|coverage|contradiction|precision|date|voice|layering",
       "severity": "high|medium|low",
       "quote": "<the exact phrase or heading from the article, under 15 words>",
       "problem": "<what is wrong, one sentence>",
@@ -3064,15 +3797,16 @@ def apply_fixes(article: str, upheld: list, research: dict | None = None) -> str
     )
     evidence = fact_pack_text(research) if research else ""
     take = take_block(research.get("take", "")) if research else ""
+    voice = voice_block(research.get("voice_profile", "")) if research else ""
 
     prompt = f"""Revise the article to address the findings below. Change nothing else.
 
 FINDINGS TO ADDRESS
 {fix_block}
-{evidence}{take}
+{evidence}{take}{voice}
 STRUCTURAL CONSTRAINTS (never break these):
 - Preserve ALL markdown headings unless a finding explicitly asks you to change one
-- Preserve ALL [IMAGE: alt text | Query: ...] markers exactly
+- Preserve ALL [IMAGE: ...] and [DIAGRAM: ...] markers exactly
 - Preserve ALL "Source: ..." citations except where a finding says one is wrong
 - Keep paragraphs to 3-4 sentences
 - Do NOT rewrite passages no finding mentions
@@ -3299,7 +4033,7 @@ def review_stats(record: dict) -> dict:
 def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: str = "",
         verify: bool = True, verify_rounds: int = 2, words: str = "default",
         linkedin: bool = False, video: bool = False, thumbnail: bool = False,
-        take: str = "", facts: bool = True):
+        take: str = "", facts: bool = True, diagram: bool = True):
     profile = length_profile(words)
     take = (take or "").strip()
     if not take:
@@ -3327,6 +4061,7 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
     research = serp_research(title, keywords, intent=intent)
     research["take"] = take
     research["style_samples"] = load_style_samples()
+    research["voice_profile"] = build_voice_profile(research["style_samples"])
 
     # Step 1.5: Fact pack - open the primary pages and pin every specific to a URL.
     if facts:
@@ -3350,7 +4085,19 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
                             profile=profile)
 
     # Step 6: Humanize
-    humanized = humanize_content(content)
+    humanized = humanize_content(content, research)
+
+    # Step 6.2: the Level 1 section has to read like an instructor. Measured,
+    # then rewritten on its own if it came out dense.
+    explainer = check_explainer(humanized)
+    if not explainer.get("found"):
+        print("  WARNING: no [DIAGRAM: ...] marker survived, so there is no Level 1 section to check.")
+    elif explainer.get("sentences"):
+        print(f"  Level 1 section: {explainer['sentences']} sentences, mean {explainer['mean']} "
+              f"words, longest {explainer['longest']}"
+              + ("" if explainer["ok"] else " - too dense for a beginner"))
+        if not explainer["ok"]:
+            humanized = simplify_explainer(humanized, explainer, research)
 
     # Step 6.4: Direct-answer block. Inserted before verification, so the auditor
     # checks it against the brief like any other passage.
@@ -3371,15 +4118,30 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
     # Step 7: Meta
     meta = generate_meta(refined_title, keywords, humanized)
 
+    slug = slugify(refined_title)
+
     # Step 8: Image Search
     images = search_images(humanized, research)
 
-    # Inject images into article, then drop any marker that found no image
-    final_article = strip_orphan_image_markers(inject_images(humanized, images))
+    # Step 8.5: Diagrams, drawn from the article's own [DIAGRAM: ...] markers
+    if diagram:
+        diagrams = render_diagrams(humanized, slug, output_dir)
+    else:
+        log("STEP 8.5", "Diagrams skipped (--no-diagram)")
+        diagrams = {}
 
-    # Write outputs
-    slug = slugify(refined_title)
-    md_path, meta_path = write_outputs(slug, final_article, meta, images, output_dir, edition=edition)
+    # Inject images and diagrams, then drop any marker that found nothing
+    final_article = strip_orphan_image_markers(
+        inject_diagrams(inject_images(humanized, images), diagrams))
+
+    # Write outputs. Diagrams ride along in the image list so _meta.json and the
+    # callback payload know about them.
+    all_images = dict(images)
+    for marker, d in diagrams.items():
+        all_images[marker] = {"alt": d["alt"], "url": d["png"] or d["svg_name"],
+                              "source": "generated diagram", "query": ""}
+    md_path, meta_path = write_outputs(slug, final_article, meta, all_images, output_dir,
+                                       edition=edition, diagrams=diagrams)
 
     # The evidence the article was held to, next to the article, so a reviewer
     # can check any figure without re-running the research.
@@ -3418,6 +4180,7 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
     print(f"  Title      : {refined_title}")
     print(f"  Word count : {word_count:,}")
     print(f"  Images     : {len(images)}")
+    print(f"  Diagrams   : {len(diagrams)}")
     print(f"  Article    : {md_path}")
     print(f"  Meta JSON  : {meta_path}")
     fp = research.get("fact_pack", {})
@@ -3565,6 +4328,14 @@ def main():
         ),
     )
     parser.add_argument(
+        "--no-diagram",
+        action="store_true",
+        help=(
+            "Skip the Step 8.5 diagram. The [DIAGRAM: ...] marker in the Level 1 "
+            "section is then dropped instead of drawn."
+        ),
+    )
+    parser.add_argument(
         "--keywords",
         default=None,
         help=(
@@ -3684,6 +4455,7 @@ def main():
             thumbnail=args.thumbnail,
             take=read_take(args.take),
             facts=not args.no_facts,
+            diagram=not args.no_diagram,
         )
     except ClaudeError as e:
         # Flattened to one line so the web UI, which reads the log line by line,

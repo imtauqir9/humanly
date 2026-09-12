@@ -29,7 +29,8 @@ The pipeline runs in 10 stages: live SERP research, title refinement, key takeaw
 ## What it does
 
 - **Deep research first** — pulls live Google search results via SerpAPI before writing a single word. The agent reads what's ranking, identifies gaps, and builds the article around those findings.
-- **Learns from your sample articles** — drop your best articles into `sample-articles/` and the agent uses them as style references. The output reads like you wrote it, not like ChatGPT.
+- **Learns from your sample articles** — drop your best articles into `sample-articles/` and the agent uses them as style references, and builds a short *voice profile* from them (cached, rebuilt when they change) that every prose-touching step is held to. The output reads like you wrote it, not like ChatGPT.
+- **Teaches in layers, with a diagram it draws itself** — every article opens with the simple version for a newcomer (analogy, example, terms defined, a real diagram), then climbs to how it works, then to where it gets hard. The diagram is rendered by the app, not searched for.
 - **Finds real images** — searches Google Images (with SerpAPI) or Unsplash and embeds them directly into the DOCX. No placeholder images.
 - **Humanization pass built in** — after writing, the agent rewrites the draft to remove AI patterns before you ever see it. The last pass is measured, not vibed: a scanner counts the tells that survived and hands the model the exact phrase list to repair.
 - **The draft has to survive an argument** — a second model audits the finished article against the brief it was written from. The writer can dispute findings it thinks are wrong, a third model settles what stays contested, and only what survives gets applied.
@@ -59,10 +60,13 @@ Topic + Intent
 3. Key Takeaways      — identifies what the article must cover to outrank competitors
       │
       ▼
-4. Outline            — structures the article before writing begins
+4. Outline            — structures the article in three levels: the simple version
+      │                 (with a [DIAGRAM:] marker), how it actually works, where it
+      │                 gets hard
       │
       ▼
-5. Write              — full draft grounded in research and your sample articles
+5. Write              — full draft grounded in research, your sample articles and
+      │                 the voice profile built from them
       │
       ▼
 6. Humanize           — strips AI patterns, rewrites to match your voice
@@ -73,6 +77,9 @@ Topic + Intent
       │           title-cased headings, inline-header bullets, em dashes,
       │           uniform sentence length — and the model repairs the named
       │           phrases only. If the count goes up, pass 2 is kept.
+      ▼
+6.2 Level 1 check     — measures the simple version's sentences (mean ≤ 17 words,
+      │                 none over 30) and rewrites just that section if it is dense
       ▼
 6.4 Answer block      — a 40–60 word extractable answer placed under the H1,
       │                 written to survive being quoted on its own
@@ -93,7 +100,12 @@ Topic + Intent
 8. Images             — finds real images via Google Images or Unsplash, embeds in DOCX
       │
       ▼
-Output: .md  .html  .docx  _meta.json
+8.5 Diagram           — turns the Level 1 [DIAGRAM:] marker into a spec (flow, cycle,
+      │                 layers or compare) and renders it: SVG inline in the HTML,
+      │                 PNG in the Markdown and the DOCX. No browser, no fonts to install.
+      │
+      ▼
+Output: .md  .html  .docx  _meta.json  _diagram_1.png/.svg
 ```
 
 ---
@@ -180,6 +192,7 @@ python seo_writer.py "Semantic Caching for LLMs" --output-dir ./articles --editi
 | `--verify-rounds` | Maximum audit/fix rounds before accepting the article (default: `2`) |
 | `--take` | Your own positions and experiences, one per line (or a path to a text file). Each is written into the article in first person and the auditor checks it survived. The run warns loudly when this is missing, because it is the single biggest reason an article reads as generic |
 | `--no-facts` | Skip the Step 1.5 fact pack. The writer is then forbidden from stating any price, date, version or statistic |
+| `--no-diagram` | Skip the Step 8.5 diagram. The `[DIAGRAM:]` marker in the Level 1 section is dropped instead of drawn |
 | `--words` | Article length: `default` (2,500–3,500), `2000`, or `1000` |
 | `--linkedin` | Also write a LinkedIn post from the finished article |
 | `--video` | Also write a 2–3 minute video script, timed, with a visual per beat |
@@ -212,6 +225,43 @@ Two related fixes shipped with this: the writer now actually receives its system
 prompt (it was built and never sent), and the sample articles in
 `sample-articles/` are now actually loaded as style exemplars (the README said
 they were; the code did not do it).
+
+---
+
+## Teach in layers, with a diagram the app draws
+
+A flat article pitches every section at the same reader, which is nobody. Every
+article now climbs three levels, and the outline, the writer and the auditor all
+hold to the shape:
+
+| Level | Who it is for | What it must contain |
+|---|---|---|
+| 1 — The simple version | Someone smart who has never met the topic | One everyday analogy, one concrete example, every term defined in plain words on first use, sentences mostly under 15 words, and the diagram |
+| 2 — How it actually works | A practitioner | The moving parts, the numbers from the fact pack, the comparison table, the tradeoffs |
+| 3 — Where it gets hard | Someone who has done it | What experienced people argue about, where it breaks, what you have seen first-hand — most of `--take` lands here |
+
+Level 1 is checked by measurement, not by asking: if its sentences average more
+than 17 words or any runs past 30, that one section is rewritten before the
+auditor sees it. The auditor then has a `layering` category of its own — jargon
+left undefined in Level 1, or a Level 3 that never rises above a beginner's guide.
+
+**The diagram.** The Level 1 section carries one marker,
+`[DIAGRAM: <title> | Shows: <the one thing the picture must make obvious>]`.
+After verification, Claude turns it into a small structured spec — a `flow` of
+steps, a `cycle`, stacked `layers`, or side-by-side `compare` columns; never
+free-form drawing — and the app renders that spec itself: an SVG inlined in the
+HTML (crisp at any width) and a PNG for the Markdown and the DOCX. It needs only
+Pillow, which ships its own scalable font, so it works on Fly's slim image with
+nothing else installed. A stock photo next to "the simple version" explained
+nothing; this shows the mechanism.
+
+**Your voice, described.** The sample articles were only ever shown to the
+writer, and only as raw text. On first run the app reads them once and writes a
+short voice profile — sentence rhythm, how the reader is addressed, how terms
+are handled, what you never do — cached at `sample-articles/.voice_profile.json`
+and rebuilt when the samples change. That profile now goes to every call that
+touches the prose: writer, both humanizer passes, the Level 1 rewrite, the fix
+pass, and the auditor, which flags passages that read nothing like it.
 
 ---
 
@@ -310,7 +360,7 @@ The callback payload:
 | `external_id`, `job_id`, `request` | What you sent, echoed back |
 | `slug`, `meta`, `images`, `word_count` | SEO title, description, slug and the image list from `_meta.json` |
 | `article_md`, `linkedin_md`, `video_script_md` | The article and the extras, inline |
-| `files` | Download links for `md`, `html`, `docx`, `meta`, `linkedin`, `video`, `thumbnail`, `review_md`, `review_json`, `facts`, `usage` |
+| `files` | Download links for `md`, `html`, `docx`, `meta`, `linkedin`, `video`, `thumbnail`, `review_md`, `review_json`, `facts`, `diagram_png`, `diagram_svg`, `usage` |
 | `usage` | Calls, tokens and cost for this run |
 
 The links in `files` go through `/dl/<expiry>/<signature>/<file>` — signed
@@ -448,6 +498,7 @@ Each run produces these files in `./output/`:
 | `<slug>.docx` | Word document with embedded images |
 | `<slug>_meta.json` | SEO title, meta description, slug, image URLs |
 | `<slug>_facts.json` | The fact pack the article was held to: every figure with its source URL and quote, plus the gaps no source filled |
+| `<slug>_diagram_1.png` / `.svg` | The Level 1 diagram, drawn by the app. The PNG is what the Markdown and DOCX embed; the SVG is inlined in the HTML |
 | `<slug>_review.md` | What the three agents argued about, and what survived |
 | `<slug>_review.json` | The same argument as raw data |
 | `<slug>_linkedin.md` | LinkedIn post, with `--linkedin` |

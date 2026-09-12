@@ -6,3 +6,4 @@ markdown
 python-docx
 openai
 google-genai
+Pillow
