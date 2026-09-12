@@ -47,6 +47,12 @@ Topic + Intent
 1. SERP Research      — pulls live Google results via SerpAPI, reads what's ranking
       │
       ▼
+1.5 Fact pack         — opens the primary pages (vendor pricing, docs, exam guides,
+      │                 first-party reports) with Claude's web search + fetch tools,
+      │                 and pins every specific to a URL and a verbatim quote. The
+      │                 writer may state no figure that is not in the pack, and may
+      │                 not widen a pack value into a range. Saved as <slug>_facts.json.
+      ▼
 2. Title Refinement   — picks the best angle and target keyword
       │
       ▼
@@ -172,12 +178,40 @@ python seo_writer.py "Semantic Caching for LLMs" --output-dir ./articles --editi
 | `--edition` | Newsletter edition number |
 | `--no-verify` | Skip the step 6.5 audit — faster and cheaper, but nothing checks the article's claims or structure before it hits disk |
 | `--verify-rounds` | Maximum audit/fix rounds before accepting the article (default: `2`) |
+| `--take` | Your own positions and experiences, one per line (or a path to a text file). Each is written into the article in first person and the auditor checks it survived. The run warns loudly when this is missing, because it is the single biggest reason an article reads as generic |
+| `--no-facts` | Skip the Step 1.5 fact pack. The writer is then forbidden from stating any price, date, version or statistic |
 | `--words` | Article length: `default` (2,500–3,500), `2000`, or `1000` |
 | `--linkedin` | Also write a LinkedIn post from the finished article |
 | `--video` | Also write a 2–3 minute video script, timed, with a visual per beat |
 | `--thumbnail` | Also design a LinkedIn share card, with a button to save it as a PNG |
 | `--audit FILE` | Audit a document you already have instead of writing a new one |
 | `--apply` | With `--audit`, also save the revised document |
+
+---
+
+## What makes it yours: the author's take
+
+The pipeline can research, structure, humanize and verify, but it cannot know
+what you think. `--take` (or the "Your take" box in the web form) is where that
+goes: three to five lines of your own positions and experience on the topic.
+
+```bash
+python seo_writer.py "NVIDIA AI certification guide" \
+  --intent "help engineers pick the right track and budget for it" \
+  --take "I took the DLI CUDA workshop; the graded lab is harder than the exam guide implies.
+The networking track is underrated: few people hold it and DGX shops need it.
+Skip the Associate exam if you already have a year on GPU clusters."
+```
+
+Each line is written into the article in first person, in the section where it
+belongs, and the Step 6.5 auditor flags any that went missing or got neutralised
+into a hedge. Without a take, the run prints a warning and produces what it can:
+a well-sourced summary of what everyone else already wrote.
+
+Two related fixes shipped with this: the writer now actually receives its system
+prompt (it was built and never sent), and the sample articles in
+`sample-articles/` are now actually loaded as style exemplars (the README said
+they were; the code did not do it).
 
 ---
 
@@ -244,6 +278,50 @@ flyctl secrets set APP_PASSWORD='something-long' -a your-app
 
 `GET /healthz` reports `{"ok": true, "protected": true|false}`, so you can check
 from the outside whether the deployed app is actually locked.
+
+---
+
+## Starting runs from Zapier, n8n or a script
+
+The browser follows a run over a live event stream, which an automation
+platform cannot hold open for ten minutes. So `POST /api/start` takes an
+optional `callback_url`: when the pipeline exits, the app POSTs one JSON
+payload there, and echoes your `external_id` so you can find your own record.
+
+```bash
+curl -u admin:$APP_PASSWORD https://your-app.fly.dev/api/start \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "topic": "Semantic caching for LLM apps",
+    "intent": "convince platform engineers it is worth the infra cost",
+    "words": "2000",
+    "linkedin": true, "video": true,
+    "callback_url": "https://hooks.zapier.com/hooks/catch/…",
+    "external_id": "recAIRTABLE123"
+  }'
+# → {"job_id": "…", "external_id": "recAIRTABLE123"}
+```
+
+The callback payload:
+
+| Field | What it is |
+|---|---|
+| `status` | `done` or `error`; `error` carries the message |
+| `external_id`, `job_id`, `request` | What you sent, echoed back |
+| `slug`, `meta`, `images`, `word_count` | SEO title, description, slug and the image list from `_meta.json` |
+| `article_md`, `linkedin_md`, `video_script_md` | The article and the extras, inline |
+| `files` | Download links for `md`, `html`, `docx`, `meta`, `linkedin`, `video`, `thumbnail`, `review_md`, `review_json`, `facts`, `usage` |
+| `usage` | Calls, tokens and cost for this run |
+
+The links in `files` go through `/dl/<expiry>/<signature>/<file>` — signed
+with an expiring HMAC, so the receiver fetches finished files without the app
+password. They are built from `PUBLIC_URL` (set it on Fly), and expire after
+`DOWNLOAD_TTL_SECS` (default seven days). Delivery retries three times with
+backoff; the outcome is in the server log under `[callback]`.
+
+On Fly, keep `min_machines_running = 1` in `fly.toml`: a run started this way
+has no browser connection holding the machine awake, and scale-to-zero would
+stop it mid-job.
 
 ---
 
@@ -369,6 +447,7 @@ Each run produces these files in `./output/`:
 | `<slug>.html` | Styled HTML, ready to copy into a CMS |
 | `<slug>.docx` | Word document with embedded images |
 | `<slug>_meta.json` | SEO title, meta description, slug, image URLs |
+| `<slug>_facts.json` | The fact pack the article was held to: every figure with its source URL and quote, plus the gaps no source filled |
 | `<slug>_review.md` | What the three agents argued about, and what survived |
 | `<slug>_review.json` | The same argument as raw data |
 | `<slug>_linkedin.md` | LinkedIn post, with `--linkedin` |

@@ -25,6 +25,6 @@ output/
 # Not needed at runtime
 README.md
 n8n/
-sample-articles/
 word-humanizer/
+# sample-articles/ is needed: seo_writer.py loads it as style exemplars for the writer
 chapters/

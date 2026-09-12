@@ -741,6 +741,368 @@ Return ONLY valid JSON, no extra text:
 
 
 # ---------------------------------------------------------------------------
+# Date context, style samples, the author's take
+# ---------------------------------------------------------------------------
+#
+# Three things the earlier articles were missing, each for a plain reason:
+#
+#   * Dates. Nothing told the model what day it was, so a September 2026 article
+#     said "in 2025" nine times and cited a projection that had already landed.
+#   * Style. The README promised sample-article matching; no code loaded the
+#     samples. The writer had a tone note and nothing else to imitate.
+#   * A point of view. There was no input for what the author actually thinks,
+#     so the output was a competent summary of what everyone else had written.
+
+TODAY = datetime.now()
+CURRENT_YEAR = TODAY.year
+
+
+def date_context() -> str:
+    return (
+        f"Today's date is {TODAY.strftime('%B %d, %Y')}. Write for a reader in "
+        f"{CURRENT_YEAR}: never describe {CURRENT_YEAR} as upcoming, never present "
+        f"{CURRENT_YEAR - 1} as the current year, and never cite a projection for a "
+        f"year that has already ended as if it were still a forecast. If a source "
+        f"is dated, say when it is from."
+    )
+
+
+SAMPLE_DIR = Path(__file__).parent / "sample-articles"
+STYLE_SAMPLE_WORDS = 1200
+STYLE_SAMPLE_COUNT = 2
+
+
+def _docx_text(path: Path) -> str:
+    try:
+        from docx import Document
+    except ImportError:
+        return ""
+    try:
+        doc = Document(str(path))
+    except Exception:
+        return ""
+    return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+
+
+def load_style_samples(limit_words: int = STYLE_SAMPLE_WORDS,
+                       count: int = STYLE_SAMPLE_COUNT) -> str:
+    """The opening of up to `count` articles from sample-articles/, as a style
+    exemplar block. Newest files first, so the author's current voice wins."""
+    if not SAMPLE_DIR.exists():
+        return ""
+    files = sorted(
+        [p for p in SAMPLE_DIR.iterdir()
+         if p.suffix.lower() in {".md", ".txt", ".docx"} and not p.name.startswith("~$")],
+        key=lambda p: p.stat().st_mtime, reverse=True,
+    )[:count]
+    blocks = []
+    for p in files:
+        text = _docx_text(p) if p.suffix.lower() == ".docx" else p.read_text(
+            encoding="utf-8", errors="ignore")
+        words = text.split()
+        if len(words) < 150:
+            continue
+        excerpt = " ".join(words[:limit_words])
+        blocks.append(f"--- Sample: {p.stem[:80]} ---\n{excerpt}\n")
+    if not blocks:
+        return ""
+    print(f"  Style samples loaded: {len(blocks)} file(s) from {SAMPLE_DIR.name}/")
+    return "\n".join(blocks)
+
+
+def style_block(samples: str) -> str:
+    if not samples:
+        return ""
+    return f"""
+STYLE TO MATCH
+Below are excerpts from articles this author actually published. Match their
+sentence rhythm, their level of directness, how they open sections, and how
+often they use first person. Do not copy sentences or facts from them.
+{samples}
+"""
+
+
+def take_block(take: str) -> str:
+    """The author's own positions, formatted for the prompts that must honour them."""
+    if not take or not take.strip():
+        return ""
+    items = [ln.strip(" -*•\t") for ln in take.strip().splitlines() if ln.strip()]
+    numbered = "\n".join(f"{i}. {t}" for i, t in enumerate(items, 1))
+    return f"""
+AUTHOR'S TAKE (mandatory)
+These are the author's own positions and experiences. They are what makes this
+article theirs rather than a summary of what everyone else wrote.
+{numbered}
+Rules: every item must appear in the article, in first person, in the section
+where it belongs, with its substance intact. Do not soften an opinion into a
+neutral observation. Do not quarantine them in one "my view" section; put each
+where a reader would want to hear it.
+"""
+
+
+def read_take(value: str | None) -> str:
+    """--take accepts inline text, or a path to a text file."""
+    if not value:
+        return ""
+    p = Path(value)
+    if p.exists() and p.is_file():
+        return p.read_text(encoding="utf-8", errors="ignore")
+    return value
+
+
+# ---------------------------------------------------------------------------
+# Step 1.5: Fact pack
+# ---------------------------------------------------------------------------
+#
+# Step 1 reads the titles and snippets of what ranks. It never opens a page, so
+# every specific a reader wants - a price, an exam code, a version, a date - was
+# left to the model's memory and came out hedged: "typically $200-$400",
+# "several hundred dollars". This stage opens the primary pages and pulls the
+# actual figures out, each tied to the URL and the sentence it came from. The
+# writer is then held to the pack: no number that is not in it, no range where
+# the pack has a value.
+
+FACT_PACK_MAX_FACTS = 24
+FACT_PACK_SEARCHES = 6
+FACT_PACK_FETCHES = 8
+
+FACT_PACK_SCHEMA = """{
+  "facts": [
+    {
+      "id": "f1",
+      "claim": "<what the fact establishes, one sentence, specific>",
+      "value": "<the exact figure, name, date or version - never a range unless the source itself gives a range>",
+      "source_url": "<the page the figure appears on>",
+      "source_title": "<page or document title>",
+      "quote": "<the sentence on the page that states it, verbatim, under 40 words>",
+      "as_of": "<date the source states or was published, YYYY-MM-DD or YYYY-MM, or 'undated'>",
+      "kind": "price | date | version | spec | statistic | quote | policy | name"
+    }
+  ],
+  "primary_sources": ["<urls actually opened>"],
+  "gaps": ["<specifics the reader will want that no opened source states>"]
+}"""
+
+
+def _fact_pack_brief(title: str, keywords: str, intent: str, research: dict) -> str:
+    subtopics = research.get("semantic_analysis", {}).get("common_subtopics", [])
+    questions = research.get("semantic_analysis", {}).get("related_questions", [])
+    return f"""TOPIC: {title}
+PRIMARY KEYWORD: {keywords}
+WRITER'S INTENT: {intent or '(none given)'}
+SUBTOPICS THE ARTICLE WILL COVER: {"; ".join(subtopics) or "(none)"}
+QUESTIONS READERS ASK: {"; ".join(questions) or "(none)"}
+{date_context()}"""
+
+
+def _fact_pack_via_claude_tools(brief: str) -> dict:
+    """One Claude call with server-side search and fetch. Returns the pack, or
+    raises so the caller can fall back."""
+    tools = [
+        {"type": "web_search_20250305", "name": "web_search",
+         "max_uses": FACT_PACK_SEARCHES},
+        {"type": "web_fetch_20250910", "name": "web_fetch",
+         "max_uses": FACT_PACK_FETCHES, "max_content_tokens": 40000},
+    ]
+    prompt = f"""You are a research assistant building the evidence pack for an article.
+
+{brief}
+
+Do this:
+1. Search for the primary sources: the vendor's own pricing, documentation,
+   exam or product pages; official announcements; standards bodies; peer-reviewed
+   or first-party reports. Prefer these over blogs and aggregators. Prefer pages
+   dated in the last 18 months.
+2. Open the {FACT_PACK_FETCHES} most authoritative pages and read them.
+3. Extract every specific figure a reader of this article would want: prices,
+   fees, dates, deadlines, version numbers, exam codes, question counts, durations,
+   validity periods, limits, percentages, named products and tiers.
+4. Record each one with the URL you read it on and the verbatim sentence.
+
+Rules:
+- Only facts you actually read on a page you opened. Nothing from memory.
+- Exact values. If a page says "$250", the value is "$250", not "$200-$400".
+- If two sources disagree, include both facts and say so in "claim".
+- If you cannot find something the reader will want, put it in "gaps" rather
+  than guessing.
+- Up to {FACT_PACK_MAX_FACTS} facts.
+
+Return ONLY valid JSON in exactly this shape:
+{FACT_PACK_SCHEMA}"""
+
+    kwargs = dict(
+        model=MODEL, max_tokens=12000, tools=tools,
+        messages=[{"role": "user", "content": prompt}],
+        thinking={"type": "adaptive"}, output_config={"effort": "medium"},
+    )
+    try:
+        response = client.messages.create(**kwargs)
+    except anthropic.BadRequestError as e:
+        message = _api_message(e).lower()
+        if "beta" in message or "web_fetch" in message or "tool" in message:
+            # Older API surface: the fetch tool wants a beta header.
+            response = client.beta.messages.create(
+                betas=["web-fetch-2025-09-10"], **kwargs)
+        else:
+            raise ClaudeError(f"Anthropic rejected the fact-pack request: {_api_message(e)}") from e
+
+    u = getattr(response, "usage", None)
+    if u is not None:
+        record_usage("anthropic", MODEL,
+                     getattr(u, "input_tokens", 0), getattr(u, "output_tokens", 0),
+                     getattr(u, "cache_read_input_tokens", 0) or 0,
+                     getattr(u, "cache_creation_input_tokens", 0) or 0)
+    text = "\n".join(b.text for b in response.content if getattr(b, "type", "") == "text")
+    if not text.strip():
+        raise ClaudeError("Fact-pack call returned no text.")
+    pack = extract_json(text)
+    pack["method"] = "claude-web-tools"
+    return pack
+
+
+def _page_text(url: str, limit_chars: int = 12000) -> str:
+    """A crude but dependency-free HTML-to-text for the fallback path."""
+    try:
+        r = requests.get(url, timeout=20, headers={
+            "User-Agent": "Mozilla/5.0 (compatible; HumanlyResearch/1.0)"})
+        r.raise_for_status()
+    except Exception:
+        return ""
+    html = r.text
+    html = re.sub(r"(?is)<(script|style|nav|footer|header|noscript).*?</\1>", " ", html)
+    text = re.sub(r"(?s)<[^>]+>", " ", html)
+    text = re.sub(r"&nbsp;|&#160;", " ", text)
+    text = re.sub(r"&amp;", "&", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s*\n+", "\n", text)
+    return text.strip()[:limit_chars]
+
+
+def _fact_pack_via_serpapi(brief: str, keywords: str) -> dict:
+    """Fallback: SerpAPI for URLs, plain HTTP for pages, Claude for extraction."""
+    key = os.getenv("SERPAPI_KEY")
+    if not key:
+        raise ClaudeError("No SERPAPI_KEY for the fact-pack fallback.")
+    resp = requests.get(SERPAPI_BASE, params={"q": keywords, "num": 10, "api_key": key},
+                        timeout=15)
+    resp.raise_for_status()
+    results = resp.json().get("organic_results", [])
+    urls = [r.get("link") for r in results if r.get("link")][:FACT_PACK_FETCHES]
+    pages = []
+    for url in urls:
+        text = _page_text(url)
+        if len(text) > 400:
+            pages.append(f"=== {url} ===\n{text}\n")
+            print(f"  fetched {url[:70]}")
+    if not pages:
+        raise ClaudeError("Fact-pack fallback fetched no readable pages.")
+    prompt = f"""You are extracting the evidence pack for an article from pages already fetched.
+
+{brief}
+
+PAGES
+{"".join(pages)[:90000]}
+
+Extract every specific figure a reader would want (prices, dates, versions, codes,
+counts, durations, validity, limits, named tiers). Only what the pages state;
+exact values; verbatim quote; the URL it came from. Put wanted-but-missing
+specifics in "gaps". Up to {FACT_PACK_MAX_FACTS} facts.
+
+Return ONLY valid JSON in exactly this shape:
+{FACT_PACK_SCHEMA}"""
+    pack = extract_json(call_claude(prompt, max_tokens=12000))
+    pack.setdefault("primary_sources", urls)
+    pack["method"] = "serpapi-fetch"
+    return pack
+
+
+def _clean_fact_pack(pack: dict) -> dict:
+    facts = []
+    seen = set()
+    for i, f in enumerate(pack.get("facts", []) or [], 1):
+        if not isinstance(f, dict):
+            continue
+        url = str(f.get("source_url", "")).strip()
+        value = str(f.get("value", "")).strip()
+        if not url.startswith("http") or not value:
+            continue
+        key = (value.lower(), url)
+        if key in seen:
+            continue
+        seen.add(key)
+        f["id"] = f"f{len(facts) + 1}"
+        facts.append(f)
+        if len(facts) >= FACT_PACK_MAX_FACTS:
+            break
+    return {
+        "facts": facts,
+        "primary_sources": [u for u in (pack.get("primary_sources") or []) if str(u).startswith("http")],
+        "gaps": [str(g) for g in (pack.get("gaps") or [])][:12],
+        "method": pack.get("method", "unknown"),
+        "built_at": TODAY.isoformat(timespec="seconds"),
+    }
+
+
+def build_fact_pack(title: str, keywords: str, intent: str, research: dict) -> dict:
+    log("STEP 1.5", "Building the fact pack (opening primary sources)")
+    brief = _fact_pack_brief(title, keywords, intent, research)
+    pack = None
+    try:
+        pack = _fact_pack_via_claude_tools(brief)
+    except Exception as e:
+        print(f"  Web-tool path unavailable ({str(e)[:120]}); trying SerpAPI fallback.")
+        try:
+            pack = _fact_pack_via_serpapi(brief, keywords)
+        except Exception as e2:
+            print(f"  Fallback failed too ({str(e2)[:120]}). Continuing without a fact pack; "
+                  f"the writer will be told to state no figures it cannot cite.")
+            pack = {"facts": [], "primary_sources": [], "gaps": [], "method": "none"}
+    pack = _clean_fact_pack(pack)
+    n = len(pack["facts"])
+    print(f"  Fact pack: {n} fact(s) from {len(pack['primary_sources'])} page(s) "
+          f"via {pack['method']}; {len(pack['gaps'])} gap(s) noted.")
+    for f in pack["facts"][:8]:
+        print(f"    {f['id']} {f.get('kind','?'):9} {f['value'][:28]:28} {f.get('claim','')[:60]}")
+    return pack
+
+
+def fact_pack_text(research: dict) -> str:
+    """The pack as the writer, outliner and auditor see it."""
+    pack = research.get("fact_pack") or {}
+    facts = pack.get("facts") or []
+    if not facts:
+        return """
+FACT PACK
+No verified facts were collected for this article. Therefore: state no price,
+date, version, count or statistic as fact. Where a figure is needed, say plainly
+that it should be checked on the vendor's page and link the page, or leave it
+out. Do not fill the gap from memory.
+"""
+    lines = []
+    for f in facts:
+        as_of = f.get("as_of") or "undated"
+        lines.append(f"[{f['id']}] {f.get('claim','')} | value: {f['value']} | "
+                     f"as of {as_of} | {f['source_url']}\n"
+                     f"     quote: \"{str(f.get('quote',''))[:200]}\"")
+    gaps = pack.get("gaps") or []
+    gap_text = ("\nKNOWN GAPS (no opened source states these - do not invent them):\n"
+                + "\n".join(f"- {g}" for g in gaps)) if gaps else ""
+    return f"""
+FACT PACK (the only permitted source of specifics)
+{chr(10).join(lines)}
+{gap_text}
+Rules for using it:
+- Every number, price, date, version, exam code, count and named tier in the
+  article must come from a fact above, cited inline as (Source: <source_url>).
+- Use the exact value. Never widen a value into a range, and never hedge a
+  pack value with "typically", "approximately", "around" or "several".
+- If the pack has no fact for something, either omit it or tell the reader to
+  check the linked page. Never guess.
+- Prefer the most recent fact when two conflict, and say which is newer.
+"""
+
+
+# ---------------------------------------------------------------------------
 # Step 2: Refine Title
 # ---------------------------------------------------------------------------
 
@@ -842,6 +1204,12 @@ Target Audience: {research.get("target_audience")}
 KEY CONTENT ELEMENTS
 Key Takeaways (must be featured prominently):
 {key_takeaways}
+{fact_pack_text(research)}
+{take_block(research.get("take", ""))}
+Build the sections around the evidence that actually exists in the fact pack. A
+section the pack cannot support with at least one specific should be cut or
+reframed, not padded. Note next to each section which fact ids it will use.
+{date_context()}
 
 SEO KEYWORD STRATEGY
 Primary Keyword: {keywords}
@@ -890,7 +1258,8 @@ def write_content(title: str, keywords: str, outline: str, research: dict,
     kw_data = research.get("keywords", {})
     secondary_kws = ", ".join(kw_data.get("secondary_keywords", []))
 
-    system = """You are an expert content writer. Write clear, structured, value-driven articles that rank well in search engines. Use active voice, short paragraphs (3–4 sentences max), and cite sources inline as 'Source: https://...' when referencing external data or studies."""
+    system = f"""You are an expert content writer with a point of view. Write clear, structured, value-driven articles that rank well in search engines. Use active voice, short paragraphs (3–4 sentences max), and cite sources inline as 'Source: https://...' when referencing external data or studies. You never state a figure you cannot cite, and you never hedge a figure you can. {date_context()}
+{style_block(research.get("style_samples", ""))}"""
 
     prompt = f"""Write a complete, high-quality SEO article based on the inputs below.
 
@@ -903,7 +1272,8 @@ Outline to follow strictly:
 
 Key Takeaways (must be reflected in writing):
 {key_takeaways}
-
+{fact_pack_text(research)}
+{take_block(research.get("take", ""))}
 WRITING CONTEXT
 Writing Style: {research.get("writing_style")}
 Writing Tone: {research.get("writing_tone")}
@@ -927,10 +1297,17 @@ INSTRUCTIONS
    suggestion: cut depth rather than sections, and never pad to reach it.
 9. Bold key terms on first use.
 10. End with a strong call-to-action.
+11. Specifics come only from the FACT PACK, cited with the exact source_url. Where
+    the pack is silent, say so or leave it out. A reader should never meet
+    "typically", "approximately" or "several hundred" where a real number exists.
+12. The AUTHOR'S TAKE items are not optional and not to be neutralised. Write them
+    in first person where they belong.
 
 Write the full article now. Output the article content ONLY."""
 
-    result = call_claude(prompt, max_tokens=16000)
+    # `system` was built and never sent before this change, so the writer had
+    # no persona, no citation rule and (now) no style samples. Send it.
+    result = call_claude(prompt, system=system, max_tokens=16000)
     word_count = len(result.split())
     print(f"  Article written ({word_count} words).")
     return result
@@ -1044,6 +1421,9 @@ STRUCTURAL CONSTRAINTS (never break these):
 - Keep short paragraphs (3–4 sentences max)
 - Do NOT remove any sections or change the article structure
 - Do NOT add new factual claims
+- Do NOT change any number, price, date, version or "(Source: ...)" citation
+- Do NOT soften, hedge or remove first-person opinions ("I think", "in my experience"):
+  those are the author's own and are the point
 
 AI PATTERN CHECKLIST — fix every instance you find:
 {_HUMANIZER_PATTERNS}
@@ -1186,8 +1566,11 @@ def _strip_em_dashes(text: str) -> str:
                 line = line.replace(" — ", sep).replace("—", "-")
             result.append(line)
             continue
-        # Spaced em dash → comma (most common inline use)
-        line = line.replace(" — ", ", ")
+        # Spaced em dash: a comma when the right-hand side is a fragment, a
+        # semicolon when it is a whole clause. Blindly using a comma produced
+        # splices such as "they are course-bound credentials, they validate what
+        # you learned" in every shipped article.
+        line = _replace_spaced_em_dashes(line)
         # Tight em dash → hyphen (compound words / ranges)
         line = line.replace("—", "-")
         result.append(line)
@@ -1196,6 +1579,54 @@ def _strip_em_dashes(text: str) -> str:
     if removed:
         print(f"  Em dashes removed/replaced: {removed}")
     return "\n".join(result)
+
+
+# Words that open a dependent fragment rather than a new clause. A dash followed
+# by one of these reads correctly as a comma.
+_FRAGMENT_OPENERS = {
+    "and", "but", "or", "nor", "so", "yet", "which", "who", "whose", "where",
+    "when", "while", "because", "since", "although", "though", "unless", "until",
+    "if", "as", "than", "like", "unlike", "especially", "particularly", "notably",
+    "including", "such", "for", "from", "with", "without", "to", "at", "in", "on",
+    "of", "by", "not", "no", "even", "just", "only", "mostly", "usually", "often",
+    "e.g.", "i.e.", "e.g", "i.e", "the", "a", "an", "one", "two", "three",
+}
+
+_CLAUSE_SUBJECTS = {
+    "it", "its", "they", "this", "that", "these", "those", "you", "we", "i",
+    "he", "she", "there", "here", "most", "some", "each", "every", "many", "few",
+    "nobody", "everyone", "everything", "nothing", "what", "my", "our", "your",
+    "their", "his", "her",
+}
+
+
+def _replace_spaced_em_dashes(line: str) -> str:
+    def choose(m: re.Match) -> str:
+        before = m.group(1)
+        after = m.group(2)
+        right = after.strip()
+        first = right.split(" ", 1)[0].lower().strip("\"'([")
+        rest_words = right.split()
+        if first in _FRAGMENT_OPENERS or len(rest_words) < 4:
+            return f"{before}, {after}"
+        # A capitalised opener or a pronoun/determiner subject followed by a verb
+        # is a clause of its own: join with a semicolon, never a comma.
+        looks_like_clause = (
+            first in _CLAUSE_SUBJECTS
+            or (right[:1].isupper() and not right.split(" ", 1)[0].isupper())
+        )
+        if looks_like_clause and not before.rstrip().endswith((",", ";", ":")):
+            return f"{before}; {after[0].lower() + after[1:] if after[:1].isupper() and first in _CLAUSE_SUBJECTS else after}"
+        return f"{before}, {after}"
+
+    # Handle every " — " on the line, left to right.
+    while " — " in line:
+        new = re.sub(r"^(.*?) — (.*)$", choose, line, count=1)
+        if new == line:
+            line = line.replace(" — ", ", ", 1)
+        else:
+            line = new
+    return line
 
 
 # ---------------------------------------------------------------------------
@@ -1528,26 +1959,58 @@ def inject_images(content: str, images: dict[str, dict]) -> str:
 # Output
 # ---------------------------------------------------------------------------
 
+_IMAGE_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif")
+
+
+def _clean_url(url: str) -> str:
+    """Trim the punctuation a regex drags along: 'https://x.com).' -> 'https://x.com'."""
+    url = url.strip()
+    while url and url[-1] in ").,;:'\"]>*":
+        url = url[:-1]
+    # A dangling "(" left by "(Source: https://x.com" without its close
+    return url
+
+
 def extract_sources(article: str) -> list[str]:
-    """Extract all URLs cited in the article (Source: lines + inline links)."""
+    """Every URL cited as evidence in the article, in order, once each.
+
+    Image URLs are not sources: the picture is illustration, not support for a
+    claim, and listing a CDN link with an expiring token under "Sources" made
+    the earlier articles look padded.
+    """
+    image_urls = {_clean_url(m.group(1))
+                  for m in re.finditer(r'!\[[^\]]*\]\((https?://[^\s\)]+)\)', article)}
     urls = []
-    # Source: https://... lines
-    for m in re.finditer(r'\(Source:\s*(https?://[^\s\)]+)\)', article):
-        urls.append(m.group(1))
-    # Inline markdown links [text](url)
-    for m in re.finditer(r'\]\((https?://[^\s\)]+)\)', article):
-        urls.append(m.group(1))
-    # Plain Source: https://... lines
-    for m in re.finditer(r'Source\s*:\s*(https?://\S+)', article):
-        urls.append(m.group(1))
-    # Deduplicate while preserving order
+    # (Source: https://...) and Source: https://... in any form
+    for m in re.finditer(r'Source\s*:\s*\[?(https?://[^\s\)\]]+)', article):
+        urls.append(_clean_url(m.group(1)))
+    # Inline markdown links [text](url), excluding images
+    for m in re.finditer(r'(?<!\!)\[[^\]]*\]\((https?://[^\s\)]+)\)', article):
+        urls.append(_clean_url(m.group(1)))
     seen = set()
     result = []
     for u in urls:
-        if u not in seen:
-            seen.add(u)
-            result.append(u)
+        if not u or u in seen or u in image_urls:
+            continue
+        if u.lower().split("?")[0].endswith(_IMAGE_EXT):
+            continue
+        seen.add(u)
+        result.append(u)
     return result
+
+
+def strip_orphan_image_markers(article: str) -> str:
+    """Remove any [IMAGE: ...] marker that survived image resolution.
+
+    Markers without the "| Query:" half never match the resolver and used to
+    ship verbatim in the body ("[IMAGE: Difficulty progression chart ...]").
+    """
+    cleaned = re.sub(r"^[ \t]*\[IMAGE:[^\]\n]*\][ \t]*\n?", "", article, flags=re.MULTILINE)
+    cleaned = re.sub(r"\[IMAGE:[^\]\n]*\]", "", cleaned)
+    removed = article.count("[IMAGE:") - cleaned.count("[IMAGE:")
+    if removed:
+        print(f"  Orphan image markers removed: {removed}")
+    return re.sub(r"\n{3,}", "\n\n", cleaned)
 
 
 # Domains whose display name is not just the second-level label capitalised.
@@ -1716,10 +2179,12 @@ RULES
 - 40 to 60 words. Not a word more.
 - Answer the question in the first sentence. No preamble, no "in this article".
 - Lead with a definition or a direct claim: "X is ...", "X costs ...", "Yes, because ...".
-- Include the single most useful specific: a number, a price, a version, a timeframe.
+- Include the single most useful specific: a number, a price, a version, a timeframe,
+  taken from the article's own cited facts. Never a range the article does not give.
 - It must make complete sense quoted on its own, with no surrounding page.
 - Plain sentences. No bullets, no heading, no bold, no em dashes.
 - Claim nothing the article does not already support.
+- {date_context()}
 
 THE ARTICLE
 {article[:6000]}
@@ -2398,13 +2863,26 @@ Outline it was told to follow:
 
 What is currently ranking for this keyword:
 {serp_context}
+{fact_pack_text(research)}
+{take_block(research.get("take", ""))}
+{date_context()}
 
 WHAT TO CHECK
 1. FACTUAL - Any claim presented as fact with no citation and no way for a reader to
    check it. Numbers, dates, prices, version names, and company claims are the highest
    risk. Flag anything you believe is outdated or wrong, and say why.
 2. CITATIONS - "Source: <url>" lines that do not plausibly support the sentence they
-   follow, or a bare domain used as if it were evidence.
+   follow, or a bare domain (a homepage such as https://www.idc.com) used as if it
+   were evidence. A citation must point at the page that states the figure.
+7. PRECISION - A figure given as a range, or hedged with "typically", "approximately",
+   "around", "several", "roughly", where the FACT PACK holds an exact value; and any
+   number, price, date, version or code that appears in the article but in no fact.
+   Both are high severity: they are the difference between a guide and a guess.
+8. DATES - Any year treated as current or upcoming that is not {CURRENT_YEAR}; a
+   past-year projection presented as a forecast; "in {CURRENT_YEAR - 1}" used to mean now.
+9. VOICE - If an AUTHOR'S TAKE is given above, every item must appear in the body in
+   first person with its substance intact. A missing or neutralised item is high
+   severity. If no take is given, skip this check.
 3. STRUCTURE - Sections in the outline that are missing, merged, or renamed beyond
    recognition. Count the [IMAGE: ... | Query: ...] markers still present and compare
    with the outline.
@@ -2430,7 +2908,7 @@ Return ONLY valid JSON in exactly this shape:
   "issues": [
     {{
       "id": "i1",
-      "category": "factual|citation|structure|ai_tell|coverage|contradiction",
+      "category": "factual|citation|structure|ai_tell|coverage|contradiction|precision|date|voice",
       "severity": "high|medium|low",
       "quote": "<the exact phrase or heading from the article, under 15 words>",
       "problem": "<what is wrong, one sentence>",
@@ -2570,7 +3048,7 @@ Include exactly one ruling per contested finding."""
     return result
 
 
-def apply_fixes(article: str, upheld: list) -> str:
+def apply_fixes(article: str, upheld: list, research: dict | None = None) -> str:
     """Rewrite the article to address only the findings that survived."""
     log("STEP 6.5", f"Applying {len(upheld)} upheld finding(s)")
 
@@ -2580,12 +3058,14 @@ def apply_fixes(article: str, upheld: list) -> str:
         f"  Fix: {i.get('fix','')}"
         for i in upheld
     )
+    evidence = fact_pack_text(research) if research else ""
+    take = take_block(research.get("take", "")) if research else ""
 
     prompt = f"""Revise the article to address the findings below. Change nothing else.
 
 FINDINGS TO ADDRESS
 {fix_block}
-
+{evidence}{take}
 STRUCTURAL CONSTRAINTS (never break these):
 - Preserve ALL markdown headings unless a finding explicitly asks you to change one
 - Preserve ALL [IMAGE: alt text | Query: ...] markers exactly
@@ -2594,6 +3074,9 @@ STRUCTURAL CONSTRAINTS (never break these):
 - Do NOT rewrite passages no finding mentions
 - Do NOT invent a citation. If a finding says a claim is unsupported and you have no real
   source, soften the claim or cut it instead of attaching a made-up URL.
+- When a finding asks for a precise figure, take it from the FACT PACK with its
+  source_url. If the pack has no such fact, cut the figure rather than keep a guess.
+- {date_context()}
 
 ARTICLE
 {article}
@@ -2707,7 +3190,7 @@ def verification_loop(article: str, outline: str, key_takeaways: str, research: 
             return close(f"every finding overruled on round {round_no}")
 
         try:
-            article = apply_fixes(article, upheld)
+            article = apply_fixes(article, upheld, research)
         except ClaudeError as e:
             reason = " ".join(str(e).split())[:200]
             print(f"  The fix pass failed: {reason}")
@@ -2811,8 +3294,13 @@ def review_stats(record: dict) -> dict:
 
 def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: str = "",
         verify: bool = True, verify_rounds: int = 2, words: str = "default",
-        linkedin: bool = False, video: bool = False, thumbnail: bool = False):
+        linkedin: bool = False, video: bool = False, thumbnail: bool = False,
+        take: str = "", facts: bool = True):
     profile = length_profile(words)
+    take = (take or "").strip()
+    if not take:
+        print("  NOTE: no --take given. The article will carry no first-person point "
+              "of view, which is the single biggest reason these read as generic.")
     # If intent is given and no explicit keywords, derive optimized search keywords
     if intent and not keywords:
         log("INTENT", "Extracting search keywords from intent...")
@@ -2833,6 +3321,15 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
 
     # Step 1: SERP Research
     research = serp_research(title, keywords, intent=intent)
+    research["take"] = take
+    research["style_samples"] = load_style_samples()
+
+    # Step 1.5: Fact pack - open the primary pages and pin every specific to a URL.
+    if facts:
+        research["fact_pack"] = build_fact_pack(title, keywords, intent, research)
+    else:
+        log("STEP 1.5", "Fact pack skipped (--no-facts)")
+        research["fact_pack"] = {"facts": [], "primary_sources": [], "gaps": [], "method": "skipped"}
 
     # Step 2: Refine Title
     refined_title = refine_title(title, keywords, research, intent=intent)
@@ -2873,12 +3370,20 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
     # Step 8: Image Search
     images = search_images(humanized, research)
 
-    # Inject images into article
-    final_article = inject_images(humanized, images)
+    # Inject images into article, then drop any marker that found no image
+    final_article = strip_orphan_image_markers(inject_images(humanized, images))
 
     # Write outputs
     slug = slugify(refined_title)
     md_path, meta_path = write_outputs(slug, final_article, meta, images, output_dir, edition=edition)
+
+    # The evidence the article was held to, next to the article, so a reviewer
+    # can check any figure without re-running the research.
+    facts_path = output_dir / f"{slug}_facts.json"
+    facts_path.write_text(json.dumps({
+        "topic": title, "refined_title": refined_title, "intent": intent,
+        "take": take, "fact_pack": research.get("fact_pack", {}),
+    }, indent=2, ensure_ascii=False), encoding="utf-8")
 
     review_path = None
     if record.get("rounds"):
@@ -2911,6 +3416,8 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
     print(f"  Images     : {len(images)}")
     print(f"  Article    : {md_path}")
     print(f"  Meta JSON  : {meta_path}")
+    fp = research.get("fact_pack", {})
+    print(f"  Facts      : {facts_path} ({len(fp.get('facts', []))} facts via {fp.get('method')})")
     if review_path:
         s = review_stats(record)
         print(f"  Review     : {review_path}")
@@ -3036,6 +3543,24 @@ def main():
         ),
     )
     parser.add_argument(
+        "--take",
+        default=None,
+        help=(
+            "The author's own positions and experiences, one per line, or a path to "
+            "a text file holding them. Every item is written into the article in "
+            "first person and the auditor checks it survived. This is what turns a "
+            "summary of the web into an article by you; the run warns when it is missing."
+        ),
+    )
+    parser.add_argument(
+        "--no-facts",
+        action="store_true",
+        help=(
+            "Skip the Step 1.5 fact pack (opening primary sources and pinning every "
+            "figure to a URL). The writer is then forbidden from stating any specific."
+        ),
+    )
+    parser.add_argument(
         "--keywords",
         default=None,
         help=(
@@ -3153,6 +3678,8 @@ def main():
             linkedin=args.linkedin,
             video=args.video,
             thumbnail=args.thumbnail,
+            take=read_take(args.take),
+            facts=not args.no_facts,
         )
     except ClaudeError as e:
         # Flattened to one line so the web UI, which reads the log line by line,

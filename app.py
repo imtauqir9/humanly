@@ -10,6 +10,7 @@ Run:
 Then open http://localhost:5000
 """
 
+import base64
 import hashlib
 import hmac
 import json
@@ -170,6 +171,10 @@ def _logged_in() -> bool:
 @app.before_request
 def require_password():
     if not APP_PASSWORD or request.path in _OPEN_PATHS:
+        return None
+    # Signed download links carry their own credential (an expiring HMAC), so
+    # an automation platform can fetch one finished file without the password.
+    if request.path.startswith("/dl/"):
         return None
     if _logged_in() or _basic_auth_ok():
         return None
@@ -375,15 +380,177 @@ def usage_dashboard():
     return render_template("usage.html", runs=runs, **roll)
 
 
+# ---------------------------------------------------------------------------
+# Completion callback + signed downloads
+# ---------------------------------------------------------------------------
+#
+# The browser follows a run over /api/stream/<job_id>, but an automation
+# platform (Zapier, n8n, Make) cannot hold an SSE stream open for a ten-minute
+# job. So /api/start accepts an optional callback_url: when the pipeline exits,
+# the app POSTs one JSON payload there describing what was produced, and echoes
+# the caller's external_id so the receiver can find its own record.
+#
+# The files in that payload are linked through /dl/... - URLs that carry an
+# expiring HMAC instead of the app password, so the receiver can fetch them
+# without a credential it would otherwise have to store.
+
+DOWNLOAD_TTL_SECS = int(os.environ.get("DOWNLOAD_TTL_SECS", 7 * 24 * 3600))
+CALLBACK_TIMEOUT_SECS = 15
+CALLBACK_ATTEMPTS = 3
+
+
+def _public_base_url() -> str:
+    """Where the outside world reaches this app. PUBLIC_URL wins; otherwise the
+    request's own host, forced to https on Fly where the edge terminates TLS."""
+    configured = os.environ.get("PUBLIC_URL", "").rstrip("/")
+    if configured:
+        return configured
+    root = request.url_root.rstrip("/")
+    if os.environ.get("FLY_APP_NAME") and root.startswith("http://"):
+        root = "https://" + root[len("http://"):]
+    return root
+
+
+def _b64(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _download_sig(filename: str, exp: int) -> str:
+    msg = f"{exp}|{filename}".encode()
+    return _b64(hmac.new(app.secret_key.encode(), msg, hashlib.sha256).digest())
+
+
+def signed_download_url(filename: str, base_url: str,
+                        ttl: int = DOWNLOAD_TTL_SECS) -> str:
+    exp = int(time.time()) + ttl
+    return f"{base_url}/dl/{exp}/{_download_sig(filename, exp)}/{filename}"
+
+
+@app.route("/dl/<int:exp>/<sig>/<path:filename>")
+def signed_download(exp: int, sig: str, filename: str):
+    if time.time() > exp:
+        return Response("This download link has expired.\n", 410)
+    if not hmac.compare_digest(sig.encode(), _download_sig(filename, exp).encode()):
+        return Response("Invalid download link.\n", 403)
+    return send_from_directory(OUTPUT_DIR, filename)
+
+
+def _valid_callback_url(url: str) -> bool:
+    return bool(re.match(r"^https?://[^\s/]+", url or ""))
+
+
+def _completion_payload(slug: str | None, external_id: str, status: str,
+                        error: str, base_url: str, echo: dict) -> dict:
+    payload = {
+        "external_id": external_id,
+        "status": status,
+        "error": error or None,
+        "slug": slug,
+        "request": echo,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if not slug:
+        return payload
+
+    meta_path = OUTPUT_DIR / f"{slug}_meta.json"
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        meta = {}
+    payload["meta"] = meta.get("seo_meta", {})
+    payload["images"] = meta.get("images", [])
+
+    md_path = OUTPUT_DIR / f"{slug}.md"
+    if md_path.exists():
+        text = md_path.read_text(encoding="utf-8")
+        payload["word_count"] = len(text.split())
+        # Inline the article so a receiver with no file step still gets it.
+        payload["article_md"] = text
+
+    files = {}
+    for key, name in {
+        "md": f"{slug}.md",
+        "html": f"{slug}.html",
+        "docx": f"{slug}.docx",
+        "meta": f"{slug}_meta.json",
+        "linkedin": f"{slug}_linkedin.md",
+        "video": f"{slug}_video.md",
+        "thumbnail": f"{slug}_thumbnail.html",
+        "review_md": f"{slug}_review.md",
+        "review_json": f"{slug}_review.json",
+        "facts": f"{slug}_facts.json",
+        "usage": f"{slug}_usage.json",
+    }.items():
+        if (OUTPUT_DIR / name).exists():
+            files[key] = signed_download_url(name, base_url)
+    payload["files"] = files
+
+    # The small extras travel inline too - they are what the downstream media
+    # steps consume, and a 200-word post is cheaper to embed than to fetch.
+    for key, name in {"linkedin_md": f"{slug}_linkedin.md",
+                      "video_script_md": f"{slug}_video.md"}.items():
+        p = OUTPUT_DIR / name
+        if p.exists():
+            payload[key] = p.read_text(encoding="utf-8")
+
+    usage_path = OUTPUT_DIR / f"{slug}_usage.json"
+    try:
+        u = json.loads(usage_path.read_text(encoding="utf-8"))
+        payload["usage"] = {k: u.get(k) for k in
+                            ("calls", "input_tokens", "output_tokens",
+                             "total_tokens", "cost_usd", "fully_priced")
+                            if k in u}
+    except Exception:
+        pass
+    return payload
+
+
+def _post_callback(url: str, payload: dict):
+    """Deliver the completion payload, retrying briefly. Runs on its own thread."""
+    import requests
+    delay = 2
+    for attempt in range(1, CALLBACK_ATTEMPTS + 1):
+        try:
+            r = requests.post(url, json=payload, timeout=CALLBACK_TIMEOUT_SECS)
+            if r.status_code < 400:
+                print(f"[callback] delivered to {url} ({r.status_code})", flush=True)
+                return
+            print(f"[callback] attempt {attempt}: {url} answered {r.status_code}",
+                  flush=True)
+        except Exception as e:
+            print(f"[callback] attempt {attempt}: {e}", flush=True)
+        time.sleep(delay)
+        delay *= 3
+    print(f"[callback] gave up on {url} after {CALLBACK_ATTEMPTS} attempts", flush=True)
+
+
+def _new_slug(baseline: set) -> str | None:
+    """The article this job wrote: whichever _meta.json did not exist before it."""
+    fresh = [p for p in OUTPUT_DIR.glob("*_meta.json") if p.name not in baseline]
+    if not fresh:
+        return None
+    newest = max(fresh, key=lambda p: p.stat().st_mtime)
+    return newest.stem[:-len("_meta")]
+
+
 @app.route("/api/start", methods=["POST"])
 def api_start():
     """
     Start a pipeline job. Returns { job_id }.
     Frontend then opens EventSource on /api/stream/<job_id>.
+
+    Optional in the JSON body:
+      callback_url  - POSTed a completion payload when the run ends
+      external_id   - echoed back in that payload (e.g. an Airtable record id)
     """
     data = request.get_json(silent=True) or {}
     topic = (data.get("topic") or "").strip()
     intent = (data.get("intent") or "").strip()
+    take = (data.get("take") or "").strip()[:4000]
+    callback_url = (data.get("callback_url") or "").strip()
+    external_id = str(data.get("external_id") or "")[:200]
+    if callback_url and not _valid_callback_url(callback_url):
+        return jsonify({"error": "callback_url must be an http(s) URL"}), 400
     try:
         edition = int(data.get("edition") or 0)
     except (TypeError, ValueError):
@@ -407,6 +574,8 @@ def api_start():
     ]
     if intent:
         cmd += ["--intent", intent]
+    if take:
+        cmd += ["--take", take]
     if linkedin:
         cmd.append("--linkedin")
     if video:
@@ -414,14 +583,32 @@ def api_start():
     if thumbnail:
         cmd.append("--thumbnail")
 
-    return jsonify({"job_id": _spawn(cmd)})
+    callback = None
+    if callback_url:
+        OUTPUT_DIR.mkdir(exist_ok=True)
+        callback = {
+            "url": callback_url,
+            "external_id": external_id,
+            "base_url": _public_base_url(),
+            "article_baseline": {p.name for p in OUTPUT_DIR.glob("*_meta.json")},
+            "echo": {"topic": topic, "intent": intent, "take": take, "words": words,
+                     "edition": edition, "linkedin": linkedin,
+                     "video": video, "thumbnail": thumbnail},
+        }
+
+    job_id = _spawn(cmd, callback=callback)
+    return jsonify({"job_id": job_id, "external_id": external_id or None})
 
 
-def _spawn(cmd: list[str], review_baseline: set | None = None) -> str:
+def _spawn(cmd: list[str], review_baseline: set | None = None,
+           callback: dict | None = None) -> str:
     """Run seo_writer.py in the background, streaming its output to a job queue.
 
     Shared by generation and audit: both are the same pipeline script with
     different flags, and both want the same live log.
+
+    `callback`, when given, is {url, external_id, base_url, article_baseline,
+    echo}: after the process exits, one completion payload is POSTed to url.
     """
     _reap_jobs()
     job_id = str(uuid.uuid4())
@@ -429,6 +616,17 @@ def _spawn(cmd: list[str], review_baseline: set | None = None) -> str:
     with _jobs_lock:
         _jobs[job_id] = q
         _job_started[job_id] = time.time()
+
+    def notify(status: str, error: str = ""):
+        if not callback:
+            return
+        slug = _new_slug(callback["article_baseline"])
+        payload = _completion_payload(slug, callback["external_id"], status,
+                                      error, callback["base_url"],
+                                      callback["echo"])
+        payload["job_id"] = job_id
+        threading.Thread(target=_post_callback,
+                         args=(callback["url"], payload), daemon=True).start()
 
     def run():
         try:
@@ -459,9 +657,11 @@ def _spawn(cmd: list[str], review_baseline: set | None = None) -> str:
                       flush=True)
                 for line in tail:
                     print(f"[job]   {line}", flush=True)
-                q.put(("error", last_error
-                       or f"Pipeline exited with code {proc.returncode}. "
-                          f"The server log has the last 40 lines."))
+                message = (last_error
+                           or f"Pipeline exited with code {proc.returncode}. "
+                              f"The server log has the last 40 lines.")
+                q.put(("error", message))
+                notify("error", message)
                 return
 
             payload = {}
@@ -474,8 +674,10 @@ def _spawn(cmd: list[str], review_baseline: set | None = None) -> str:
                     newest = max(fresh, key=lambda p: p.stat().st_mtime)
                     payload["review_slug"] = newest.stem[:-len("_review")]
             q.put(("done", json.dumps(payload)))
+            notify("done")
         except Exception as e:
             q.put(("error", str(e)))
+            notify("error", str(e))
 
     threading.Thread(target=run, daemon=True).start()
     return job_id

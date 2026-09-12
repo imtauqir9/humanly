@@ -338,6 +338,12 @@
         <p class="hint">Replaces the old --keywords flag. More context = better research.</p>
       </div>
 
+      <div>
+        <label for="take">Your take <span style="opacity:.7">(one point per line — this is what makes it yours)</span></label>
+        <textarea id="take" name="take" style="min-height:110px" placeholder="What do you actually think, and what have you seen? 3–5 lines.&#10;&#10;e.g.&#10;I took the DLI CUDA workshop; the graded lab was harder than the exam guide implies.&#10;The networking track is underrated: far fewer people hold it and DGX shops need it.&#10;Don't pay for the Associate exam if you already have a year on GPU clusters — go straight to Professional."></textarea>
+        <p class="hint">Every line is written into the article in first person and the auditor checks it survived. Leave it empty and you get a summary of the web, not an article by you.</p>
+      </div>
+
       <div class="row-2">
         <div>
           <label for="keywords">Keywords (optional)</label>
@@ -656,6 +662,7 @@ form.addEventListener('submit', async (e) => {
 
   const topic    = document.getElementById('topic').value.trim();
   const intent   = document.getElementById('intent').value.trim();
+  const take     = document.getElementById('take').value.trim();
   const keywords = document.getElementById('keywords').value.trim();
   const edition  = parseInt(document.getElementById('edition').value) || 0;
   const words    = document.getElementById('words').value;
@@ -674,6 +681,7 @@ form.addEventListener('submit', async (e) => {
     ...(video ? ['Extra  : video script'] : []),
     ...(thumbnail ? ['Extra  : share card'] : []),
     ...(intent ? [`Intent : ${intent}`] : []),
+    ...(take ? [`Take   : ${take.split('\n').length} point(s)`] : ['Take   : none — the article will have no first-person view']),
     'Starting pipeline…\n',
   ]);
 
@@ -683,7 +691,7 @@ form.addEventListener('submit', async (e) => {
     const startResp = await fetch('/api/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ topic, intent: intent || keywords, edition, words, linkedin, video, thumbnail }),
+      body: JSON.stringify({ topic, intent: intent || keywords, take, edition, words, linkedin, video, thumbnail }),
     });
     const startData = await startResp.json();
     if (startData.error) throw new Error(startData.error);

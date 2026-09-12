@@ -131,9 +131,9 @@ def spy_on_apply_fixes(record):
     """Wrap apply_fixes so a case can assert which findings survived."""
     real = sw.apply_fixes
 
-    def spy(article, upheld):
+    def spy(article, upheld, research=None):
         record["ids"] = sorted(i.get("id") for i in upheld)
-        return real(article, upheld)
+        return real(article, upheld, research)
 
     sw.apply_fixes = spy
     return real
@@ -606,9 +606,9 @@ def test_a_failed_rebuttal_applies_every_finding():
         applied = {}
         real = sw.apply_fixes
 
-        def spy(article, upheld):
+        def spy(article, upheld, research=None):
             applied["ids"] = sorted(i.get("id") for i in upheld)
-            return real(article, upheld)
+            return real(article, upheld, research)
 
         sw.apply_fixes = spy
         try:
