@@ -1616,7 +1616,11 @@ def _replace_spaced_em_dashes(line: str) -> str:
             or (right[:1].isupper() and not right.split(" ", 1)[0].isupper())
         )
         if looks_like_clause and not before.rstrip().endswith((",", ";", ":")):
-            return f"{before}; {after[0].lower() + after[1:] if after[:1].isupper() and first in _CLAUSE_SUBJECTS else after}"
+            # Lower-case the clause opener after the semicolon, except the
+            # pronoun "I" (and I'd / I've / I'm), which stays capitalised.
+            if after[:1].isupper() and first in _CLAUSE_SUBJECTS and first != "i":
+                after = after[0].lower() + after[1:]
+            return f"{before}; {after}"
         return f"{before}, {after}"
 
     # Handle every " — " on the line, left to right.
@@ -2027,7 +2031,7 @@ _PUBLISHER_NAMES = {
 
 def publisher_name(url: str) -> str:
     """A human name for the site behind a URL, for citations that read as citations."""
-    host = re.sub(r"^https?://", "", url).split("/")[0].lower().lstrip("www.")
+    host = re.sub(r"^www\.", "", re.sub(r"^https?://", "", url).split("/")[0].lower())
     if host in _PUBLISHER_NAMES:
         return _PUBLISHER_NAMES[host]
     for domain, name in _PUBLISHER_NAMES.items():

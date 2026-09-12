@@ -35,6 +35,18 @@ def test_multiple_dashes_on_one_line():
     assert ", and a second, which is smaller" in out
 
 
+def test_pronoun_i_keeps_its_capital_after_semicolon():
+    line = "Skip the Associate exam if you have a year on clusters — I did, and the badge bought me nothing."
+    out = sw._strip_em_dashes(line)
+    assert "clusters; I did," in out, out
+    assert "; i did" not in out
+
+
+def test_publisher_name_strips_www_as_a_prefix_not_as_characters():
+    assert sw.publisher_name("https://www.whizlabs.com/blog/x") == "Whizlabs"
+    assert sw.publisher_name("https://wwwtest.com/") == "Wwwtest"
+
+
 def test_heading_dash_rule_unchanged():
     assert sw._strip_em_dashes("## DLI vs. NCP — what differs") == "## DLI vs. NCP: what differs"
 
