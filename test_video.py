@@ -56,15 +56,27 @@ def _timed(text: str, cps: float = 15.0):
     return [(ch, i / cps, (i + 1) / cps) for i, ch in enumerate(text)]
 
 
-def test_caption_cues_break_on_sentences_and_length():
-    chars = _timed("Most RAG apps answer the same question twice. Every time. " + "word " * 20)
+def test_caption_cues_break_on_sentences_and_balance_long_ones():
+    chars = _timed("Most RAG apps answer the same question twice. Every time. " + "word " * 20 + "end.")
     cues = sw.caption_cues(chars, max_chars=42)
     assert cues[0][2] == "Most RAG apps answer the same question twice."
     assert cues[1][2] == "Every time."
-    assert all(len(t) <= 50 for _, _, t in cues)
-    assert cues[0][0] == 0.0 and cues[0][1] <= cues[1][0]           # no overlap
+    long_parts = [t for _, _, t in cues[2:]]
+    assert all(len(t) <= 42 for t in long_parts)
+    assert min(len(t) for t in long_parts) >= 20, long_parts          # no orphaned tail
+    assert cues[0][0] == 0.0 and cues[0][1] <= cues[1][0]             # no overlap
     for s, e, _ in cues:
         assert e > s
+
+
+def test_ass_file_is_sized_to_the_video(tmp_path: Path):
+    p = tmp_path / "c.ass"
+    sw.write_ass([(0.0, 1.25, "Hello."), (61.5, 62.0, "Bye.")], p, 1080, 1920)
+    text = p.read_text(encoding="utf-8")
+    assert "PlayResX: 1080" in text and "PlayResY: 1920" in text
+    assert "Style: Cap,Arial,57," in text                               # 3% of 1920
+    assert "Dialogue: 0,0:00:00.00,0:00:01.25,Cap,,0,0,0,,Hello." in text
+    assert "Dialogue: 0,0:01:01.50,0:01:02.00,Cap,,0,0,0,,Bye." in text
 
 
 def test_srt_format(tmp_path: Path):
@@ -122,6 +134,11 @@ def test_make_video_renders_both_formats_with_fake_narration(tmp_path: Path):
                                capture_output=True, text=True).stdout.strip()
         assert probe == f"{sw.VIDEO_FORMATS[fmt][0]},{sw.VIDEO_FORMATS[fmt][1]}"
     assert (tmp_path / "slug_voiceover.mp3").exists()
+    # A second render reuses the cached narration: the fake must not be called.
+    calls = []
+    again = sw.make_video(SCRIPT, "slug", tmp_path, formats=("16x9",),
+                          tts=lambda text: (calls.append(text), (b"", []))[1])
+    assert calls == [] and again["beats"] == 3
     srt = (tmp_path / "slug_captions.srt").read_text(encoding="utf-8")
     assert "Most RAG apps answer the same question twice." in srt
     assert "Read the full article for the numbers." in srt

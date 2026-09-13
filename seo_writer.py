@@ -3920,25 +3920,53 @@ def _tts_with_timestamps(text: str) -> tuple[bytes, list[tuple[str, float, float
     return audio, chars
 
 
+def _split_balanced(chars: list[tuple[str, float, float]], max_chars: int) -> list[list]:
+    """Cut one sentence's timed characters into near-equal parts at spaces."""
+    n = len(chars)
+    if n <= max_chars * 1.25:          # a little over is one caption; the renderer wraps it
+        return [chars]
+    parts = -(-n // max_chars)
+    target = n / parts
+    out, start = [], 0
+    for k in range(1, parts):
+        ideal = int(round(target * k))
+        # nearest space to the ideal cut, searching outward
+        cut = None
+        for d in range(0, max_chars):
+            for cand in (ideal - d, ideal + d):
+                if start < cand < n and chars[cand][0].isspace():
+                    cut = cand
+                    break
+            if cut is not None:
+                break
+        if cut is None:
+            break
+        out.append(chars[start:cut])
+        start = cut + 1
+    out.append(chars[start:])
+    return [part for part in out if part]
+
+
 def caption_cues(chars: list[tuple[str, float, float]], max_chars: int = CAPTION_MAX_CHARS
                  ) -> list[tuple[float, float, str]]:
-    """Group timed characters into caption lines: break at sentence ends, or at
-    a space once a line is long enough. Returns (start, end, text)."""
-    cues, buf, start = [], [], None
-    for i, (ch, s, e) in enumerate(chars):
-        if start is None:
-            if ch.isspace():
-                continue
-            start = s
-        buf.append((ch, s, e))
-        text = "".join(c for c, _, _ in buf)
-        at_sentence_end = ch in ".!?" and (i + 1 == len(chars) or chars[i + 1][0].isspace())
-        long_enough = len(text) >= max_chars and ch.isspace()
-        if at_sentence_end or long_enough or i + 1 == len(chars):
-            clean = text.strip()
-            if clean:
-                cues.append((start, buf[-1][2], clean))
-            buf, start = [], None
+    """Group timed characters into caption lines: one sentence per caption,
+    long sentences cut into balanced parts at spaces. Returns (start, end, text)."""
+    sentences, buf = [], []
+    for i, item in enumerate(chars):
+        ch = item[0]
+        if not buf and ch.isspace():
+            continue
+        buf.append(item)
+        at_end = ch in ".!?" and (i + 1 == len(chars) or chars[i + 1][0].isspace())
+        if at_end or i + 1 == len(chars):
+            sentences.append(buf)
+            buf = []
+    cues = []
+    for sentence in sentences:
+        for part in _split_balanced(sentence, max_chars):
+            text = "".join(c for c, _, _ in part).strip()
+            if text:
+                cues.append((part[0][1], part[-1][2], text))
     # A caption that vanishes the instant its last word ends reads as a flicker.
     out = []
     for n, (s, e, t) in enumerate(cues):
@@ -3960,6 +3988,40 @@ def write_srt(cues: list[tuple[float, float, str]], path: Path):
     for n, (s, e, text) in enumerate(cues, 1):
         lines += [str(n), f"{_srt_time(s)} --> {_srt_time(e)}", text, ""]
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def write_ass(cues: list[tuple[float, float, str]], path: Path, width: int, height: int):
+    """Captions as ASS with the video's own resolution, so sizes are pixels and
+    the placement is deterministic: bottom-centre, above the safe margin."""
+    portrait = height > width
+    size = int(height * (0.030 if portrait else 0.046))
+    margin_v = int(height * (0.16 if portrait else 0.085))
+    margin_lr = int(width * 0.07)
+
+    def t(x: float) -> str:
+        cs = int(round(x * 100))
+        h, cs = divmod(cs, 360000)
+        m, cs = divmod(cs, 6000)
+        sec, cs = divmod(cs, 100)
+        return f"{h}:{m:02d}:{sec:02d}.{cs:02d}"
+
+    head = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: {width}
+PlayResY: {height}
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Cap,Arial,{size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H99000000,-1,0,0,0,100,100,0,0,3,{max(2, size // 9)},0,2,{margin_lr},{margin_lr},{margin_v},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    events = "".join(
+        f"Dialogue: 0,{t(s)},{t(e)},Cap,,0,0,0,,{text.replace(chr(10), ' ')}\n" for s, e, text in cues)
+    path.write_text(head + events, encoding="utf-8")
 
 
 def _slide_font(size: int, bold: bool = False):
@@ -4030,7 +4092,8 @@ def render_slide(beat: dict, index: int, total: int, size: tuple[int, int], path
         scale = min(avail_w / dg.width, avail_h / dg.height)
         if scale > 0.15:
             dg = dg.resize((int(dg.width * scale), int(dg.height * scale)))
-            y = body_top
+            block_h = text_h + int(36 * unit) + dg.height
+            y = body_top + max(0, (body_bottom - body_top - block_h) // 2)
             for ln in lines:
                 d.text((pad, y), ln, font=head_font, fill=_VIDEO_FG)
                 y += line_h
@@ -4094,12 +4157,27 @@ def make_video(script: str, slug: str, output_dir: Path, diagram: Path | None = 
     work = output_dir / f"{slug}_video"
     work.mkdir(parents=True, exist_ok=True)
 
-    # 1. Narration per beat, with timings
+    # 1. Narration per beat, with timings. Cached beside the render, so a
+    #    re-render after a slide tweak costs no ElevenLabs credits.
+    import hashlib
     cues, offset, seg_audio = [], 0.0, []
     for n, beat in enumerate(beats, 1):
-        audio, chars = tts(beat["narration"])
         mp3 = work / f"beat_{n}.mp3"
-        mp3.write_bytes(audio)
+        timing = work / f"beat_{n}.json"
+        digest = hashlib.sha256(beat["narration"].encode("utf-8")).hexdigest()[:16]
+        chars = None
+        if mp3.exists() and timing.exists():
+            try:
+                cached = json.loads(timing.read_text(encoding="utf-8"))
+                if cached.get("digest") == digest:
+                    chars = [tuple(c) for c in cached["chars"]]
+                    print(f"  Beat {n}: narration reused from the last render")
+            except Exception:
+                chars = None
+        if chars is None:
+            audio, chars = tts(beat["narration"])
+            mp3.write_bytes(audio)
+            timing.write_text(json.dumps({"digest": digest, "chars": chars}), encoding="utf-8")
         dur = _duration(mp3, work) or (chars[-1][2] if chars else 0.0)
         beat["duration"] = dur
         for s, e, text in caption_cues(chars):
@@ -4129,18 +4207,15 @@ def make_video(script: str, slug: str, output_dir: Path, diagram: Path | None = 
             seg = work / f"seg_{fmt}_{n}.mp4"
             _run(["ffmpeg", "-y", "-loglevel", "error", "-loop", "1", "-framerate", "30", "-i", slide.name,
                   "-i", f"beat_{n}.mp3", "-c:v", "libx264", "-tune", "stillimage", "-preset", "veryfast",
-                  "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-shortest",
+                  "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
+                  "-t", f"{beat['duration']:.3f}",
                   "-vf", f"scale={size[0]}:{size[1]}", seg.name], work)
             segs.append(seg)
         (work / f"list_{fmt}.txt").write_text("".join(f"file '{p.name}'\n" for p in segs), encoding="utf-8")
-        font_px = 40 if fmt == "16x9" else 44
-        margin = 56 if fmt == "16x9" else 220
-        style = (f"FontName=Arial,FontSize={font_px},Bold=1,PrimaryColour=&H00FFFFFF,"
-                 f"OutlineColour=&H00000000,BackColour=&H80000000,BorderStyle=3,Outline=2,"
-                 f"Shadow=0,MarginV={margin},Alignment=2")
+        write_ass(cues, work / f"captions_{fmt}.ass", *size)
         final = f"{slug}_video_{fmt}.mp4"
         _run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", f"list_{fmt}.txt",
-              "-vf", f"subtitles=captions.srt:force_style='{style}'",
+              "-vf", f"ass=captions_{fmt}.ass",
               "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
               "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", f"../{final}"], work)
         out[f"video_{fmt}"] = final
