@@ -117,7 +117,7 @@ app.config.update(
 
 # Public because a browser must reach them before it can authenticate, and
 # because a health check should not need a credential.
-_OPEN_PATHS = {"/healthz", "/login"}
+_OPEN_PATHS = {"/healthz", "/login", "/feed.json", "/feed.xml", "/embed.js"}
 
 # A login form on a public URL is a brute-force target. This is deliberately
 # small: a per-IP counter, not a rate-limiting library.
@@ -474,6 +474,250 @@ def signed_download_url(filename: str, base_url: str,
                         ttl: int = DOWNLOAD_TTL_SECS) -> str:
     exp = int(time.time()) + ttl
     return f"{base_url}/dl/{exp}/{_download_sig(filename, exp)}/{filename}"
+
+
+# ---------------------------------------------------------------------------
+# Public feed: import published articles into another site
+# ---------------------------------------------------------------------------
+#
+# A portfolio site has no login and no reason to hold this app's password, so
+# the feed and the embed widget are public read-only endpoints - the same
+# trust level as a signed /dl/ link, just for the whole catalog instead of one
+# file. JSON Feed (feed.json) and RSS (feed.xml) cover the two things a static
+# site, a build script, or a no-code importer (Zapier, IFTTT, a WordPress RSS
+# importer) is likely to already speak; /embed.js is for a site with no build
+# step at all - paste a <div> and a <script src>, done.
+
+FEED_LINK_TTL_SECS = int(os.environ.get("FEED_LINK_TTL_SECS", 30 * 24 * 3600))
+FEED_DEFAULT_LIMIT = 50
+FEED_MAX_LIMIT = 200
+
+
+def _rfc822(dt_iso: str) -> str:
+    try:
+        dt = datetime.fromisoformat(dt_iso.replace("Z", "+00:00"))
+    except Exception:
+        dt = datetime.now(timezone.utc)
+    return dt.strftime("%a, %d %b %Y %H:%M:%S %z")
+
+
+def _feed_article_url(slug: str, html_file: str | None, base_url: str) -> str:
+    """SITE_URL/<slug> once the author has a real page there; until then, a
+    signed link straight to the app's own rendered HTML, which works today."""
+    site = sw_decisions.SITE_URL
+    if site:
+        return f"{site}/{slug}"
+    if html_file:
+        return signed_download_url(html_file, base_url, ttl=FEED_LINK_TTL_SECS)
+    return f"{base_url}/library"
+
+
+def _feed_image_url(meta: dict, slug: str, base_url: str) -> str | None:
+    for img in meta.get("images", []) or []:
+        url = img.get("url", "")
+        if sw_decisions.usable_image_url(url):
+            return url
+    diagram = OUTPUT_DIR / f"{slug}_diagram_1.png"
+    if diagram.exists():
+        return signed_download_url(diagram.name, base_url, ttl=FEED_LINK_TTL_SECS)
+    return None
+
+
+def _feed_content_html(slug: str) -> str | None:
+    """The article's own rendered body, so an importer needs no second fetch."""
+    html_files = sorted(OUTPUT_DIR.glob(f"{slug}*.html"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not html_files:
+        return None
+    try:
+        text = html_files[0].read_text(encoding="utf-8")
+    except Exception:
+        return None
+    m = re.search(r"<body[^>]*>(.*)</body>", text, re.DOTALL | re.IGNORECASE)
+    return m.group(1).strip() if m else None
+
+
+def feed_items(base_url: str, limit: int = FEED_DEFAULT_LIMIT, include_content: bool = True) -> list[dict]:
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    items = []
+    for meta_file in sorted(OUTPUT_DIR.glob("*_meta.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if len(items) >= limit:
+            break
+        slug = meta_file.stem[:-len("_meta")]
+        try:
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        seo = meta.get("seo_meta") or {}
+        title = seo.get("title") or slug.replace("-", " ").title()
+        html_files = sorted(OUTPUT_DIR.glob(f"{slug}*.html"), key=lambda p: p.stat().st_mtime, reverse=True)
+        html_file = html_files[0].name if html_files else None
+        published = meta.get("generated_at") or datetime.now(timezone.utc).isoformat()
+        md_path = OUTPUT_DIR / f"{slug}.md"
+        word_count = len(md_path.read_text(encoding="utf-8").split()) if md_path.exists() else None
+        item = {
+            "id": slug,
+            "slug": slug,
+            "title": title,
+            "summary": seo.get("description", ""),
+            "url": _feed_article_url(slug, html_file, base_url),
+            "image": _feed_image_url(meta, slug, base_url),
+            "date_published": published,
+            "author": sw_decisions.AUTHOR_NAME,
+            "word_count": word_count,
+        }
+        if include_content:
+            item["content_html"] = _feed_content_html(slug)
+        items.append(item)
+    return items
+
+
+@app.route("/feed.json")
+def feed_json():
+    base_url = _public_base_url()
+    try:
+        limit = min(FEED_MAX_LIMIT, max(1, int(request.args.get("limit", FEED_DEFAULT_LIMIT))))
+    except (TypeError, ValueError):
+        limit = FEED_DEFAULT_LIMIT
+    include_content = request.args.get("content", "1") != "0"
+    items = feed_items(base_url, limit=limit, include_content=include_content)
+    feed = {
+        "version": "https://jsonfeed.org/version/1.1",
+        "title": f"{sw_decisions.AUTHOR_NAME} — Articles",
+        "home_page_url": sw_decisions.AUTHOR_URL or base_url,
+        "feed_url": f"{base_url}/feed.json",
+        "description": f"Articles written by {sw_decisions.AUTHOR_NAME}, published via Humanly.",
+        "author": {"name": sw_decisions.AUTHOR_NAME, "url": sw_decisions.AUTHOR_URL},
+        "items": [{
+            "id": it["id"], "url": it["url"], "title": it["title"],
+            "summary": it["summary"],
+            **({"content_html": it["content_html"]} if it.get("content_html") else
+               {"content_text": it["summary"] or it["title"]}),
+            **({"image": it["image"]} if it["image"] else {}),
+            "date_published": it["date_published"],
+            "authors": [{"name": it["author"]}],
+            "_word_count": it["word_count"],
+        } for it in items],
+    }
+    resp = jsonify(feed)
+    resp.headers["Content-Type"] = "application/feed+json; charset=utf-8"
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Cache-Control"] = "public, max-age=300"
+    return resp
+
+
+@app.route("/feed.xml")
+def feed_rss():
+    base_url = _public_base_url()
+    try:
+        limit = min(FEED_MAX_LIMIT, max(1, int(request.args.get("limit", FEED_DEFAULT_LIMIT))))
+    except (TypeError, ValueError):
+        limit = FEED_DEFAULT_LIMIT
+    items = feed_items(base_url, limit=limit, include_content=True)
+    site = sw_decisions.AUTHOR_URL or base_url
+    parts = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" '
+        'xmlns:atom="http://www.w3.org/2005/Atom">',
+        "<channel>",
+        f"<title>{sw_decisions._esc(sw_decisions.AUTHOR_NAME)} — Articles</title>",
+        f"<link>{sw_decisions._esc(site)}</link>",
+        f'<atom:link href="{sw_decisions._esc(base_url)}/feed.xml" rel="self" type="application/rss+xml"/>',
+        f"<description>Articles written by {sw_decisions._esc(sw_decisions.AUTHOR_NAME)}, published via Humanly.</description>",
+        "<language>en</language>",
+    ]
+    for it in items:
+        parts.append("<item>")
+        parts.append(f"<title>{sw_decisions._esc(it['title'])}</title>")
+        parts.append(f"<link>{sw_decisions._esc(it['url'])}</link>")
+        parts.append(f'<guid isPermaLink="false">{sw_decisions._esc(it["id"])}</guid>')
+        parts.append(f"<pubDate>{_rfc822(it['date_published'])}</pubDate>")
+        parts.append(f"<description>{sw_decisions._esc(it['summary'])}</description>")
+        if it.get("content_html"):
+            parts.append(f"<content:encoded><![CDATA[{it['content_html']}]]></content:encoded>")
+        if it.get("image"):
+            parts.append(f'<enclosure url="{sw_decisions._esc(it["image"])}" type="image/jpeg"/>')
+        parts.append("</item>")
+    parts += ["</channel>", "</rss>"]
+    resp = Response("\n".join(parts), mimetype="application/rss+xml")
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Cache-Control"] = "public, max-age=300"
+    return resp
+
+
+@app.route("/embed.js")
+def embed_js():
+    """A dependency-free widget: paste one <div> and this <script src> into any
+    HTML page (no build step, no framework) and it renders an article grid
+    from /feed.json. data-limit and data-target on the <script> tag configure it."""
+    base_url = _public_base_url()
+    js = """(function() {
+  var thisScript = document.currentScript;
+  var limit = (thisScript && thisScript.getAttribute('data-limit')) || 6;
+  var targetSel = (thisScript && thisScript.getAttribute('data-target')) || '#humanly-articles';
+  var feedUrl = '%(base)s/feed.json?limit=' + limit + '&content=0';
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"]/g, function(c) {
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
+    });
+  }
+
+  function render(target, feed) {
+    var css = '.humanly-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:20px;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif}' +
+      '.humanly-card{display:flex;flex-direction:column;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;text-decoration:none;color:inherit;background:#fff;transition:box-shadow .15s}' +
+      '.humanly-card:hover{box-shadow:0 8px 24px rgba(16,24,40,.08)}' +
+      '.humanly-card img{width:100%%;height:150px;object-fit:cover;background:#f4f5f7}' +
+      '.humanly-card-body{padding:14px 16px;display:flex;flex-direction:column;gap:6px}' +
+      '.humanly-card-title{font-size:15px;font-weight:700;line-height:1.4;color:#15171a}' +
+      '.humanly-card-desc{font-size:13px;color:#3f4650;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}' +
+      '.humanly-card-date{font-size:12px;color:#6b7280}';
+    var style = document.createElement('style');
+    style.textContent = css;
+    document.head.appendChild(style);
+
+    var grid = document.createElement('div');
+    grid.className = 'humanly-grid';
+    (feed.items || []).forEach(function(item) {
+      var a = document.createElement('a');
+      a.className = 'humanly-card';
+      a.href = item.url;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      var img = item.image ? '<img src="' + esc(item.image) + '" alt="">' : '';
+      var date = item.date_published ? new Date(item.date_published).toLocaleDateString(undefined, {year:'numeric',month:'short',day:'numeric'}) : '';
+      a.innerHTML = img +
+        '<div class="humanly-card-body">' +
+        '<div class="humanly-card-title">' + esc(item.title) + '</div>' +
+        '<div class="humanly-card-desc">' + esc(item.summary) + '</div>' +
+        '<div class="humanly-card-date">' + esc(date) + '</div>' +
+        '</div>';
+      grid.appendChild(a);
+    });
+    target.innerHTML = '';
+    target.appendChild(grid);
+  }
+
+  function boot() {
+    var target = document.querySelector(targetSel);
+    if (!target) return;
+    fetch(feedUrl).then(function(r) { return r.json(); }).then(function(feed) {
+      render(target, feed);
+    }).catch(function() {
+      target.textContent = 'Articles could not be loaded.';
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot);
+  } else {
+    boot();
+  }
+})();
+""" % {"base": base_url}
+    resp = Response(js, mimetype="application/javascript; charset=utf-8")
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Cache-Control"] = "public, max-age=300"
+    return resp
 
 
 @app.route("/dl/<int:exp>/<sig>/<path:filename>")

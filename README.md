@@ -470,6 +470,42 @@ stop it mid-job.
 
 ---
 
+## Importing your articles into another site
+
+Three public, unauthenticated endpoints publish the catalog for a portfolio
+site, a static-site build step, or a no-code importer to pull in - none of
+them need the app password, the same trust level as a signed `/dl/` link:
+
+| Endpoint | For |
+|---|---|
+| `GET /feed.json` | A [JSON Feed 1.1](https://www.jsonfeed.org/version/1.1/) - the natural fit for a JS/TS site (Next.js, Astro, Eleventy) that fetches it at build or request time |
+| `GET /feed.xml` | Standard RSS 2.0 with `<content:encoded>` - what WordPress importers, Zapier's RSS trigger, IFTTT, and most no-code tools expect |
+| `GET /embed.js` | A dependency-free widget for a site with **no build step at all** |
+
+Both feeds include, per article: title, summary, a usable image (never a
+stale CDN blob - the same check the writer applies), the publish date, and
+`content_html` - the article's own rendered body, so the importer needs no
+second request. Query params: `?limit=20` (default 50, max 200), and
+`?content=0` on `/feed.json` to drop the body and get a lighter list.
+
+The article's `url` is `SITE_URL/<slug>` once you set `SITE_URL` to a real
+domain that serves those pages; until then it's a signed link straight to
+this app's own rendered HTML (`FEED_LINK_TTL_SECS`, default 30 days), which
+works today with nothing else set up.
+
+**Zero-build-step import** - paste this into any HTML page:
+
+```html
+<div id="humanly-articles"></div>
+<script src="https://your-app.fly.dev/embed.js" data-limit="6" defer></script>
+```
+
+It renders a card grid (image, title, summary, date) linking out to each
+article. `data-limit` controls how many show; `data-target` points it at a
+different element if `#humanly-articles` doesn't suit.
+
+---
+
 ## Token usage
 
 Every run appends a line to `output/usage.jsonl` and writes a per-article
