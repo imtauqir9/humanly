@@ -192,6 +192,8 @@ python seo_writer.py "Semantic Caching for LLMs" --output-dir ./articles --editi
 | `--verify-rounds` | Maximum audit/fix rounds before accepting the article (default: `2`) |
 | `--take` | Your own positions and experiences, one per line (or a path to a text file). Each is written into the article in first person and the auditor checks it survived. The run warns loudly when this is missing, because it is the single biggest reason an article reads as generic |
 | `--no-facts` | Skip the Step 1.5 fact pack. The writer is then forbidden from stating any price, date, version or statistic |
+| `--radar` | Don't write; find out what to write. See *Topic radar* below |
+| `--radar-days` | How far back the radar looks (default `14`) |
 | `--no-diagram` | Skip the Step 8.5 diagram. The `[DIAGRAM:]` marker in the Level 1 section is dropped instead of drawn |
 | `--words` | Article length: `default` (2,500–3,500), `2000`, or `1000` |
 | `--linkedin` | Also write a LinkedIn post from the finished article |
@@ -226,6 +228,45 @@ Two related fixes shipped with this: the writer now actually receives its system
 prompt (it was built and never sent), and the sample articles in
 `sample-articles/` are now actually loaded as style exemplars (the README said
 they were; the code did not do it).
+
+---
+
+## Topic radar: what should I write?
+
+The pipeline writes whatever topic it is handed. The radar answers the question
+before that one. Press **Run the radar** in the app (or `python seo_writer.py
+--radar`) and one research pass reads the last two weeks of the AI industry's
+conversation:
+
+| Source | How it is read |
+|---|---|
+| YouTube — the most-watched AI videos and the big channels | Claude's web search + fetch, with the view counts the pages show |
+| Podcasts — Latent Space, Lex, No Priors, a16z, Practical AI, Dwarkesh, … | same |
+| Newsletters and posts — Simon Willison, Karpathy, Mollick, swyx, Hamel Husain, The Batch, … | same |
+| Hacker News | the Algolia API, free, no key |
+| Reddit — r/LocalLLaMA, r/MachineLearning, r/artificial, … | the public JSON feeds, best effort (Reddit blocks some) |
+
+The signals are clustered into **up to eight themes**, each needing at least
+two independent sources, and scored on breadth, heat, freshness and — most
+heavily — the **gap**: whether the sources already treat it the way an engineer
+who ships would. A theme everyone is covering well scores low. For each theme
+you get why it is live now, who is talking, the angle your readers need that
+nobody is giving, a working title, an intent, and two or three first-person
+takes to edit. Every evidence link is one the radar actually saw; it cannot
+cite a URL it did not open or find.
+
+**Write this** on a theme fills the form — topic, intent, take — and the normal
+pipeline takes it from there. Results are saved as `radar_<date>.md` and
+`.json`, and `radar_latest.json` is what the app shows on load.
+
+**Weekly.** Set `RADAR_WEEKLY=mon` (any day) and the deployed app runs it on
+that day whenever the last radar is more than six days old; the result waits in
+the app. Set `RADAR_CALLBACK_URL` too and it is POSTed there (Zapier, n8n) with
+the themes inline and signed links to the files. `POST /api/radar` with a
+`callback_url` does the same on demand. `RADAR_LENS` describes who you write
+for; it steers what counts as a gap.
+
+A run costs about $1–1.50 (most of it is reading the pages) and takes three to five minutes. Reddit rate-limits its feeds, so some subreddits are skipped on a given run; the radar says which.
 
 ---
 
@@ -504,6 +545,7 @@ Each run produces these files in `./output/`:
 | `<slug>_review.json` | The same argument as raw data |
 | `<slug>_linkedin.md` | LinkedIn post, with `--linkedin` |
 | `<slug>_video.md` | Video script, with `--video` |
+| `radar_<date>.md` / `.json` | The topic radar: ranked themes with evidence, angle, title, intent and takes. `radar_latest.json` always points at the newest |
 | `<slug>_voiceover.mp3` | The script's narration, spoken in your cloned voice, with `--voiceover` |
 | `<slug>_thumbnail.html` | Share card, with `--thumbnail`. Open it and click to save a PNG |
 | `<slug>_usage.json` | Tokens and cost for this run, per model and per step |

@@ -324,6 +324,20 @@
 
     <!-- MODE: write a new article -->
     <div class="mode active" id="modeWrite">
+
+    <!-- Topic radar: what to write -->
+    <div id="radarPanel" style="margin-bottom:22px;padding:14px 16px;border:1px solid #e3e8f0;border-radius:10px;background:#f8fafc">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
+        <div style="flex:1;min-width:240px">
+          <strong>What should I write?</strong>
+          <p class="hint" style="margin:4px 0 0">One research pass over the most-watched AI videos, the podcasts, the newsletters and the forums of the last two weeks, ranked by what engineers need and nobody is covering yet. Pick a theme and it fills the form below.</p>
+        </div>
+        <button type="button" id="radarBtn" style="margin:0;white-space:nowrap">Run the radar</button>
+      </div>
+      <div id="radarMeta" class="hint" style="margin-top:8px"></div>
+      <div id="radarThemes" style="margin-top:6px"></div>
+    </div>
+
     <h2>Generate New Article</h2>
 
     <form id="genForm">
@@ -582,6 +596,91 @@ function startProgress(header) {
   progressBox.classList.add('visible');
   header.forEach(line => appendLog(line));
 }
+
+/* ---- topic radar ------------------------------------------------------ */
+const radarBtn = document.getElementById('radarBtn');
+const radarThemes = document.getElementById('radarThemes');
+const radarMeta = document.getElementById('radarMeta');
+
+function escHtml(s) {
+  return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+function renderRadar(r) {
+  if (!r || !r.themes || !r.themes.length) {
+    radarMeta.textContent = 'No radar yet. Run it to see what the industry is talking about.';
+    radarThemes.innerHTML = '';
+    return;
+  }
+  const when = r.generated_at ? new Date(r.generated_at).toLocaleDateString(undefined, {month:'short', day:'numeric'}) : '';
+  radarMeta.textContent = `${r.themes.length} themes from ${r.signals || '?'} signals, last ${r.days || 14} days${when ? ' · run ' + when : ''}`;
+  radarThemes.innerHTML = r.themes.map((t, i) => `
+    <details style="border-top:1px solid #e3e8f0;padding:8px 0">
+      <summary style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:10px">
+        <span><strong>${i + 1}. ${escHtml(t.title)}</strong>
+          <span class="hint" style="display:inline"> · score ${t.score} · ${escHtml(t.saturation)} saturation</span></span>
+        <button type="button" class="radar-write" data-i="${i}" style="margin:0;padding:4px 10px;font-size:.85em;white-space:nowrap">Write this</button>
+      </summary>
+      <p style="margin:8px 0 4px"><strong>Why now.</strong> ${escHtml(t.why_now)}</p>
+      <p style="margin:4px 0"><strong>Your angle.</strong> ${escHtml(t.engineer_angle)}</p>
+      <p style="margin:6px 0 2px"><strong>Takes to edit:</strong></p>
+      <ul style="margin:0 0 6px 18px">${(t.suggested_take || []).map(x => `<li>${escHtml(x)}</li>`).join('')}</ul>
+      <p class="hint" style="margin:4px 0">${(t.evidence || []).map(e =>
+        `<a href="${escHtml(e.url)}" target="_blank" rel="noopener">${escHtml(e.title || e.source)}</a> (${escHtml(e.source)}${e.signal ? ', ' + escHtml(e.signal) : ''})`
+      ).join(' · ')}</p>
+    </details>`).join('');
+  radarThemes.querySelectorAll('.radar-write').forEach(b => b.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    const t = r.themes[+b.dataset.i];
+    document.getElementById('topic').value = t.suggested_title || t.title;
+    document.getElementById('intent').value = t.suggested_intent || '';
+    document.getElementById('take').value = (t.suggested_take || []).join('\n');
+    document.getElementById('topic').scrollIntoView({behavior: 'smooth', block: 'center'});
+  }));
+}
+
+async function loadRadar() {
+  try { const r = await fetch('/api/radar/latest'); renderRadar(await r.json()); } catch {}
+}
+loadRadar();
+
+function resetRadar() { radarBtn.disabled = false; radarBtn.textContent = 'Run the radar'; }
+
+radarBtn.addEventListener('click', async () => {
+  radarBtn.disabled = true;
+  radarBtn.textContent = 'Researching…';
+  startProgress(['Topic radar: reading the last 14 days of AI videos, podcasts, newsletters and forums…\n']);
+  let jobId;
+  try {
+    const resp = await fetch('/api/radar', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({days: 14}),
+    });
+    const d = await resp.json();
+    if (d.error) throw new Error(d.error);
+    jobId = d.job_id;
+  } catch (err) {
+    appendLog(`\nFailed to start: ${err.message}`, 'err');
+    resetRadar();
+    return;
+  }
+  streamJob(jobId, {
+    onDone: async () => {
+      appendLog('\nDone!', 'done');
+      statusBadge.className = 'status-badge success';
+      statusBadge.textContent = 'Radar ready. Pick a theme above.';
+      await loadRadar();
+      resetRadar();
+    },
+    onFail: async (msg) => {
+      if (msg) {
+        appendLog(`\nERROR: ${msg}`, 'err');
+        statusBadge.className = 'status-badge error';
+        statusBadge.textContent = `Error: ${msg}`;
+      }
+      resetRadar();
+    },
+  });
+});
 
 /* ---- evaluate an existing draft -------------------------------------- */
 const auditForm = document.getElementById('auditForm');

@@ -529,6 +529,28 @@ def _post_callback(url: str, payload: dict):
     print(f"[callback] gave up on {url} after {CALLBACK_ATTEMPTS} attempts", flush=True)
 
 
+def _radar_payload(callback: dict, status: str, error: str) -> dict:
+    payload = {
+        "kind": "radar", "external_id": callback["external_id"], "status": status,
+        "error": error or None,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+    }
+    latest = OUTPUT_DIR / "radar_latest.json"
+    if status == "done" and latest.exists():
+        try:
+            radar = json.loads(latest.read_text(encoding="utf-8"))
+        except Exception:
+            radar = {}
+        payload.update({k: radar.get(k) for k in ("generated_at", "days", "signals", "themes", "skipped")})
+        stamp = str(radar.get("generated_at") or "")[:10]
+        files = {}
+        for key, name in {"radar_md": f"radar_{stamp}.md", "radar_json": f"radar_{stamp}.json"}.items():
+            if (OUTPUT_DIR / name).exists():
+                files[key] = signed_download_url(name, callback["base_url"])
+        payload["files"] = files
+    return payload
+
+
 def _new_slug(baseline: set) -> str | None:
     """The article this job wrote: whichever _meta.json did not exist before it."""
     fresh = [p for p in OUTPUT_DIR.glob("*_meta.json") if p.name not in baseline]
@@ -628,10 +650,13 @@ def _spawn(cmd: list[str], review_baseline: set | None = None,
     def notify(status: str, error: str = ""):
         if not callback:
             return
-        slug = _new_slug(callback["article_baseline"])
-        payload = _completion_payload(slug, callback["external_id"], status,
-                                      error, callback["base_url"],
-                                      callback["echo"])
+        if callback.get("kind") == "radar":
+            payload = _radar_payload(callback, status, error)
+        else:
+            slug = _new_slug(callback["article_baseline"])
+            payload = _completion_payload(slug, callback["external_id"], status,
+                                          error, callback["base_url"],
+                                          callback["echo"])
         payload["job_id"] = job_id
         threading.Thread(target=_post_callback,
                          args=(callback["url"], payload), daemon=True).start()
@@ -747,6 +772,87 @@ def _draft_from_request() -> tuple[str, str]:
     if pasted:
         return pasted, ""
     raise ValueError("Paste an article or choose a file to evaluate.")
+
+
+# ---------------------------------------------------------------------------
+# Topic radar: what to write
+# ---------------------------------------------------------------------------
+
+def _radar_cmd(days: int) -> list[str]:
+    return [sys.executable, str(BASE_DIR / "seo_writer.py"), "--radar",
+            "--radar-days", str(days), "--output-dir", str(OUTPUT_DIR)]
+
+
+@app.route("/api/radar", methods=["POST"])
+def api_radar():
+    """Start a radar run. Same job stream as an article; the result lands in
+    output/radar_latest.json and is read back through /api/radar/latest."""
+    data = request.get_json(silent=True) or {}
+    try:
+        days = max(3, min(60, int(data.get("days") or 14)))
+    except (TypeError, ValueError):
+        days = 14
+    callback_url = (data.get("callback_url") or "").strip()
+    if callback_url and not _valid_callback_url(callback_url):
+        return jsonify({"error": "callback_url must be an http(s) URL"}), 400
+    callback = None
+    if callback_url:
+        callback = {"kind": "radar", "url": callback_url,
+                    "external_id": str(data.get("external_id") or "")[:200],
+                    "base_url": _public_base_url()}
+    return jsonify({"job_id": _spawn(_radar_cmd(days), callback=callback)})
+
+
+@app.route("/api/radar/latest")
+def api_radar_latest():
+    latest = OUTPUT_DIR / "radar_latest.json"
+    if not latest.exists():
+        return jsonify({"themes": [], "generated_at": None})
+    return Response(latest.read_text(encoding="utf-8"), mimetype="application/json")
+
+
+# Weekly run. Fly has no cron of its own and the machine stays up
+# (min_machines_running = 1), so a thread in the one worker checks hourly.
+RADAR_WEEKLY = os.environ.get("RADAR_WEEKLY", "").strip().lower()[:3]
+RADAR_CALLBACK_URL = os.environ.get("RADAR_CALLBACK_URL", "").strip()
+_WEEKDAYS = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+
+
+def _radar_is_stale(max_age_days: int = 6) -> bool:
+    latest = OUTPUT_DIR / "radar_latest.json"
+    if not latest.exists():
+        return True
+    try:
+        stamp = json.loads(latest.read_text(encoding="utf-8")).get("generated_at", "")
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        return age.days >= max_age_days
+    except Exception:
+        return True
+
+
+def _weekly_radar_loop():
+    while True:
+        try:
+            if (datetime.now(timezone.utc).weekday() == _WEEKDAYS[RADAR_WEEKLY]
+                    and _radar_is_stale()):
+                print("[radar] weekly run starting", flush=True)
+                callback = None
+                if RADAR_CALLBACK_URL and _valid_callback_url(RADAR_CALLBACK_URL):
+                    callback = {"kind": "radar", "url": RADAR_CALLBACK_URL, "external_id": "weekly",
+                                "base_url": os.environ.get("PUBLIC_URL", "").rstrip("/")}
+                _spawn(_radar_cmd(14), callback=callback)
+        except Exception as e:
+            print(f"[radar] weekly check failed: {e}", flush=True)
+        time.sleep(3600)
+
+
+def _start_weekly_radar():
+    if RADAR_WEEKLY in _WEEKDAYS:
+        threading.Thread(target=_weekly_radar_loop, daemon=True).start()
+        print(f"[radar] weekly run scheduled for {RADAR_WEEKLY}", flush=True)
+
+
+_start_weekly_radar()
 
 
 @app.route("/api/audit/start", methods=["POST"])

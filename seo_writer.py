@@ -27,6 +27,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -1594,12 +1595,6 @@ QUESTIONS READERS ASK: {"; ".join(questions) or "(none)"}
 def _fact_pack_via_claude_tools(brief: str) -> dict:
     """One Claude call with server-side search and fetch. Returns the pack, or
     raises so the caller can fall back."""
-    tools = [
-        {"type": "web_search_20250305", "name": "web_search",
-         "max_uses": FACT_PACK_SEARCHES},
-        {"type": "web_fetch_20250910", "name": "web_fetch",
-         "max_uses": FACT_PACK_FETCHES, "max_content_tokens": 40000},
-    ]
     prompt = f"""You are a research assistant building the evidence pack for an article.
 
 {brief}
@@ -1626,32 +1621,9 @@ Rules:
 Return ONLY valid JSON in exactly this shape:
 {FACT_PACK_SCHEMA}"""
 
-    kwargs = dict(
-        model=MODEL, max_tokens=12000, tools=tools,
-        messages=[{"role": "user", "content": prompt}],
-        thinking={"type": "adaptive"}, output_config={"effort": "medium"},
-    )
-    try:
-        response = client.messages.create(**kwargs)
-    except anthropic.BadRequestError as e:
-        message = _api_message(e).lower()
-        if "beta" in message or "web_fetch" in message or "tool" in message:
-            # Older API surface: the fetch tool wants a beta header.
-            response = client.beta.messages.create(
-                betas=["web-fetch-2025-09-10"], **kwargs)
-        else:
-            raise ClaudeError(f"Anthropic rejected the fact-pack request: {_api_message(e)}") from e
-
-    u = getattr(response, "usage", None)
-    if u is not None:
-        record_usage("anthropic", MODEL,
-                     getattr(u, "input_tokens", 0), getattr(u, "output_tokens", 0),
-                     getattr(u, "cache_read_input_tokens", 0) or 0,
-                     getattr(u, "cache_creation_input_tokens", 0) or 0)
-    text = "\n".join(b.text for b in response.content if getattr(b, "type", "") == "text")
-    if not text.strip():
-        raise ClaudeError("Fact-pack call returned no text.")
-    pack = extract_json(text)
+    pack = _claude_web_call(prompt, max_tokens=12000, searches=FACT_PACK_SEARCHES,
+                            fetches=FACT_PACK_FETCHES, label="fact-pack",
+                            schema=FACT_PACK_SCHEMA)
     pack["method"] = "claude-web-tools"
     return pack
 
@@ -1796,6 +1768,448 @@ Rules for using it:
   check the linked page. Never guess.
 - Prefer the most recent fact when two conflict, and say which is newer.
 """
+
+
+# ---------------------------------------------------------------------------
+# Topic Radar: what to write, from what the AI industry is talking about
+# ---------------------------------------------------------------------------
+#
+# The pipeline writes whatever topic it is handed. This runs before it and
+# answers the prior question - what is worth writing this week - by reading
+# what the industry is actually talking about: the most-watched AI videos,
+# the podcasts engineers listen to, the newsletters and posts of the people
+# they follow, and the two forums where they argue. Signals come from code
+# where a free API exists (Hacker News, Reddit) and from Claude's web tools
+# where none does (YouTube, podcasts, newsletters); one synthesis call then
+# clusters them into themes and says, for each, the angle an engineer-author
+# could own. Every evidence link is one the radar actually saw.
+
+RADAR_DAYS = 14
+RADAR_MAX_THEMES = 8
+RADAR_LENS = os.getenv(
+    "RADAR_LENS",
+    "engineers who build with LLMs, agents and RAG in production and want to know "
+    "what actually works")
+RADAR_PODCASTS = [
+    "Latent Space", "Lex Fridman Podcast", "No Priors", "The a16z Podcast",
+    "Practical AI", "Dwarkesh Podcast", "The Cognitive Revolution", "AI Engineer",
+    "How I AI", "Training Data (Sequoia)",
+]
+RADAR_YOUTUBE_CHANNELS = [
+    "Fireship", "Matthew Berman", "AI Explained", "Wes Roth", "Two Minute Papers",
+    "Andrej Karpathy", "3Blue1Brown", "IndyDevDan", "Cole Medin", "Sam Witteveen",
+]
+RADAR_VOICES = [
+    "Simon Willison", "Andrej Karpathy", "Ethan Mollick", "swyx", "Hamel Husain",
+    "Jeremy Howard", "Nathan Lambert", "Sebastian Raschka", "Andrew Ng's The Batch",
+    "Ben's Bites", "The Rundown AI", "Import AI",
+]
+RADAR_SUBREDDITS = ["LocalLLaMA", "MachineLearning", "artificial", "ClaudeAI", "LangChain"]
+RADAR_HN_QUERIES = ["AI", "LLM", "agents", "GPT", "Claude", "RAG", "open source model"]
+REDDIT_PAUSE_SECS = 6.0
+_RADAR_UA = {"User-Agent": "humanly-radar/1.0 (topic research; +https://imrantauqir.com)"}
+
+
+WEB_CALL_DEBUG_DIR = Path(os.getenv("WEB_CALL_DEBUG_DIR", "output"))
+
+
+def _claude_web_call(prompt: str, max_tokens: int, searches: int, fetches: int,
+                     label: str, schema: str = "") -> dict:
+    """One Claude call with server-side web search and fetch, returning the JSON
+    object it was asked for. Shared by the fact pack and the radar.
+
+    After a dozen page reads the model sometimes answers in prose with the
+    findings in it. That is not a failure of the research, only of the format,
+    so a second, tool-free call reshapes the text into the schema before the
+    step gives up. The raw text is kept on disk either way."""
+    tools = [
+        {"type": "web_search_20250305", "name": "web_search", "max_uses": searches},
+        {"type": "web_fetch_20250910", "name": "web_fetch",
+         "max_uses": fetches, "max_content_tokens": 12000},
+    ]
+    kwargs = dict(
+        model=MODEL, max_tokens=max_tokens, tools=tools,
+        messages=[{"role": "user", "content": prompt}],
+        thinking={"type": "adaptive"}, output_config={"effort": "medium"},
+    )
+    try:
+        response = client.messages.create(**kwargs)
+    except anthropic.BadRequestError as e:
+        message = _api_message(e).lower()
+        if "beta" in message or "web_fetch" in message or "tool" in message:
+            # Older API surface: the fetch tool wants a beta header.
+            response = client.beta.messages.create(
+                betas=["web-fetch-2025-09-10"], **kwargs)
+        else:
+            raise ClaudeError(f"Anthropic rejected the {label} request: {_api_message(e)}") from e
+    u = getattr(response, "usage", None)
+    if u is not None:
+        record_usage("anthropic", MODEL,
+                     getattr(u, "input_tokens", 0), getattr(u, "output_tokens", 0),
+                     getattr(u, "cache_read_input_tokens", 0) or 0,
+                     getattr(u, "cache_creation_input_tokens", 0) or 0)
+    text = "\n".join(b.text for b in response.content if getattr(b, "type", "") == "text")
+    try:
+        WEB_CALL_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        (WEB_CALL_DEBUG_DIR / f"_last_{label.replace(' ', '_')}.txt").write_text(
+            text, encoding="utf-8")
+    except Exception:
+        pass
+    if not text.strip():
+        raise ClaudeError(f"The {label} call returned no text.")
+    if getattr(response, "stop_reason", "") == "max_tokens":
+        print(f"  The {label} call hit its output limit; repairing what it wrote.")
+    try:
+        return extract_json(text)
+    except ClaudeError:
+        if not schema:
+            raise
+    print(f"  The {label} call answered in prose; reshaping it into JSON.")
+    repair = f"""Below is a research assistant's answer that should have been JSON.
+Reformat it into ONLY the JSON shape given. Keep every item that has a real
+URL in the text; invent nothing; drop items with no URL.
+
+SHAPE
+{schema}
+
+ANSWER
+{text[:60000]}"""
+    return extract_json(call_claude(repair, max_tokens=max_tokens))
+
+
+def _hn_top(days: int, limit: int = 40) -> list[dict]:
+    """Top Hacker News stories about AI in the window, by points plus comments."""
+    since = int(time.time()) - days * 86400
+    seen, out = set(), []
+    for q in RADAR_HN_QUERIES:
+        try:
+            r = requests.get("https://hn.algolia.com/api/v1/search", params={
+                "query": q, "tags": "story", "hitsPerPage": 30,
+                "numericFilters": f"created_at_i>{since}",
+            }, headers=_RADAR_UA, timeout=20)
+            r.raise_for_status()
+            hits = r.json().get("hits", [])
+        except Exception as e:
+            print(f"  Hacker News query '{q}' failed ({str(e)[:60]})")
+            continue
+        for h in hits:
+            key = str(h.get("objectID", ""))
+            if not key or key in seen or not h.get("title"):
+                continue
+            seen.add(key)
+            discussion = f"https://news.ycombinator.com/item?id={key}"
+            out.append({
+                "source": "Hacker News", "kind": "forum", "title": str(h["title"])[:160],
+                "url": h.get("url") or discussion, "discussion": discussion,
+                "signal": int(h.get("points") or 0), "comments": int(h.get("num_comments") or 0),
+                "date": str(h.get("created_at") or "")[:10], "gist": "",
+            })
+    out.sort(key=lambda x: x["signal"] + x["comments"], reverse=True)
+    return out[:limit]
+
+
+def _reddit_top(days: int, limit: int = 40) -> list[dict]:
+    """Top posts from the AI subreddits, read from the RSS feeds. Reddit blocks
+    the JSON endpoints for anything that is not a logged-in browser; the feeds
+    answer, in top-of-window order, without vote counts. Whatever it blocks is
+    skipped, not fatal."""
+    import html as html_lib
+    import xml.etree.ElementTree as ET
+    window = "week" if days <= 7 else "month"
+    ns = {"a": "http://www.w3.org/2005/Atom"}
+    out = []
+    for n, sub in enumerate(RADAR_SUBREDDITS):
+        if n:
+            time.sleep(REDDIT_PAUSE_SECS)      # the feeds 429 when hit back to back
+        try:
+            r = requests.get(f"https://www.reddit.com/r/{sub}/top/.rss",
+                             params={"t": window, "limit": 12}, headers=_RADAR_UA, timeout=20)
+            if r.status_code == 429:
+                time.sleep(REDDIT_PAUSE_SECS * 4)
+                r = requests.get(f"https://www.reddit.com/r/{sub}/top/.rss",
+                                 params={"t": window, "limit": 12}, headers=_RADAR_UA, timeout=20)
+            if r.status_code != 200 or b"<feed" not in r.content[:400]:
+                print(f"  Reddit r/{sub}: HTTP {r.status_code}, skipped")
+                continue
+            root = ET.fromstring(r.content)
+        except Exception as e:
+            print(f"  Reddit r/{sub} failed ({str(e)[:60]})")
+            continue
+        for rank, entry in enumerate(root.findall("a:entry", ns), 1):
+            title = (entry.findtext("a:title", default="", namespaces=ns) or "").strip()
+            link_el = entry.find("a:link", ns)
+            discussion = link_el.get("href", "") if link_el is not None else ""
+            if not title or not discussion:
+                continue
+            # A link post carries its target as <a href="...">[link]</a> in the body.
+            body = entry.findtext("a:content", default="", namespaces=ns) or ""
+            m = re.search(r'href="([^"]+)">\[link\]', body)
+            target = html_lib.unescape(m.group(1)) if m else ""
+            url = target if target.startswith("http") and "reddit.com" not in target else discussion
+            out.append({
+                "source": f"r/{sub}", "kind": "forum", "title": title[:160],
+                "url": url, "discussion": discussion,
+                "signal": f"top {rank} of the {window} on r/{sub}", "comments": 0,
+                "date": (entry.findtext("a:updated", default="", namespaces=ns) or "")[:10],
+                "gist": "",
+            })
+    return out[:limit]
+
+
+RADAR_SCAN_SCHEMA = """{
+  "items": [
+    {
+      "kind": "youtube | podcast | newsletter | post | article",
+      "title": "<title of the video, episode, issue or post>",
+      "url": "<the real url>",
+      "who": "<channel, show or person>",
+      "signal": "<views, listens or likes as stated on the page, or 'unknown'>",
+      "date": "<YYYY-MM-DD or unknown>",
+      "gist": "<one sentence: what it says or argues>"
+    }
+  ]
+}"""
+
+
+def _radar_web_scan(days: int) -> list[dict]:
+    """YouTube, podcasts and newsletters, via Claude's own search and fetch."""
+    prompt = f"""You are scanning what the AI industry has talked about in the last {days} days,
+for an author who writes for {RADAR_LENS}.
+{date_context()}
+
+Find, by searching and opening pages:
+1. The most-watched YouTube videos about AI from the last {days} days. Search for
+   the week's most viewed AI videos and for these channels: {", ".join(RADAR_YOUTUBE_CHANNELS)}.
+   Record the view count the page shows.
+2. New episodes of these podcasts and what each discussed: {", ".join(RADAR_PODCASTS)}.
+3. What widely followed AI voices published or argued this fortnight, in newsletters
+   and posts: {", ".join(RADAR_VOICES)}.
+4. Anything from the last {days} days that several of the above discuss independently.
+
+Rules: only items you actually saw on a page you opened or in a search result; real
+URLs only, never constructed; 20 to 35 items; prefer the last {days} days and give
+the date; "signal" is what the page states, never a guess.
+
+Return ONLY valid JSON in exactly this shape:
+{RADAR_SCAN_SCHEMA}"""
+    data = _claude_web_call(prompt, max_tokens=16000, searches=12, fetches=10,
+                            label="radar scan", schema=RADAR_SCAN_SCHEMA)
+    items = []
+    for it in (data.get("items") or []):
+        if not isinstance(it, dict):
+            continue
+        url = str(it.get("url", "")).strip()
+        if not url.startswith("http") or not it.get("title"):
+            continue
+        items.append({
+            "source": str(it.get("who") or it.get("kind") or "web")[:60],
+            "kind": str(it.get("kind") or "web")[:20],
+            "title": str(it["title"])[:160], "url": url, "discussion": "",
+            "signal": str(it.get("signal") or "unknown")[:40], "comments": 0,
+            "date": str(it.get("date") or "")[:10], "gist": str(it.get("gist") or "")[:240],
+        })
+    return items
+
+
+RADAR_SCHEMA = """{
+  "themes": [
+    {
+      "title": "<the theme as a reader would name it, under 10 words>",
+      "why_now": "<what happened in the window that makes this live, 1-2 sentences>",
+      "who_is_talking": "<which kinds of voices carry it: videos, podcasts, forums, newsletters>",
+      "evidence": [ {"source": "<who or where>", "title": "<item title>", "url": "<url from the signals>", "signal": "<views, points, comments>"} ],
+      "saturation": "low | medium | high",
+      "engineer_angle": "<the angle this author's readers need that the sources are not giving, 1-2 sentences>",
+      "suggested_title": "<a working title>",
+      "suggested_intent": "<what the reader should be able to do after reading, one sentence>",
+      "suggested_take": ["<a first-person position the author could hold, specific enough to disagree with>", "..."],
+      "score": <1-100>
+    }
+  ],
+  "skipped": ["<a hot topic deliberately left out, and why>"]
+}"""
+
+
+def _norm_url(url: str) -> str:
+    return str(url or "").strip().rstrip("/").lower()
+
+
+def _clean_radar(data: dict, signals: list[dict]) -> dict:
+    """Keep only themes whose evidence points at signals the radar actually saw."""
+    known = {_norm_url(s["url"]): s for s in signals}
+    for s in signals:
+        if s.get("discussion"):
+            known.setdefault(_norm_url(s["discussion"]), s)
+    themes = []
+    for t in (data.get("themes") or []) if isinstance(data, dict) else []:
+        if not isinstance(t, dict) or not str(t.get("title", "")).strip():
+            continue
+        evidence = []
+        for e in (t.get("evidence") or []):
+            if not isinstance(e, dict):
+                continue
+            seen = known.get(_norm_url(e.get("url", "")))
+            if not seen:
+                continue
+            evidence.append({
+                "source": str(e.get("source") or seen["source"])[:60],
+                "title": str(e.get("title") or seen["title"])[:160],
+                "url": seen["url"],
+                "signal": str(e.get("signal") or seen["signal"])[:40],
+            })
+        if len(evidence) < 2:
+            continue
+        try:
+            score = max(1, min(100, int(t.get("score") or 0)))
+        except (TypeError, ValueError):
+            score = 1
+        saturation = str(t.get("saturation") or "medium").strip().lower()
+        themes.append({
+            "title": " ".join(str(t["title"]).split())[:90],
+            "why_now": str(t.get("why_now") or "").strip()[:400],
+            "who_is_talking": str(t.get("who_is_talking") or "").strip()[:200],
+            "evidence": evidence[:6],
+            "saturation": saturation if saturation in {"low", "medium", "high"} else "medium",
+            "engineer_angle": str(t.get("engineer_angle") or "").strip()[:400],
+            "suggested_title": str(t.get("suggested_title") or t["title"]).strip()[:140],
+            "suggested_intent": str(t.get("suggested_intent") or "").strip()[:300],
+            "suggested_take": [str(x).strip() for x in (t.get("suggested_take") or [])
+                               if str(x).strip()][:3],
+            "score": score,
+        })
+    themes.sort(key=lambda t: t["score"], reverse=True)
+    skipped = [str(x).strip() for x in (data.get("skipped") or []) if str(x).strip()][:8] \
+        if isinstance(data, dict) else []
+    return {"themes": themes[:RADAR_MAX_THEMES], "skipped": skipped}
+
+
+def synthesize_radar(signals: list[dict], days: int) -> dict:
+    lines = []
+    for s in signals[:140]:
+        line = f"- [{s['kind']}/{s['source']}] {s['title']} | {s['url']} | signal {s['signal']}"
+        if s.get("comments"):
+            line += f", {s['comments']} comments"
+        if s.get("date"):
+            line += f" | {s['date']}"
+        if s.get("gist"):
+            line += f" | {s['gist']}"
+        lines.append(line)
+    prompt = f"""You are the editor for an author who writes for {RADAR_LENS}.
+{date_context()}
+
+Below are {len(lines)} signals from the last {days} days: the most-viewed videos, podcast
+episodes, newsletters and posts, and the top forum threads, each with the attention it got.
+
+SIGNALS
+{chr(10).join(lines)}
+
+Do this:
+1. Cluster the signals into themes. A theme needs at least two independent sources;
+   a single viral item is not a theme unless engineers are arguing about it.
+2. Score each theme 1-100 on breadth (how many kinds of source carry it), heat (the
+   size of the signals), freshness, and - weighted most - the gap: whether the sources
+   already treat it the way an engineer who ships would. If they do, saturation is
+   high and the score drops.
+3. For each theme, name the angle this author's readers need that the sources are not
+   giving: the how, the failure mode, the cost, what you learn only by running it.
+4. Draft a working title, an intent, and 2-3 first-person takes the author could hold.
+   They will edit these, so make them specific enough to disagree with.
+
+Rules: every evidence url must be copied exactly from the signals above; at most
+{RADAR_MAX_THEMES} themes, best first; leave out themes that are pure product news
+with no engineering question in them, and say so in "skipped".
+
+Return ONLY valid JSON in exactly this shape:
+{RADAR_SCHEMA}"""
+    data = extract_json(call_claude(prompt, max_tokens=12000))
+    return _clean_radar(data, signals)
+
+
+def format_radar(radar: dict, days: int, signal_count: int, stamp: str) -> str:
+    out = [f"# What to write - {stamp}", "",
+           f"_{signal_count} signals from the last {days} days, read for {RADAR_LENS}._", ""]
+    for i, t in enumerate(radar.get("themes", []), 1):
+        out += [f"## {i}. {t['title']}", "",
+                f"**Score {t['score']}** · saturation {t['saturation']}", "",
+                f"**Why now.** {t['why_now']}", ""]
+        if t.get("who_is_talking"):
+            out += [f"**Who is talking.** {t['who_is_talking']}", ""]
+        out += [f"**Your angle.** {t['engineer_angle']}", "",
+                f"**Working title:** {t['suggested_title']}  ",
+                f"**Intent:** {t['suggested_intent']}", "",
+                "**Takes to edit:**"]
+        out += [f"- {x}" for x in t.get("suggested_take", [])]
+        out += ["", "**Evidence:**"]
+        out += [f"- [{e['title']}]({e['url']}) - {e['source']}, {e['signal']}" for e in t["evidence"]]
+        out.append("")
+    if radar.get("skipped"):
+        out += ["## Left out", ""] + [f"- {x}" for x in radar["skipped"]] + [""]
+    return "\n".join(out)
+
+
+def write_radar(radar: dict, output_dir: Path, days: int, signal_count: int) -> tuple[Path, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stamp = TODAY.strftime("%Y-%m-%d")
+    payload = {
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "days": days, "lens": RADAR_LENS, "signals": signal_count, **radar,
+    }
+    text = json.dumps(payload, indent=2, ensure_ascii=False)
+    json_path = output_dir / f"radar_{stamp}.json"
+    json_path.write_text(text, encoding="utf-8")
+    # The app and the weekly callback read the latest by a fixed name.
+    (output_dir / "radar_latest.json").write_text(text, encoding="utf-8")
+    md_path = output_dir / f"radar_{stamp}.md"
+    md_path.write_text(format_radar(radar, days, signal_count, stamp), encoding="utf-8")
+    return md_path, json_path
+
+
+def run_radar(output_dir: Path, days: int = RADAR_DAYS):
+    reset_usage()
+    print(f"\n{'='*60}")
+    print("Topic Radar")
+    print(f"Window  : last {days} days")
+    print(f"Lens    : {RADAR_LENS}")
+    print(f"Output  : {output_dir}")
+    print(f"{'='*60}")
+
+    log("RADAR 1", "Forums: Hacker News and Reddit")
+    hn = _hn_top(days)
+    print(f"  Hacker News: {len(hn)} stories")
+    reddit = _reddit_top(days)
+    print(f"  Reddit: {len(reddit)} posts")
+
+    log("RADAR 2", "YouTube, podcasts and newsletters (Claude web search)")
+    try:
+        web = _radar_web_scan(days)
+    except ClaudeError as e:
+        print(f"  Web scan failed ({str(e)[:120]}); continuing with the forums only.")
+        web = []
+    print(f"  Web scan: {len(web)} items")
+
+    signals = web + hn + reddit
+    if not signals:
+        raise ClaudeError("The radar found no signals at all. Check the network and the API key.")
+
+    log("RADAR 3", f"Synthesising {len(signals)} signals into themes")
+    radar = synthesize_radar(signals, days)
+    md_path, json_path = write_radar(radar, output_dir, days, len(signals))
+    stamp = TODAY.strftime("%Y-%m-%d")
+    usage_path = write_usage(f"radar_{stamp}", output_dir, "Topic radar")
+
+    print(f"\n{'='*60}")
+    print("DONE")
+    for i, t in enumerate(radar["themes"], 1):
+        print(f"  {i}. [{t['score']:3d}] {t['title']}  ({t['saturation']} saturation, "
+              f"{len(t['evidence'])} sources)")
+    if not radar["themes"]:
+        print("  No theme had two sources behind it. Try a longer window with --radar-days 30.")
+    print(f"  Radar      : {md_path}")
+    print(f"  Radar JSON : {json_path}")
+    print(f"  Usage JSON : {usage_path}")
+    print_usage_summary()
+    print(f"{'='*60}\n")
+    return md_path, json_path
 
 
 # ---------------------------------------------------------------------------
@@ -4504,6 +4918,22 @@ def main():
               "<slug>_thumbnail.html with a button to save it as a PNG"),
     )
     parser.add_argument(
+        "--radar",
+        action="store_true",
+        help=(
+            "Do not write an article; find out what to write. Reads the last two "
+            "weeks of AI videos, podcasts, newsletters and forums and ranks the "
+            "themes by what engineers need and nobody is covering. Writes "
+            "radar_<date>.md and .json in the output folder."
+        ),
+    )
+    parser.add_argument(
+        "--radar-days",
+        type=int,
+        default=RADAR_DAYS,
+        help="How far back the radar looks (default 14)",
+    )
+    parser.add_argument(
         "--audit",
         metavar="FILE",
         default=None,
@@ -4524,8 +4954,8 @@ def main():
         print("ERROR: ANTHROPIC_API_KEY environment variable is not set.", file=sys.stderr)
         sys.exit(1)
 
-    if not args.audit and not args.topic:
-        parser.error("a topic is required unless you pass --audit FILE")
+    if not args.audit and not args.radar and not args.topic:
+        parser.error("a topic is required unless you pass --audit FILE or --radar")
 
     # --intent takes priority; --keywords is the legacy shorthand; topic is the fallback
     intent = args.intent or ""
@@ -4533,6 +4963,9 @@ def main():
     output_dir = Path(args.output_dir)
 
     try:
+        if args.radar:
+            run_radar(output_dir, days=max(3, min(60, args.radar_days)))
+            return
         if args.audit:
             doc = Path(args.audit)
             if not doc.exists():
