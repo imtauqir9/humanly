@@ -12,6 +12,9 @@ Then open http://localhost:5000
 
 import base64
 import hashlib
+import os as _os
+_os.environ.setdefault("ANTHROPIC_API_KEY", _os.environ.get("ANTHROPIC_API_KEY", "unset"))
+import seo_writer as sw_decisions  # noqa: E402  (decision helpers only)
 import hmac
 import json
 import os
@@ -624,6 +627,7 @@ def api_start():
     topic = (data.get("topic") or "").strip()
     intent = (data.get("intent") or "").strip()
     take = (data.get("take") or "").strip()[:4000]
+    from_theme = (data.get("from_theme") or "").strip()[:140]
     callback_url = (data.get("callback_url") or "").strip()
     external_id = str(data.get("external_id") or "")[:200]
     if callback_url and not _valid_callback_url(callback_url):
@@ -655,6 +659,8 @@ def api_start():
         cmd += ["--intent", intent]
     if take:
         cmd += ["--take", take]
+    if from_theme:
+        cmd += ["--from-theme", from_theme]
     if linkedin:
         cmd.append("--linkedin")
     if video:
@@ -875,10 +881,39 @@ def api_radar_dig():
 
 @app.route("/api/radar/latest")
 def api_radar_latest():
+    """The latest radar, each theme annotated with the author's decision."""
     latest = OUTPUT_DIR / "radar_latest.json"
     if not latest.exists():
         return jsonify({"themes": [], "generated_at": None})
-    return Response(latest.read_text(encoding="utf-8"), mimetype="application/json")
+    try:
+        radar = json.loads(latest.read_text(encoding="utf-8"))
+    except Exception:
+        return jsonify({"themes": [], "generated_at": None})
+    decisions = sw_decisions.load_decisions(OUTPUT_DIR)
+    for t in radar.get("themes") or []:
+        d = sw_decisions.decision_for(t.get("title", ""), decisions)
+        t["decision"] = d.get("status") if d else None
+        t["decision_slug"] = d.get("slug") if d else None
+    return jsonify(radar)
+
+
+@app.route("/api/radar/decide", methods=["POST"])
+def api_radar_decide():
+    """Approve, skip, or un-decide a theme. The next radar remembers."""
+    data = request.get_json(silent=True) or {}
+    title = (data.get("title") or "").strip()
+    status = (data.get("status") or "").strip().lower()
+    if not title:
+        return jsonify({"error": "title is required"}), 400
+    if status == "clear":
+        decisions = sw_decisions.load_decisions(OUTPUT_DIR)
+        decisions.pop(sw_decisions._decision_key(title), None)
+        (OUTPUT_DIR / "radar_decisions.json").write_text(json.dumps(decisions, indent=2, ensure_ascii=False), encoding="utf-8")
+        return jsonify({"title": title, "status": None})
+    if status not in sw_decisions.DECISION_STATUSES:
+        return jsonify({"error": "status must be approved, skipped, written or clear"}), 400
+    rec = sw_decisions.record_decision(OUTPUT_DIR, title, status, note=str(data.get("note") or "")[:300])
+    return jsonify(rec)
 
 
 # Weekly run. Fly has no cron of its own and the machine stays up

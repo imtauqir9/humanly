@@ -113,6 +113,11 @@
   .chip-low { color: var(--ok); background: var(--ok-soft); }
   .chip-high { color: var(--bad); background: var(--bad-soft); }
   .chip-done { color: var(--accent); background: var(--accent-soft); }
+  .chip-approved { color: var(--ok); background: var(--ok-soft); }
+  .chip-skipped { color: var(--muted); background: #eceef2; text-decoration: line-through; }
+  .chip-written { color: #7a4a00; background: #fef3dd; }
+  .theme-skipped summary { opacity: .55; }
+  .theme-written .theme-title { color: var(--muted); }
   .theme-actions { display: flex; gap: 6px; }
   .theme-body { padding: 4px 20px 18px 60px; font-size: 13.5px; color: var(--ink-2); display: flex; flex-direction: column; gap: 8px; }
   .theme-body strong { color: var(--ink); }
@@ -244,6 +249,7 @@
       <!-- MODE: write a new article -->
       <div class="mode active" id="modeWrite">
         <form id="genForm">
+          <input type="hidden" id="fromTheme" value="">
           <div class="step">
             <div class="step-title"><span class="n">1</span><h3>The topic</h3><span class="why">or pick a theme from the radar</span></div>
             <div>
@@ -526,7 +532,7 @@ function renderRadar(r) {
         ${(b.unanswered || []).length ? `<p><strong>Nobody answers:</strong> ${b.unanswered.map(escHtml).join(' · ')}</p>` : ''}
       </div>` : '';
     return `
-    <details class="theme">
+    <details class="theme${t.decision === 'skipped' ? ' theme-skipped' : ''}${t.decision === 'written' ? ' theme-written' : ''}">
       <summary>
         <span class="rank">${i + 1}</span>
         <span class="theme-title">${escHtml(t.title)}</span>
@@ -534,10 +540,17 @@ function renderRadar(r) {
           <span class="chip">score ${t.score}</span>
           <span class="chip chip-${escHtml(t.saturation)}">${escHtml(t.saturation)} saturation</span>
           ${b ? '<span class="chip chip-done">dug in</span>' : ''}
+          ${t.decision ? `<span class="chip chip-${escHtml(t.decision)}">${escHtml(t.decision)}</span>` : ''}
         </span>
         <span class="theme-actions">
+          ${t.decision === 'written' ? '' : t.decision === 'approved'
+            ? `<button type="button" class="btn btn-ghost sm radar-decide" data-i="${i}" data-status="clear" title="Remove from the queue">Queued ✓</button>`
+            : `<button type="button" class="btn btn-ghost sm radar-decide" data-i="${i}" data-status="approved" title="Keep it in the queue">Approve</button>`}
+          ${t.decision === 'skipped'
+            ? `<button type="button" class="btn btn-ghost sm radar-decide" data-i="${i}" data-status="clear" title="Un-skip">Skipped ✕</button>`
+            : t.decision === 'written' ? '' : `<button type="button" class="btn btn-ghost sm radar-decide" data-i="${i}" data-status="skipped" title="Never propose this again">Skip</button>`}
           <button type="button" class="btn btn-ghost sm radar-dig" data-i="${i}">${b ? 'Dig again' : 'Dig in'}</button>
-          <button type="button" class="btn btn-primary sm radar-write" data-i="${i}">Write this</button>
+          <button type="button" class="btn btn-primary sm radar-write" data-i="${i}">${t.decision === 'written' ? 'Write again' : 'Write this'}</button>
         </span>
       </summary>
       <div class="theme-body">
@@ -560,12 +573,24 @@ function renderRadar(r) {
     document.getElementById('intent').value = b.suggested_intent || t.suggested_intent || '';
     const takes = (b.suggested_take && b.suggested_take.length) ? b.suggested_take : (t.suggested_take || []);
     document.getElementById('take').value = takes.join('\n');
+    document.getElementById('fromTheme').value = t.title;
     document.getElementById('topic').scrollIntoView({behavior: 'smooth', block: 'center'});
     document.getElementById('topic').focus();
   }));
+  document.getElementById('topic').addEventListener('input', () => { document.getElementById('fromTheme').value = ''; });
   radarThemes.querySelectorAll('.radar-dig').forEach(btn => btn.addEventListener('click', (ev) => {
     ev.preventDefault();
     digTheme(+btn.dataset.i + 1, r.themes[+btn.dataset.i].title);
+  }));
+  radarThemes.querySelectorAll('.radar-decide').forEach(btn => btn.addEventListener('click', async (ev) => {
+    ev.preventDefault();
+    const t = r.themes[+btn.dataset.i];
+    btn.disabled = true;
+    try {
+      await fetch('/api/radar/decide', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                        body: JSON.stringify({title: t.title, status: btn.dataset.status})});
+    } catch {}
+    await loadRadar();
   }));
 }
 
@@ -742,6 +767,7 @@ form.addEventListener('submit', async (e) => {
   const words    = document.getElementById('words').value;
   const linkedin = document.getElementById('linkedin').checked;
   const mp4      = document.getElementById('mp4').checked;
+  const from_theme = document.getElementById('fromTheme').value;
   const video    = document.getElementById('video').checked || document.getElementById('voiceover').checked || mp4;
   const voiceover = document.getElementById('voiceover').checked || mp4;
   const thumbnail = document.getElementById('thumbnail').checked;
@@ -769,7 +795,7 @@ form.addEventListener('submit', async (e) => {
     const startResp = await fetch('/api/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ topic, intent: intent || keywords, take, edition, words, linkedin, video, voiceover, mp4, thumbnail }),
+      body: JSON.stringify({ topic, intent: intent || keywords, take, edition, words, linkedin, video, voiceover, mp4, thumbnail, from_theme }),
     });
     const startData = await startResp.json();
     if (startData.error) throw new Error(startData.error);

@@ -269,6 +269,13 @@ most recent.
 pipeline takes it from there. Results are saved as `radar_<date>.md` and
 `.json`, and `radar_latest.json` is what the app shows on load.
 
+**Memory.** Each theme has **Approve** (queue it), **Skip** (never propose it
+again) and, once an article is started from it with *Write this*, is marked
+**written** when that run finishes. Decisions live in
+`output/radar_decisions.json`; the next radar is told what is written, skipped
+and queued, and anything that still comes back too close to a skipped or
+written title is dropped before you see it.
+
 **Weekly.** Set `RADAR_WEEKLY=mon` (any day) and the deployed app runs it on
 that day whenever the last radar is more than six days old; the result waits in
 the app. Set `RADAR_CALLBACK_URL` too and it is POSTed there (Zapier, n8n) with

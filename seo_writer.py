@@ -2089,7 +2089,91 @@ def _norm_url(url: str) -> str:
     return str(url or "").strip().rstrip("/").lower()
 
 
-def _clean_radar(data: dict, signals: list[dict]) -> dict:
+# -- the radar's memory --------------------------------------------------------
+#
+# Without this every run started from zero: a theme the author had rejected,
+# or already written, came back the next week with a fresh score. Decisions
+# live in output/radar_decisions.json, keyed by a normalised title, and reach
+# the synthesis prompt as well as a similarity filter on what comes back.
+
+DECISION_STATUSES = ("approved", "skipped", "written")
+
+
+def _decision_key(title: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9 ]+", " ", str(title).lower()).split())
+
+
+def load_decisions(output_dir: Path) -> dict:
+    path = output_dir / "radar_decisions.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def record_decision(output_dir: Path, title: str, status: str, slug: str = "", note: str = "") -> dict:
+    """Remember what the author decided about a theme. Returns the record."""
+    if status not in DECISION_STATUSES:
+        raise ValueError(f"status must be one of {DECISION_STATUSES}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    decisions = load_decisions(output_dir)
+    record = {"title": " ".join(str(title).split())[:140], "status": status,
+              "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
+    if slug:
+        record["slug"] = slug
+    if note:
+        record["note"] = str(note)[:300]
+    decisions[_decision_key(title)] = record
+    (output_dir / "radar_decisions.json").write_text(
+        json.dumps(decisions, indent=2, ensure_ascii=False), encoding="utf-8")
+    return record
+
+
+def _title_similarity(a: str, b: str) -> float:
+    """Word overlap (Jaccard) between two titles, stop words removed."""
+    stop = {"the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "is", "are", "vs", "with", "why", "how", "what"}
+    wa = {w for w in _decision_key(a).split() if w not in stop}
+    wb = {w for w in _decision_key(b).split() if w not in stop}
+    if not wa or not wb:
+        return 0.0
+    return len(wa & wb) / len(wa | wb)
+
+
+def decision_for(title: str, decisions: dict, threshold: float = 0.6) -> dict | None:
+    """The decision that applies to a theme: an exact key, else the most
+    similar decided title above the threshold."""
+    key = _decision_key(title)
+    if key in decisions:
+        return decisions[key]
+    best, best_score = None, 0.0
+    for rec in decisions.values():
+        score = _title_similarity(title, rec.get("title", ""))
+        if score > best_score:
+            best, best_score = rec, score
+    return best if best_score >= threshold else None
+
+
+def decisions_block(decisions: dict) -> str:
+    if not decisions:
+        return ""
+    groups = {st: [r["title"] for r in decisions.values() if r.get("status") == st] for st in DECISION_STATUSES}
+    lines = ["\nTHE AUTHOR'S DECISIONS ON EARLIER THEMES"]
+    if groups["written"]:
+        lines.append("Already written (do not propose again unless something genuinely new happened this window):")
+        lines += [f"- {t}" for t in groups["written"][-25:]]
+    if groups["skipped"]:
+        lines.append("Skipped by the author (do not re-propose; a close variant counts as the same theme):")
+        lines += [f"- {t}" for t in groups["skipped"][-25:]]
+    if groups["approved"]:
+        lines.append("Approved and queued to write (fine to keep, but rank fresh themes above them):")
+        lines += [f"- {t}" for t in groups["approved"][-25:]]
+    return "\n".join(lines) + "\n"
+
+
+def _clean_radar(data: dict, signals: list[dict], decisions: dict | None = None) -> dict:
     """Keep only themes whose evidence points at signals the radar actually saw."""
     known = {_norm_url(s["url"]): s for s in signals}
     for s in signals:
@@ -2120,8 +2204,16 @@ def _clean_radar(data: dict, signals: list[dict]) -> dict:
         except (TypeError, ValueError):
             score = 1
         saturation = str(t.get("saturation") or "medium").strip().lower()
+        title_clean = " ".join(str(t["title"]).split())[:90]
+        decided = decision_for(title_clean, decisions or {})
+        if decided and decided.get("status") in ("skipped", "written"):
+            # The author already ruled on this; the prompt was told, but the
+            # model does not always listen. Drop it here, deterministically.
+            print(f"  Dropped ({decided['status']} earlier): {title_clean}")
+            continue
         themes.append({
-            "title": " ".join(str(t["title"]).split())[:90],
+            "title": title_clean,
+            "decision": decided.get("status") if decided else None,
             "why_now": str(t.get("why_now") or "").strip()[:400],
             "who_is_talking": str(t.get("who_is_talking") or "").strip()[:200],
             "evidence": evidence[:6],
@@ -2139,7 +2231,7 @@ def _clean_radar(data: dict, signals: list[dict]) -> dict:
     return {"themes": themes[:RADAR_MAX_THEMES], "skipped": skipped}
 
 
-def synthesize_radar(signals: list[dict], days: int) -> dict:
+def synthesize_radar(signals: list[dict], days: int, decisions: dict | None = None) -> dict:
     lines = []
     for s in signals[:140]:
         line = f"- [{s['kind']}/{s['source']}] {s['title']} | {s['url']} | signal {s['signal']}"
@@ -2171,6 +2263,7 @@ Do this:
 4. Draft a working title, an intent, and 2-3 first-person takes the author could hold.
    They will edit these, so make them specific enough to disagree with.
 
+{decisions_block(decisions or {})}
 Rules: every evidence url must be copied exactly from the signals above; at most
 {RADAR_MAX_THEMES} themes, best first; leave out themes that are pure product news
 with no engineering question in them, and say so in "skipped".
@@ -2178,7 +2271,7 @@ with no engineering question in them, and say so in "skipped".
 Return ONLY valid JSON in exactly this shape:
 {RADAR_SCHEMA}"""
     data = extract_json(call_claude(prompt, max_tokens=12000))
-    return _clean_radar(data, signals)
+    return _clean_radar(data, signals, decisions)
 
 
 def format_radar(radar: dict, days: int, signal_count: int, stamp: str) -> str:
@@ -2248,7 +2341,10 @@ def run_radar(output_dir: Path, days: int = RADAR_DAYS):
         raise ClaudeError("The radar found no signals at all. Check the network and the API key.")
 
     log("RADAR 3", f"Synthesising {len(signals)} signals into themes")
-    radar = synthesize_radar(signals, days)
+    decisions = load_decisions(output_dir)
+    if decisions:
+        print(f"  Remembering {len(decisions)} earlier decision(s)")
+    radar = synthesize_radar(signals, days, decisions)
     md_path, json_path = write_radar(radar, output_dir, days, len(signals))
     stamp = TODAY.strftime("%Y-%m-%d")
     usage_path = write_usage(f"radar_{stamp}", output_dir, "Topic radar")
@@ -5345,7 +5441,7 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
         verify: bool = True, verify_rounds: int = 2, words: str = "default",
         linkedin: bool = False, video: bool = False, thumbnail: bool = False,
         take: str = "", facts: bool = True, diagram: bool = True,
-        voiceover: bool = False, mp4: bool = False):
+        voiceover: bool = False, mp4: bool = False, from_theme: str = ""):
     profile = length_profile(words)
     take = (take or "").strip()
     if not take:
@@ -5459,6 +5555,9 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
                               "source": "generated diagram", "query": ""}
     md_path, meta_path = write_outputs(slug, final_article, meta, all_images, output_dir,
                                        edition=edition, diagrams=diagrams)
+    if from_theme:
+        record_decision(output_dir, from_theme, "written", slug=slug)
+        print(f"  Radar theme marked written: {from_theme[:70]}")
 
     # The evidence the article was held to, next to the article, so a reviewer
     # can check any figure without re-running the research.
@@ -5738,6 +5837,12 @@ def main():
               "ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID in .env"),
     )
     parser.add_argument(
+        "--from-theme",
+        default="",
+        metavar="TITLE",
+        help="The radar theme this article answers; it is marked written when the run ends",
+    )
+    parser.add_argument(
         "--mp4",
         action="store_true",
         help=("Also render the finished video: one slide per beat under your cloned "
@@ -5847,6 +5952,7 @@ def main():
             take=read_take(args.take),
             facts=not args.no_facts,
             diagram=not args.no_diagram,
+            from_theme=args.from_theme,
         )
     except ClaudeError as e:
         # Flattened to one line so the web UI, which reads the log line by line,
