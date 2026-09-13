@@ -257,6 +257,13 @@ nobody is giving, a working title, an intent, and two or three first-person
 takes to edit. Every evidence link is one the radar actually saw; it cannot
 cite a URL it did not open or find.
 
+Everything the app produces is saved under `output/` (on Fly, the mounted
+volume, so it survives deploys) and browsable on the **Library** page: every
+article with all its files — HTML, DOCX, Markdown, diagram, facts, LinkedIn,
+video script, visual track, voiceover, share card, review — with search, plus
+every radar run and the briefs dug on it. The Write page shows only the five
+most recent.
+
 **Write this** on a theme fills the form — topic, intent, take — and the normal
 pipeline takes it from there. Results are saved as `radar_<date>.md` and
 `.json`, and `radar_latest.json` is what the app shows on load.

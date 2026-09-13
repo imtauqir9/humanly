@@ -254,6 +254,8 @@ def list_articles() -> list[dict]:
         linkedin_path = OUTPUT_DIR / f"{slug}_linkedin.md"
         video_path = OUTPUT_DIR / f"{slug}_video.md"
         voice_path = OUTPUT_DIR / f"{slug}_voiceover.mp3"
+        diagram_path = OUTPUT_DIR / f"{slug}_diagram_1.png"
+        facts_path = OUTPUT_DIR / f"{slug}_facts.json"
         thumb_path = OUTPUT_DIR / f"{slug}_thumbnail.html"
         review_path = OUTPUT_DIR / f"{slug}_review.json"
 
@@ -281,6 +283,8 @@ def list_articles() -> list[dict]:
             "linkedin_file": linkedin_path.name if linkedin_path.exists() else None,
             "video_file": video_path.name if video_path.exists() else None,
             "voice_file": voice_path.name if voice_path.exists() else None,
+            "diagram_file": diagram_path.name if diagram_path.exists() else None,
+            "facts_file": facts_path.name if facts_path.exists() else None,
             "thumb_file": thumb_path.name if thumb_path.exists() else None,
             "has_review": review_path.exists(),
         })
@@ -291,10 +295,45 @@ def list_articles() -> list[dict]:
 # Routes
 # ---------------------------------------------------------------------------
 
+def list_radars() -> list[dict]:
+    """Every dated radar run, newest first, with the briefs dug on its themes."""
+    runs = []
+    for path in sorted(OUTPUT_DIR.glob("radar_????-??-??.json"), reverse=True):
+        date = path.stem[len("radar_"):]
+        try:
+            radar = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            radar = {}
+        themes = radar.get("themes") or []
+        briefs = []
+        for brief in sorted(OUTPUT_DIR.glob(f"radar_{date}_brief_*.md")):
+            try:
+                index = int(brief.stem.rsplit("_", 1)[1])
+            except ValueError:
+                continue
+            title = themes[index - 1].get("title", "") if 0 < index <= len(themes) else ""
+            briefs.append({"index": index, "file": brief.name, "title": title or brief.name})
+        runs.append({
+            "date": date, "theme_count": len(themes),
+            "top_theme": themes[0].get("title", "") if themes else "",
+            "md": f"radar_{date}.md", "json": path.name, "briefs": briefs,
+        })
+    return runs
+
+
+RECENT_ON_HOME = 5
+
+
 @app.route("/")
 def index():
     articles = list_articles()
-    return render_template("index.html", articles=articles)
+    return render_template("index.html", articles=articles[:RECENT_ON_HOME],
+                           total_articles=len(articles))
+
+
+@app.route("/library")
+def library():
+    return render_template("library.html", articles=list_articles(), radars=list_radars())
 
 
 @app.route("/output/<path:filename>")

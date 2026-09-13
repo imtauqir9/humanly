@@ -24,6 +24,23 @@
   }
   header h1 { font-size: 1.2rem; font-weight: 700; letter-spacing: -0.3px; }
   header span { font-size: 0.85rem; color: #aaa; }
+  nav { margin-left: auto; display: flex; gap: 18px; align-items: center; }
+  nav a { color: #aaa; font-size: 0.85rem; text-decoration: none; padding: 4px 0; border-bottom: 2px solid transparent; }
+  nav a:hover { color: #fff; }
+  nav a.active { color: #fff; border-bottom-color: #fff; }
+  .library-link { display: inline-block; margin-top: 18px; font-size: 0.85rem; font-weight: 600; color: #111; text-decoration: none;
+                  border: 1px solid #111; border-radius: 6px; padding: 8px 14px; }
+  .library-link:hover { background: #111; color: #fff; }
+  #radarPanel summary::-webkit-details-marker { display: none; }
+  #radarPanel button { font-family: inherit; font-weight: 600; border-radius: 6px; cursor: pointer; transition: background 0.12s; }
+  #radarBtn { background: #111; color: #fff; border: none; padding: 8px 14px; font-size: 0.82rem; }
+  #radarBtn:hover { background: #333; }
+  #radarBtn:disabled { background: #999; cursor: not-allowed; }
+  #radarPanel .radar-write { background: #111; color: #fff; border: 1px solid #111; }
+  #radarPanel .radar-write:hover { background: #333; }
+  #radarPanel .radar-dig:hover { background: #eef2fc !important; }
+  #radarPanel details summary { font-size: 0.86rem; }
+  #radarPanel details p, #radarPanel details li { font-size: 0.82rem; line-height: 1.5; color: #333; }
 
   .layout {
     display: grid;
@@ -258,10 +275,12 @@
 <header>
   <h1>Humanly</h1>
   <span>Imran Tauqir's AI writing pipeline</span>
-  <a href="/usage" style="margin-left:auto;color:#aaa;font-size:0.85rem;text-decoration:none;"
-     onmouseover="this.style.color='#fff'" onmouseout="this.style.color='#aaa'">Token usage &rarr;</a>
-  <a href="/logout" style="color:#aaa;font-size:0.85rem;text-decoration:none;margin-left:18px;"
-     onmouseover="this.style.color='#fff'" onmouseout="this.style.color='#aaa'">Sign out</a>
+  <nav>
+    <a href="/" class="active">Write</a>
+    <a href="/library">Library</a>
+    <a href="/usage">Usage</a>
+    <a href="/logout">Sign out</a>
+  </nav>
 </header>
 
 <div class="layout">
@@ -326,17 +345,17 @@
     <div class="mode active" id="modeWrite">
 
     <!-- Topic radar: what to write -->
-    <div id="radarPanel" style="margin-bottom:22px;padding:14px 16px;border:1px solid #e3e8f0;border-radius:10px;background:#f8fafc">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
-        <div style="flex:1;min-width:240px">
+    <details id="radarPanel" style="margin-bottom:22px;padding:12px 16px;border:1px solid #e3e8f0;border-radius:10px;background:#f8fafc">
+      <summary style="cursor:pointer;list-style:none;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+        <div style="flex:1;min-width:200px">
           <strong>What should I write?</strong>
-          <p class="hint" style="margin:4px 0 0">One research pass over the most-watched AI videos, the podcasts, the newsletters and the forums of the last two weeks, ranked by what engineers need and nobody is covering yet. Pick a theme and it fills the form below.</p>
+          <div id="radarMeta" class="hint" style="margin-top:3px"></div>
         </div>
         <button type="button" id="radarBtn" style="margin:0;white-space:nowrap">Run the radar</button>
-      </div>
-      <div id="radarMeta" class="hint" style="margin-top:8px"></div>
+      </summary>
+      <p class="hint" style="margin:10px 0 0">One research pass over the most-watched AI videos, the podcasts, the newsletters, LinkedIn and the forums of the last two weeks, ranked by what engineers need and nobody is covering yet. <em>Dig in</em> reads the arguments behind a theme; <em>Write this</em> fills the form below.</p>
       <div id="radarThemes" style="margin-top:6px"></div>
-    </div>
+    </details>
 
     <h2>Generate New Article</h2>
 
@@ -414,7 +433,7 @@
 
   <!-- RIGHT: Article list -->
   <main class="panel-articles">
-    <h2>Published Articles</h2>
+    <h2>Recent</h2>
     <div class="articles-grid" id="articlesGrid">
       {% if articles %}
         {% for a in articles %}
@@ -459,6 +478,7 @@
         <p class="empty-state">No articles yet. Generate your first one!</p>
       {% endif %}
     </div>
+    <a class="library-link" id="libraryLink" href="/library">Open the library ({{ total_articles }} article{{ '' if total_articles == 1 else 's' }}) &rarr;</a>
   </main>
 
 </div>
@@ -516,7 +536,9 @@ async function refreshArticles() {
   try {
     const resp = await fetch('/api/articles');
     const articles = await resp.json();
-    renderArticles(articles);
+    renderArticles(articles.slice(0, 5));
+    const link = document.getElementById('libraryLink');
+    if (link) link.textContent = `Open the library (${articles.length} article${articles.length === 1 ? '' : 's'}) →`;
   } catch (e) { /* silent */ }
 }
 
@@ -704,7 +726,9 @@ loadRadar();
 
 function resetRadar() { radarBtn.disabled = false; radarBtn.textContent = 'Run the radar'; }
 
-radarBtn.addEventListener('click', async () => {
+radarBtn.addEventListener('click', async (ev) => {
+  ev.preventDefault();
+  document.getElementById('radarPanel').open = true;
   radarBtn.disabled = true;
   radarBtn.textContent = 'Researching…';
   startProgress(['Topic radar: reading the last 14 days of AI videos, podcasts, newsletters and forums…\n']);
@@ -726,6 +750,7 @@ radarBtn.addEventListener('click', async () => {
       appendLog('\nDone!', 'done');
       statusBadge.className = 'status-badge success';
       statusBadge.textContent = 'Radar ready. Pick a theme above.';
+      document.getElementById('radarPanel').open = true;
       await loadRadar();
       resetRadar();
     },

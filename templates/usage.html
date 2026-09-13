@@ -48,8 +48,12 @@
 <header>
   <h1>Token usage</h1>
   <span>{{ total.runs }} run{{ '' if total.runs == 1 else 's' }} logged</span>
-  <a href="/">&larr; Back to articles</a>
-  <a href="/logout" style="margin-left:18px;">Sign out</a>
+  <nav style="margin-left:auto;display:flex;gap:18px;align-items:center">
+    <a href="/" style="margin-left:0">Write</a>
+    <a href="/library" style="margin-left:0">Library</a>
+    <a href="/usage" style="margin-left:0;color:#fff;border-bottom:2px solid #fff;padding-bottom:2px">Usage</a>
+    <a href="/logout" style="margin-left:0">Sign out</a>
+  </nav>
 </header>
 
 <main>
