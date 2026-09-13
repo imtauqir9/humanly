@@ -784,6 +784,28 @@ def _docx_text(path: Path) -> str:
     return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
 
 
+_BOILERPLATE_MARKS = ("hi everyone", "welcome to edition", "newsletter", "bootcamp",
+                      "playlist on youtube", "up skill", "thanks for being part",
+                      "join the next cohort")
+
+
+def _strip_sample_boilerplate(text: str) -> str:
+    """Drop the newsletter greeting and promo lines that open a published
+    issue. They are not the author's prose, and a name in them is not the
+    author's name."""
+    lines = text.split("\n")
+    # The greeting, the pitch and the promo links can be interleaved with a
+    # paragraph that matches nothing, so cut to the last marked line in the
+    # opening block rather than stopping at the first clean one.
+    head = lines[:12]
+    last_hit = max((i for i, l in enumerate(head)
+                    if any(m in l.lower() for m in _BOILERPLATE_MARKS)), default=-1)
+    lines = lines[last_hit + 1:]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    return "\n".join(lines)
+
+
 def load_style_samples(limit_words: int = STYLE_SAMPLE_WORDS,
                        count: int = STYLE_SAMPLE_COUNT) -> str:
     """The opening of up to `count` articles from sample-articles/, as a style
@@ -799,7 +821,7 @@ def load_style_samples(limit_words: int = STYLE_SAMPLE_WORDS,
     for p in files:
         text = _docx_text(p) if p.suffix.lower() == ".docx" else p.read_text(
             encoding="utf-8", errors="ignore")
-        words = text.split()
+        words = _strip_sample_boilerplate(text).split()
         if len(words) < 150:
             continue
         excerpt = " ".join(words[:limit_words])

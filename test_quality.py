@@ -193,3 +193,14 @@ def test_style_samples_load_from_md(tmp_path: Path, monkeypatch):
     assert "--- Sample: one ---" in out
     assert "tiny" not in out
     assert len(out.split()) < 70
+
+
+def test_style_samples_drop_the_newsletter_greeting(tmp_path: Path, monkeypatch):
+    d = tmp_path / "samples"
+    d.mkdir()
+    (d / "issue.md").write_text("Hi everyone, Somebody.\nWelcome to Edition #9 of a newsletter.\n"
+                               "Join the next cohort of my Bootcamp\n\n" + "Real body prose. " * 200)
+    monkeypatch.setattr(sw, "SAMPLE_DIR", d)
+    out = sw.load_style_samples(limit_words=100)
+    assert "Somebody" not in out and "Edition" not in out and "Bootcamp" not in out
+    assert "Real body prose." in out
