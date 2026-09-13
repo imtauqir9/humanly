@@ -43,3 +43,4 @@ chapters/
 
 # Built from sample-articles/ on first run; rebuilt when they change
 sample-articles/.voice_profile.json
+output/.voice_profile.json

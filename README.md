@@ -584,6 +584,8 @@ Each run produces these files in `./output/`:
 | `<slug>.md` | Full article in Markdown |
 | `<slug>.html` | Styled HTML, ready to copy into a CMS |
 | `<slug>.docx` | Word document with embedded images |
+
+Images come from Google Images (SerpAPI) only when the result is a real, durable image URL; a blob or an expiring CDN link is refused and the placement is dropped rather than shipped broken. The diagrams the app draws (one in Level 1, optionally one in Level 2) are always reliable. Internal links are placed only to articles that already exist in the Library (needs `SITE_URL`); the writer never emits a `#` placeholder. The newsletter greeting appears only when `--edition` is above 0.
 | `<slug>_meta.json` | SEO title, meta description, slug, image URLs |
 | `<slug>_facts.json` | The fact pack the article was held to: every figure with its source URL and quote, plus the gaps no source filled |
 | `<slug>_diagram_1.png` / `.svg` | The Level 1 diagram, drawn by the app. The PNG is what the Markdown and DOCX embed; the SVG is inlined in the HTML |

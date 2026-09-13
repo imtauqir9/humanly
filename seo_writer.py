@@ -180,6 +180,10 @@ MODEL_PRICES = {
     "claude-opus-5": (5.00, 25.00),
     "claude-sonnet-5": (2.00, 10.00),
     "claude-haiku-4-5": (1.00, 5.00),
+    # ElevenLabs bills per character (one credit each). The Creator plan is
+    # $22 for 100,000 credits: $0.22 per thousand, i.e. $220 per million
+    # "input tokens" in this table. Override with MODEL_PRICES for another plan.
+    "elevenlabs-tts": (220.0, 0.0),
 }
 try:
     MODEL_PRICES.update({k: tuple(v) for k, v in
@@ -867,6 +871,54 @@ the neutralised form that fails this rule.
 """
 
 
+def library_links(output_dir: Path, exclude_title: str = "", limit: int = 12) -> list[dict]:
+    """Articles already published, as {title, url}, for the outline to link to.
+    Needs SITE_URL: without a site there is nothing to link to, and the writer
+    is told to plan no internal links rather than invent anchors."""
+    if not SITE_URL or not output_dir.exists():
+        return []
+    links = []
+    for meta_file in sorted(output_dir.glob("*_meta.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        slug = meta_file.stem[:-len("_meta")]
+        title_ = (meta.get("seo_meta") or {}).get("title") or slug.replace("-", " ")
+        if exclude_title and title_.strip().lower() == exclude_title.strip().lower():
+            continue
+        links.append({"title": title_, "url": f"{SITE_URL}/{slug}"})
+        if len(links) >= limit:
+            break
+    return links
+
+
+def internal_links_block(links: list[dict]) -> str:
+    if not links:
+        return """
+INTERNAL LINKS
+There are no published articles to link to. Plan no internal links and write
+none: never invent an anchor, and never link to "#".
+"""
+    rows = "\n".join(f"- {l['title']} | {l['url']}" for l in links)
+    return f"""
+INTERNAL LINKS (the only pages that exist; link to nothing else internally)
+{rows}
+Link to one of these only where a reader would genuinely want the detour, with
+the exact URL. Never write a link whose target is "#".
+"""
+
+
+def strip_placeholder_links(article: str) -> str:
+    """[text](#) and [text](#anchor) become plain text. The writer used to
+    render the outline's "internal linking opportunities" as dead anchors."""
+    cleaned = re.sub(r"\[([^\]]+)\]\(#[^)]*\)", r"\1", article)
+    n = len(re.findall(r"\]\(#[^)]*\)", article))
+    if n:
+        print(f"  Placeholder links removed: {n}")
+    return cleaned
+
+
 def read_take(value: str | None) -> str:
     """--take accepts inline text, or a path to a text file."""
     if not value:
@@ -888,7 +940,7 @@ def read_take(value: str | None) -> str:
 # call that touches the prose, so the humanizer and the fix pass pull in the
 # same direction as the writer instead of sanding the voice back off.
 
-VOICE_PROFILE_PATH = SAMPLE_DIR / ".voice_profile.json"
+VOICE_PROFILE_PATH = SAMPLE_DIR / ".voice_profile.json"   # run() moves this into the output dir
 
 
 def _voice_stats(samples: str) -> dict:
@@ -2613,6 +2665,7 @@ Build the sections around the evidence that actually exists in the fact pack. A
 section the pack cannot support with at least one specific should be cut or
 reframed, not padded. Note next to each section which fact ids it will use.
 {LEVELS_BLOCK}
+{internal_links_block(research.get("internal_links", []))}
 {date_context()}
 
 SEO KEYWORD STRATEGY
@@ -2630,7 +2683,9 @@ Produce a detailed markdown outline with:
    the FAQ is Level 3, the rest are Level 2. Write "Level: 1", "Level: 2" or
    "Level: 3" directly under each H2 so the writer knows the altitude.
 4. For each section: brief description of what to cover (1–2 sentences)
-5. Exactly one diagram marker, inside the Level 1 section, formatted as:
+5. Exactly one diagram marker inside the Level 1 section, and optionally one more
+   in a Level 2 section where a process, a stack or a comparison is clearer drawn
+   than described, each formatted as:
    [DIAGRAM: <title> | Shows: <the one thing the picture must make obvious>]
    and {profile['images']} image placement markers elsewhere (never in Level 1), formatted as:
    [IMAGE: <descriptive alt text> | Query: <google image search query>]
@@ -2644,7 +2699,8 @@ Produce a detailed markdown outline with:
 8. Conclusion section ({profile['conclusion']} words with CTA)
 9. Supplementary metadata block at the end:
    - URL slug suggestion
-   - 5–7 internal linking opportunities
+   - Internal links to place, chosen only from the INTERNAL LINKS list above (or
+     "none" when that list is empty)
    - Keyword density targets
 
 Format as clean markdown. Be specific — each section note should guide the writer clearly."""
@@ -2716,13 +2772,15 @@ INSTRUCTIONS
     term defined in plain words on first use, sentences mostly under 15 words. Level 2
     is for practitioners. Level 3 is where it gets hard, and where most of the
     AUTHOR'S TAKE belongs. Do not write "Level: n" into the article itself.
-14. Keep the [DIAGRAM: ... | Shows: ...] marker exactly where the outline puts it.
-
+14. Keep every [DIAGRAM: ... | Shows: ...] marker exactly where the outline puts it.
+15. Internal links only to the URLs in INTERNAL LINKS, if any. Never write a link
+    whose target is "#" or a page that does not exist.
+{internal_links_block(research.get("internal_links", []))}
 Write the full article now. Output the article content ONLY."""
 
     # `system` was built and never sent before this change, so the writer had
     # no persona, no citation rule and (now) no style samples. Send it.
-    result = call_claude(prompt, system=system, max_tokens=16000)
+    result = strip_placeholder_links(call_claude(prompt, system=system, max_tokens=16000))
     word_count = len(result.split())
     print(f"  Article written ({word_count} words).")
     return result
@@ -3325,20 +3383,21 @@ def search_images(content: str, research: dict) -> dict[str, dict]:
                 }, timeout=15)
                 resp.raise_for_status()
                 img_results = resp.json().get("images_results", [])
-                if img_results:
-                    top = img_results[0]
-                    image_url = top.get("original")
-                    source_url = top.get("source") or top.get("link")
-                    print(f"  [Google Images] {alt_text[:50]}: {image_url[:60] if image_url else 'none'}...")
+                for top in img_results[:5]:
+                    candidate = top.get("original") or ""
+                    if usable_image_url(candidate):
+                        image_url = candidate
+                        source_url = top.get("source") or top.get("link")
+                        break
+                print(f"  [Google Images] {alt_text[:50]}: {image_url[:60] if image_url else 'no usable result'}")
             except Exception as e:
-                print(f"  SerpAPI image search error ({e}), using Unsplash fallback.")
+                print(f"  SerpAPI image search error ({e})")
 
         if not image_url:
-            # Fallback: Unsplash search URL
-            unsplash_query = quote_plus(query)
-            image_url = f"{UNSPLASH_BASE}/{unsplash_query}"
-            source_url = f"{UNSPLASH_BASE}/{unsplash_query}"
-            print(f"  [Unsplash fallback] {alt_text[:50]}")
+            # No fallback: a search-page link or a blob URL is not an image, and
+            # shipping one made the article look broken. The marker is dropped.
+            print(f"  No usable image for: {alt_text[:50]}")
+            continue
 
         images[marker_key] = {
             "alt": alt_text,
@@ -3355,17 +3414,30 @@ def search_images(content: str, research: dict) -> dict[str, dict]:
 # Inject Images into Article
 # ---------------------------------------------------------------------------
 
+_BAD_IMAGE_HOSTS = ("media.licdn.com", "lookaside.", "fbsbx.com", "scontent.")
+
+
+def usable_image_url(url: str) -> bool:
+    """A URL a reader's browser can load a year from now: https, a real image
+    path, not a blob, not a CDN link with an expiring token."""
+    if not url or not url.startswith("https://"):
+        return False
+    low = url.lower()
+    if low.startswith(("x-raw-image:", "data:")):
+        return False
+    if any(h in low for h in _BAD_IMAGE_HOSTS):
+        return False
+    if "&t=" in low and "e=" in low:          # signed, expiring
+        return False
+    path = low.split("?")[0]
+    return path.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif")) or "/images/" in path or "/image" in path
+
+
 def inject_images(content: str, images: dict[str, dict]) -> str:
     """Replace [IMAGE: ...] markers with actual markdown image blocks."""
     for marker, img in images.items():
         # Build markdown image with source attribution (matches sample article style)
-        is_unsplash = "unsplash.com" in img["url"]
-        source_note = (
-            f"*Source: [Unsplash — search '{img['query']}']({img['source']}) — "
-            "select and attribute your chosen image*"
-            if is_unsplash
-            else f"*Source: {img['source']}*"
-        )
+        source_note = f"*Source: {img['source']}*"
         replacement = f"\n![{img['alt']}]({img['url']})\n{source_note}\n"
 
         # Match the marker even if the content slightly altered whitespace
@@ -3825,6 +3897,7 @@ def generate_voiceover(script: str, slug: str, output_dir: Path) -> Path | None:
     if not resp.headers.get("content-type", "").startswith("audio"):
         print("  ElevenLabs returned no audio.")
         return None
+    record_usage("elevenlabs", "elevenlabs-tts", len(text), 0)
     path = output_dir / f"{slug}_voiceover.mp3"
     path.write_bytes(resp.content)
     words = len(text.split())
@@ -3911,6 +3984,7 @@ def _tts_with_timestamps(text: str) -> tuple[bytes, list[tuple[str, float, float
     )
     resp.raise_for_status()
     data = resp.json()
+    record_usage("elevenlabs", "elevenlabs-tts", len(text), 0)
     import base64
     audio = base64.b64decode(data["audio_base64"])
     al = data.get("alignment") or {}
@@ -4464,7 +4538,9 @@ def insert_answer_block(article: str, answer: str) -> str:
 
 
 def wrap_with_branding(article: str, edition: int) -> str:
-    intro = AUTHOR_INTRO_TEMPLATE.format(edition=edition)
+    """The newsletter greeting only when this is a newsletter edition; an
+    article with edition 0 is a standalone post and starts at its title."""
+    intro = AUTHOR_INTRO_TEMPLATE.format(edition=edition) if edition and edition > 0 else ""
     sources = build_sources_section(article)
     return intro + article + sources + AUTHOR_CTA
 
@@ -5297,7 +5373,12 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
     research = serp_research(title, keywords, intent=intent)
     research["take"] = take
     research["style_samples"] = load_style_samples()
+    # The cache sits with the output, which on Fly is the persistent volume;
+    # the code directory is rebuilt on every deploy.
+    global VOICE_PROFILE_PATH
+    VOICE_PROFILE_PATH = output_dir / ".voice_profile.json"
     research["voice_profile"] = build_voice_profile(research["style_samples"])
+    research["internal_links"] = library_links(output_dir, exclude_title=title)
 
     # Step 1.5: Fact pack - open the primary pages and pin every specific to a URL.
     if facts:
@@ -5368,7 +5449,7 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
 
     # Inject images and diagrams, then drop any marker that found nothing
     final_article = strip_orphan_image_markers(
-        inject_diagrams(inject_images(humanized, images), diagrams))
+        inject_diagrams(inject_images(strip_placeholder_links(humanized), images), diagrams))
 
     # Write outputs. Diagrams ride along in the image list so _meta.json and the
     # callback payload know about them.
