@@ -614,29 +614,87 @@ function renderRadar(r) {
   }
   const when = r.generated_at ? new Date(r.generated_at).toLocaleDateString(undefined, {month:'short', day:'numeric'}) : '';
   radarMeta.textContent = `${r.themes.length} themes from ${r.signals || '?'} signals, last ${r.days || 14} days${when ? ' · run ' + when : ''}`;
-  radarThemes.innerHTML = r.themes.map((t, i) => `
+  radarThemes.innerHTML = r.themes.map((t, i) => {
+    const b = t.brief;
+    const briefHtml = b ? `
+      <div style="margin:8px 0;padding:8px 10px;border-left:3px solid #3b5bdb;background:#fff">
+        <p style="margin:0 0 4px"><strong>Dug in.</strong> ${escHtml(b.summary)}</p>
+        <p style="margin:4px 0"><strong>Sharper angle.</strong> ${escHtml(b.sharper_angle)}</p>
+        <p class="hint" style="margin:4px 0">${b.counts ? `${b.counts.claims} claims · ${b.counts.counterarguments} pushback · ${b.counts.practitioners_said} practitioner reports · ${b.counts.numbers} numbers · ${b.counts.linkedin} LinkedIn` : ''}
+          · <a href="/output/${encodeURIComponent(b.file)}" target="_blank">Full brief</a></p>
+        ${(b.unanswered || []).length ? `<p style="margin:4px 0 0"><strong>Nobody answers:</strong> ${b.unanswered.map(escHtml).join(' · ')}</p>` : ''}
+      </div>` : '';
+    const takes = (b && b.suggested_take && b.suggested_take.length) ? b.suggested_take : (t.suggested_take || []);
+    return `
     <details style="border-top:1px solid #e3e8f0;padding:8px 0">
       <summary style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:10px">
         <span><strong>${i + 1}. ${escHtml(t.title)}</strong>
-          <span class="hint" style="display:inline"> · score ${t.score} · ${escHtml(t.saturation)} saturation</span></span>
-        <button type="button" class="radar-write" data-i="${i}" style="margin:0;padding:4px 10px;font-size:.85em;white-space:nowrap">Write this</button>
+          <span class="hint" style="display:inline"> · score ${t.score} · ${escHtml(t.saturation)} saturation${b ? ' · dug in' : ''}</span></span>
+        <span style="display:flex;gap:6px">
+          <button type="button" class="radar-dig" data-i="${i}" style="margin:0;padding:4px 10px;font-size:.85em;white-space:nowrap;background:#fff;color:#3b5bdb;border:1px solid #3b5bdb">${b ? 'Dig again' : 'Dig in'}</button>
+          <button type="button" class="radar-write" data-i="${i}" style="margin:0;padding:4px 10px;font-size:.85em;white-space:nowrap">Write this</button>
+        </span>
       </summary>
+      ${briefHtml}
       <p style="margin:8px 0 4px"><strong>Why now.</strong> ${escHtml(t.why_now)}</p>
-      <p style="margin:4px 0"><strong>Your angle.</strong> ${escHtml(t.engineer_angle)}</p>
+      <p style="margin:4px 0"><strong>Your angle.</strong> ${escHtml(b ? b.sharper_angle : t.engineer_angle)}</p>
       <p style="margin:6px 0 2px"><strong>Takes to edit:</strong></p>
-      <ul style="margin:0 0 6px 18px">${(t.suggested_take || []).map(x => `<li>${escHtml(x)}</li>`).join('')}</ul>
+      <ul style="margin:0 0 6px 18px">${takes.map(x => `<li>${escHtml(x)}</li>`).join('')}</ul>
       <p class="hint" style="margin:4px 0">${(t.evidence || []).map(e =>
         `<a href="${escHtml(e.url)}" target="_blank" rel="noopener">${escHtml(e.title || e.source)}</a> (${escHtml(e.source)}${e.signal ? ', ' + escHtml(e.signal) : ''})`
       ).join(' · ')}</p>
-    </details>`).join('');
-  radarThemes.querySelectorAll('.radar-write').forEach(b => b.addEventListener('click', (ev) => {
+    </details>`;
+  }).join('');
+  radarThemes.querySelectorAll('.radar-write').forEach(btn => btn.addEventListener('click', (ev) => {
     ev.preventDefault();
-    const t = r.themes[+b.dataset.i];
-    document.getElementById('topic').value = t.suggested_title || t.title;
-    document.getElementById('intent').value = t.suggested_intent || '';
-    document.getElementById('take').value = (t.suggested_take || []).join('\n');
+    const t = r.themes[+btn.dataset.i];
+    const b = t.brief || {};
+    document.getElementById('topic').value = b.suggested_title || t.suggested_title || t.title;
+    document.getElementById('intent').value = b.suggested_intent || t.suggested_intent || '';
+    const takes = (b.suggested_take && b.suggested_take.length) ? b.suggested_take : (t.suggested_take || []);
+    document.getElementById('take').value = takes.join('\n');
     document.getElementById('topic').scrollIntoView({behavior: 'smooth', block: 'center'});
   }));
+  radarThemes.querySelectorAll('.radar-dig').forEach(btn => btn.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    digTheme(+btn.dataset.i + 1, r.themes[+btn.dataset.i].title);
+  }));
+}
+
+async function digTheme(index, title) {
+  radarBtn.disabled = true;
+  radarBtn.textContent = 'Digging…';
+  startProgress([`Dig in: ${title}`, 'Reading the discussion threads, transcripts, LinkedIn and practitioners\' write-ups…\n']);
+  let jobId;
+  try {
+    const resp = await fetch('/api/radar/dig', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({index}),
+    });
+    const d = await resp.json();
+    if (d.error) throw new Error(d.error);
+    jobId = d.job_id;
+  } catch (err) {
+    appendLog(`\nFailed to start: ${err.message}`, 'err');
+    resetRadar();
+    return;
+  }
+  streamJob(jobId, {
+    onDone: async () => {
+      appendLog('\nDone!', 'done');
+      statusBadge.className = 'status-badge success';
+      statusBadge.textContent = 'Brief ready. Open the theme to read it.';
+      await loadRadar();
+      resetRadar();
+    },
+    onFail: async (msg) => {
+      if (msg) {
+        appendLog(`\nERROR: ${msg}`, 'err');
+        statusBadge.className = 'status-badge error';
+        statusBadge.textContent = `Error: ${msg}`;
+      }
+      resetRadar();
+    },
+  });
 }
 
 async function loadRadar() {

@@ -194,6 +194,7 @@ python seo_writer.py "Semantic Caching for LLMs" --output-dir ./articles --editi
 | `--no-facts` | Skip the Step 1.5 fact pack. The writer is then forbidden from stating any price, date, version or statistic |
 | `--radar` | Don't write; find out what to write. See *Topic radar* below |
 | `--radar-days` | How far back the radar looks (default `14`) |
+| `--dig N` | Deep research on theme N of the latest radar: discussion threads, transcripts, public LinkedIn posts, practitioners' write-ups → a one-page brief |
 | `--no-diagram` | Skip the Step 8.5 diagram. The `[DIAGRAM:]` marker in the Level 1 section is dropped instead of drawn |
 | `--words` | Article length: `default` (2,500–3,500), `2000`, or `1000` |
 | `--linkedin` | Also write a LinkedIn post from the finished article |
@@ -244,7 +245,8 @@ conversation:
 | Podcasts — Latent Space, Lex, No Priors, a16z, Practical AI, Dwarkesh, … | same |
 | Newsletters and posts — Simon Willison, Karpathy, Mollick, swyx, Hamel Husain, The Batch, … | same |
 | Hacker News | the Algolia API, free, no key |
-| Reddit — r/LocalLLaMA, r/MachineLearning, r/artificial, … | the public JSON feeds, best effort (Reddit blocks some) |
+| Reddit — r/LocalLLaMA, r/MachineLearning, r/artificial, … | the RSS feeds, best effort (Reddit rate-limits them) |
+| LinkedIn — public posts and articles by AI practitioners | web search (`site:linkedin.com/posts`, `/pulse`); only pages that open without login |
 
 The signals are clustered into **up to eight themes**, each needing at least
 two independent sources, and scored on breadth, heat, freshness and — most
@@ -266,7 +268,18 @@ the themes inline and signed links to the files. `POST /api/radar` with a
 `callback_url` does the same on demand. `RADAR_LENS` describes who you write
 for; it steers what counts as a gap.
 
-A run costs about $1–1.50 (most of it is reading the pages) and takes three to five minutes. Reddit rate-limits its feeds, so some subreddits are skipped on a given run; the radar says which.
+**Dig in.** The radar knows *what* people are talking about; it has not read
+the arguments. **Dig in** on a theme (or `--dig N`) reads them: the Hacker News
+comment threads (by API), the Reddit threads (feeds, when they answer), the
+episode and video transcripts, public LinkedIn posts and articles, and
+write-ups by people who actually built the thing. It returns a one-page brief
+— `radar_<date>_brief_N.md` — with the strongest claims and verbatim quotes,
+the pushback, what practitioners reported, every number with its source, the
+questions nobody answers, and a sharper angle, title, intent and takes.
+The brief attaches to the theme, so **Write this** uses it. About $2–3 and
+five minutes per theme.
+
+A radar run costs about $1–1.50 (most of it is reading the pages) and takes three to five minutes. Reddit rate-limits its feeds, so some subreddits are skipped on a given run; the radar says which.
 
 ---
 
@@ -545,6 +558,7 @@ Each run produces these files in `./output/`:
 | `<slug>_review.json` | The same argument as raw data |
 | `<slug>_linkedin.md` | LinkedIn post, with `--linkedin` |
 | `<slug>_video.md` | Video script, with `--video` |
+| `radar_<date>_brief_N.md` / `.json` | The dig-in brief for theme N: claims with quotes, pushback, practitioner reports, numbers, LinkedIn, open questions |
 | `radar_<date>.md` / `.json` | The topic radar: ranked themes with evidence, angle, title, intent and takes. `radar_latest.json` always points at the newest |
 | `<slug>_voiceover.mp3` | The script's narration, spoken in your cloned voice, with `--voiceover` |
 | `<slug>_thumbnail.html` | Share card, with `--thumbnail`. Open it and click to save a PNG |

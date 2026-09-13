@@ -1959,7 +1959,7 @@ def _reddit_top(days: int, limit: int = 40) -> list[dict]:
 RADAR_SCAN_SCHEMA = """{
   "items": [
     {
-      "kind": "youtube | podcast | newsletter | post | article",
+      "kind": "youtube | podcast | newsletter | post | linkedin | article",
       "title": "<title of the video, episode, issue or post>",
       "url": "<the real url>",
       "who": "<channel, show or person>",
@@ -1984,7 +1984,10 @@ Find, by searching and opening pages:
 2. New episodes of these podcasts and what each discussed: {", ".join(RADAR_PODCASTS)}.
 3. What widely followed AI voices published or argued this fortnight, in newsletters
    and posts: {", ".join(RADAR_VOICES)}.
-4. Anything from the last {days} days that several of the above discuss independently.
+4. Public LinkedIn posts and articles by AI practitioners from the last {days} days:
+   search site:linkedin.com/posts and site:linkedin.com/pulse with the week's AI
+   topics, open only pages that display without a login, and record who wrote it.
+5. Anything from the last {days} days that several of the above discuss independently.
 
 Rules: only items you actually saw on a page you opened or in a search result; real
 URLs only, never constructed; 20 to 35 items; prefer the last {days} days and give
@@ -2055,6 +2058,7 @@ def _clean_radar(data: dict, signals: list[dict]) -> dict:
                 "source": str(e.get("source") or seen["source"])[:60],
                 "title": str(e.get("title") or seen["title"])[:160],
                 "url": seen["url"],
+                "discussion": seen.get("discussion") or "",
                 "signal": str(e.get("signal") or seen["signal"])[:40],
             })
         if len(evidence) < 2:
@@ -2206,6 +2210,295 @@ def run_radar(output_dir: Path, days: int = RADAR_DAYS):
         print("  No theme had two sources behind it. Try a longer window with --radar-days 30.")
     print(f"  Radar      : {md_path}")
     print(f"  Radar JSON : {json_path}")
+    print(f"  Usage JSON : {usage_path}")
+    print_usage_summary()
+    print(f"{'='*60}\n")
+    return md_path, json_path
+
+
+# ---------------------------------------------------------------------------
+# Dig in: deep research on one radar theme
+# ---------------------------------------------------------------------------
+#
+# The radar knows what people are talking about; it has not read the
+# arguments. Dig in takes one theme and reads them: the Hacker News comment
+# threads (Algolia's item API), the Reddit threads (feeds, when they answer),
+# the episode and video pages and their transcripts, public LinkedIn posts
+# and articles, and practitioners' own write-ups. It returns a one-page brief
+# - the strongest claims with quotes, the counter-arguments, what people who
+# ran it reported, the numbers, the questions nobody answers - and a sharper
+# angle, title, intent and takes. The brief is stored on the theme, so
+# "Write this" picks it up.
+
+DIG_MAX_COMMENTS = 30
+DIG_SCHEMA = """{
+  "summary": "<what this theme is really about once you have read the arguments, 2-3 plain sentences>",
+  "claims": [ {"claim": "<a strong claim being made>", "who": "<who makes it>", "url": "<where>", "quote": "<verbatim, under 40 words>"} ],
+  "counterarguments": [ {"point": "<the pushback>", "who": "<who>", "url": "<where>"} ],
+  "practitioners_said": [ {"said": "<what someone who actually built or ran it reported>", "who": "<who>", "url": "<where>"} ],
+  "numbers": [ {"value": "<the figure>", "what": "<what it measures>", "url": "<where>"} ],
+  "linkedin": [ {"who": "<name and role>", "gist": "<what they argued>", "url": "<the public post or article>"} ],
+  "unanswered": ["<a question the sources raise and nobody answers>"],
+  "sharper_angle": "<the angle, now that you have read the arguments, 1-2 sentences>",
+  "suggested_title": "<working title>",
+  "suggested_intent": "<what the reader should be able to do after reading, one sentence>",
+  "suggested_take": ["<first person, specific enough to disagree with>", "..."],
+  "sources_opened": ["<url>", "..."]
+}"""
+
+
+def _strip_html(text: str) -> str:
+    import html as html_lib
+    return re.sub(r"\s+", " ", html_lib.unescape(re.sub(r"<[^>]+>", " ", text or ""))).strip()
+
+
+def _hn_comments(discussion_url: str, limit: int = DIG_MAX_COMMENTS) -> list[str]:
+    """Top-level comments and one level of replies from a Hacker News thread."""
+    m = re.search(r"item\?id=(\d+)", discussion_url or "")
+    if not m:
+        return []
+    try:
+        r = requests.get(f"https://hn.algolia.com/api/v1/items/{m.group(1)}",
+                         headers=_RADAR_UA, timeout=20)
+        r.raise_for_status()
+        item = r.json()
+    except Exception as e:
+        print(f"  Hacker News thread {m.group(1)} failed ({str(e)[:60]})")
+        return []
+    out: list[str] = []
+
+    def walk(node: dict, depth: int):
+        for c in node.get("children") or []:
+            if len(out) >= limit:
+                return
+            text = _strip_html(c.get("text"))
+            if len(text) >= 80:
+                out.append(f"{c.get('author') or 'anon'}: {text[:600]}")
+            if depth < 1:
+                walk(c, depth + 1)
+
+    walk(item, 0)
+    return out[:limit]
+
+
+def _reddit_comments(discussion_url: str, limit: int = 20) -> list[str]:
+    """Comments from a Reddit thread's feed. Reddit rate-limits these hard, so
+    an empty answer is normal, not an error."""
+    if "reddit.com" not in (discussion_url or ""):
+        return []
+    import xml.etree.ElementTree as ET
+    ns = {"a": "http://www.w3.org/2005/Atom"}
+    time.sleep(REDDIT_PAUSE_SECS)
+    try:
+        r = requests.get(discussion_url.rstrip("/") + "/.rss", params={"limit": limit},
+                         headers=_RADAR_UA, timeout=20)
+        if r.status_code != 200 or b"<feed" not in r.content[:400]:
+            print(f"  Reddit thread skipped (HTTP {r.status_code})")
+            return []
+        entries = ET.fromstring(r.content).findall("a:entry", ns)
+    except Exception as e:
+        print(f"  Reddit thread failed ({str(e)[:60]})")
+        return []
+    out = []
+    for e in entries[1:]:                      # the first entry is the post itself
+        body = _strip_html(e.findtext("a:content", default="", namespaces=ns))
+        who = e.findtext("a:author/a:name", default="anon", namespaces=ns)
+        if len(body) >= 60:
+            out.append(f"{who}: {body[:500]}")
+    return out[:limit]
+
+
+def _gather_discussions(theme: dict) -> str:
+    """Every forum thread behind the theme's evidence, read by code."""
+    blocks = []
+    for e in theme.get("evidence", []):
+        d = e.get("discussion") or ""
+        if "news.ycombinator.com" in d:
+            comments = _hn_comments(d)
+        elif "reddit.com" in d:
+            comments = _reddit_comments(d)
+        else:
+            continue
+        if comments:
+            print(f"  {len(comments)} comments read: {str(e.get('title', ''))[:60]}")
+            blocks.append(f"=== Discussion of: {e.get('title', '')} ({d}) ===\n"
+                          + "\n".join(f"- {c}" for c in comments))
+    return "\n\n".join(blocks)[:30000]
+
+
+def _clean_dig(data: dict) -> dict:
+    if not isinstance(data, dict):
+        data = {}
+
+    def rows(key: str, fields: tuple, url_required: bool = True) -> list[dict]:
+        out = []
+        for row in (data.get(key) or [])[:12]:
+            if not isinstance(row, dict):
+                continue
+            cleaned = {f: " ".join(str(row.get(f, "") or "").split())[:400] for f in fields}
+            if url_required and not cleaned.get("url", "").startswith("http"):
+                continue
+            if not any(cleaned[f] for f in fields if f != "url"):
+                continue
+            out.append(cleaned)
+        return out[:8]
+
+    return {
+        "summary": " ".join(str(data.get("summary", "") or "").split())[:600],
+        "claims": rows("claims", ("claim", "who", "url", "quote")),
+        "counterarguments": rows("counterarguments", ("point", "who", "url")),
+        "practitioners_said": rows("practitioners_said", ("said", "who", "url")),
+        "numbers": rows("numbers", ("value", "what", "url")),
+        "linkedin": rows("linkedin", ("who", "gist", "url")),
+        "unanswered": [" ".join(str(x).split())[:300] for x in (data.get("unanswered") or [])
+                       if str(x).strip()][:8],
+        "sharper_angle": " ".join(str(data.get("sharper_angle", "") or "").split())[:400],
+        "suggested_title": " ".join(str(data.get("suggested_title", "") or "").split())[:140],
+        "suggested_intent": " ".join(str(data.get("suggested_intent", "") or "").split())[:300],
+        "suggested_take": [" ".join(str(x).split())[:300] for x in (data.get("suggested_take") or [])
+                           if str(x).strip()][:3],
+        "sources_opened": [str(u).strip() for u in (data.get("sources_opened") or [])
+                           if str(u).strip().startswith("http")][:30],
+    }
+
+
+def dig_theme(theme: dict, days: int = RADAR_DAYS) -> dict:
+    log("DIG 1", "Reading the discussion threads")
+    discussions = _gather_discussions(theme)
+    if not discussions:
+        print("  No forum thread could be read; working from the pages alone.")
+    evidence = "\n".join(
+        f"- {e.get('source', '')}: {e.get('title', '')} | {e['url']}"
+        + (f" | discussion: {e['discussion']}" if e.get("discussion") else "")
+        for e in theme.get("evidence", []))
+
+    log("DIG 2", "Opening the sources, transcripts, LinkedIn and practitioners' write-ups")
+    prompt = f"""You are doing the deep research on one theme for an author who writes for {RADAR_LENS}.
+{date_context()}
+
+THEME: {theme['title']}
+WHY IT IS LIVE: {theme.get('why_now', '')}
+THE ANGLE SO FAR: {theme.get('engineer_angle', '')}
+
+EVIDENCE THE RADAR FOUND
+{evidence}
+
+WHAT PEOPLE SAID IN THE DISCUSSIONS (already read for you)
+{discussions or '(no discussion threads could be read)'}
+
+Do this, searching and opening pages:
+1. Open every evidence URL above that is not a discussion thread and read what it
+   actually claims.
+2. For any podcast episode or video, find the transcript or show notes (search
+   "<title> transcript") and read the part about this theme.
+3. Search LinkedIn for public posts and articles by AI practitioners on this theme
+   from the last {days} days, with queries like site:linkedin.com/posts <keywords>
+   and site:linkedin.com/pulse <keywords>. Open only pages that display without a
+   login; record who wrote it and what they argued.
+4. Search for write-ups by people who actually built or ran the thing - engineering
+   blogs, GitHub issues, postmortems - from the last {days} days.
+5. From all of it, extract: the strongest claims with a verbatim quote and who made
+   them; the counter-arguments; what practitioners reported; every number with its
+   source; the questions nobody answers; and, now that you have read the arguments,
+   a sharper angle, a title, an intent, and 2-3 first-person takes specific enough
+   to disagree with.
+
+Rules: only what you read on a page you opened or in the discussion text above;
+every url real; quotes verbatim and under 40 words; at most 8 items per list.
+
+Return ONLY valid JSON in exactly this shape:
+{DIG_SCHEMA}"""
+    data = _claude_web_call(prompt, max_tokens=16000, searches=14, fetches=12,
+                            label="dig in", schema=DIG_SCHEMA)
+    return _clean_dig(data)
+
+
+def format_brief(theme: dict, brief: dict, stamp: str) -> str:
+    out = [f"# Brief: {theme['title']}", "", f"_Dug on {stamp}. Radar score {theme.get('score', '?')}._", "",
+           brief["summary"], "",
+           f"**Sharper angle.** {brief['sharper_angle']}", "",
+           f"**Working title:** {brief['suggested_title']}  ",
+           f"**Intent:** {brief['suggested_intent']}", "",
+           "**Takes to edit:**"] + [f"- {x}" for x in brief["suggested_take"]] + [""]
+    sections = [
+        ("What is being claimed", brief["claims"], lambda r: f"- {r['claim']} — {r['who']}: \"{r['quote']}\" ({r['url']})"),
+        ("The pushback", brief["counterarguments"], lambda r: f"- {r['point']} — {r['who']} ({r['url']})"),
+        ("What practitioners reported", brief["practitioners_said"], lambda r: f"- {r['said']} — {r['who']} ({r['url']})"),
+        ("The numbers", brief["numbers"], lambda r: f"- **{r['value']}** — {r['what']} ({r['url']})"),
+        ("On LinkedIn", brief["linkedin"], lambda r: f"- {r['who']}: {r['gist']} ({r['url']})"),
+    ]
+    for title, rows, fmt in sections:
+        if rows:
+            out += [f"## {title}", ""] + [fmt(r) for r in rows] + [""]
+    if brief["unanswered"]:
+        out += ["## Nobody answers", ""] + [f"- {q}" for q in brief["unanswered"]] + [""]
+    if brief["sources_opened"]:
+        out += ["## Sources opened", ""] + [f"- {u}" for u in brief["sources_opened"]] + [""]
+    return "\n".join(out)
+
+
+def write_brief(index: int, theme: dict, brief: dict, output_dir: Path) -> tuple[Path, Path]:
+    """Save the brief and attach its essentials to the theme in radar_latest.json
+    (and the dated copy), so the app and "Write this" see it."""
+    stamp = TODAY.strftime("%Y-%m-%d")
+    md_path = output_dir / f"radar_{stamp}_brief_{index}.md"
+    json_path = output_dir / f"radar_{stamp}_brief_{index}.json"
+    md_path.write_text(format_brief(theme, brief, stamp), encoding="utf-8")
+    json_path.write_text(json.dumps({"theme": theme["title"], "index": index, **brief},
+                                    indent=2, ensure_ascii=False), encoding="utf-8")
+    attached = {
+        "file": md_path.name, "json": json_path.name,
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "summary": brief["summary"], "sharper_angle": brief["sharper_angle"],
+        "suggested_title": brief["suggested_title"] or theme.get("suggested_title", ""),
+        "suggested_intent": brief["suggested_intent"] or theme.get("suggested_intent", ""),
+        "suggested_take": brief["suggested_take"] or theme.get("suggested_take", []),
+        "unanswered": brief["unanswered"],
+        "counts": {k: len(brief[k]) for k in
+                   ("claims", "counterarguments", "practitioners_said", "numbers", "linkedin")},
+    }
+    latest = output_dir / "radar_latest.json"
+    for path in {latest, output_dir / f"radar_{stamp}.json"}:
+        if not path.exists():
+            continue
+        try:
+            radar = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        themes = radar.get("themes") or []
+        if 1 <= index <= len(themes) and themes[index - 1].get("title") == theme["title"]:
+            themes[index - 1]["brief"] = attached
+            path.write_text(json.dumps(radar, indent=2, ensure_ascii=False), encoding="utf-8")
+    return md_path, json_path
+
+
+def run_dig(output_dir: Path, index: int, days: int = RADAR_DAYS):
+    latest = output_dir / "radar_latest.json"
+    if not latest.exists():
+        raise ClaudeError("No radar to dig into yet. Run --radar first.")
+    radar = json.loads(latest.read_text(encoding="utf-8"))
+    themes = radar.get("themes") or []
+    if not 1 <= index <= len(themes):
+        raise ClaudeError(f"--dig wants a theme number between 1 and {len(themes)}.")
+    theme = themes[index - 1]
+    reset_usage()
+    print(f"\n{'='*60}")
+    print("Dig in")
+    print(f"Theme   : {index}. {theme['title']}")
+    print(f"Sources : {len(theme.get('evidence', []))} from the radar")
+    print(f"{'='*60}")
+    brief = dig_theme(theme, days=days)
+    md_path, json_path = write_brief(index, theme, brief, output_dir)
+    usage_path = write_usage(f"radar_brief_{index}", output_dir, f"Dig in: {theme['title']}")
+    c = {k: len(brief[k]) for k in ("claims", "counterarguments", "practitioners_said",
+                                    "numbers", "linkedin", "unanswered")}
+    print(f"\n{'='*60}")
+    print("DONE")
+    print(f"  Claims {c['claims']}, pushback {c['counterarguments']}, practitioners "
+          f"{c['practitioners_said']}, numbers {c['numbers']}, LinkedIn {c['linkedin']}, "
+          f"open questions {c['unanswered']}")
+    print(f"  Angle      : {brief['sharper_angle'][:110]}")
+    print(f"  Brief      : {md_path}")
     print(f"  Usage JSON : {usage_path}")
     print_usage_summary()
     print(f"{'='*60}\n")
@@ -4928,6 +5221,17 @@ def main():
         ),
     )
     parser.add_argument(
+        "--dig",
+        type=int,
+        metavar="N",
+        default=0,
+        help=(
+            "Deep research on theme N of the latest radar: reads the discussion "
+            "threads, transcripts, public LinkedIn posts and practitioners' "
+            "write-ups, and writes a one-page brief that 'Write this' then uses."
+        ),
+    )
+    parser.add_argument(
         "--radar-days",
         type=int,
         default=RADAR_DAYS,
@@ -4954,8 +5258,8 @@ def main():
         print("ERROR: ANTHROPIC_API_KEY environment variable is not set.", file=sys.stderr)
         sys.exit(1)
 
-    if not args.audit and not args.radar and not args.topic:
-        parser.error("a topic is required unless you pass --audit FILE or --radar")
+    if not args.audit and not args.radar and not args.dig and not args.topic:
+        parser.error("a topic is required unless you pass --audit FILE, --radar or --dig N")
 
     # --intent takes priority; --keywords is the legacy shorthand; topic is the fallback
     intent = args.intent or ""
@@ -4963,6 +5267,9 @@ def main():
     output_dir = Path(args.output_dir)
 
     try:
+        if args.dig:
+            run_dig(output_dir, args.dig, days=max(3, min(60, args.radar_days)))
+            return
         if args.radar:
             run_radar(output_dir, days=max(3, min(60, args.radar_days)))
             return

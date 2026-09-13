@@ -803,6 +803,23 @@ def api_radar():
     return jsonify({"job_id": _spawn(_radar_cmd(days), callback=callback)})
 
 
+@app.route("/api/radar/dig", methods=["POST"])
+def api_radar_dig():
+    """Deep research on one theme of the latest radar (1-based index)."""
+    data = request.get_json(silent=True) or {}
+    try:
+        index = int(data.get("index") or 0)
+    except (TypeError, ValueError):
+        index = 0
+    if index < 1:
+        return jsonify({"error": "index must be a theme number, starting at 1"}), 400
+    if not (OUTPUT_DIR / "radar_latest.json").exists():
+        return jsonify({"error": "run the radar first"}), 400
+    cmd = [sys.executable, str(BASE_DIR / "seo_writer.py"), "--dig", str(index),
+           "--output-dir", str(OUTPUT_DIR)]
+    return jsonify({"job_id": _spawn(cmd)})
+
+
 @app.route("/api/radar/latest")
 def api_radar_latest():
     latest = OUTPUT_DIR / "radar_latest.json"
