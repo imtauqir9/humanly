@@ -56,6 +56,7 @@
   .btn-deck  { color: #7a5a00; border-color: #ead7a0; background: #fdf8ec; }
   .btn-dia   { color: var(--accent); border-color: #c7d2f5; background: var(--accent-soft); }
   .btn-facts { color: #555; border-color: #d6dae1; background: #f7f7f7; }
+  .btn-mp4   { color: #b3005f; border-color: #efb8d4; background: #fdeef6; }
   .btn-link:hover { filter: brightness(.96); }
 
   .section { margin-top: 36px; }
@@ -117,6 +118,9 @@
         <a class="btn-link btn-deck" href="/deck/{{ a.slug }}" target="_blank">Visual track</a>
         {% endif %}
         {% if a.voice_file %}<a class="btn-link btn-vid" href="/output/{{ a.voice_file }}" target="_blank">Voiceover (mp3)</a>{% endif %}
+        {% if a.mp4_wide %}<a class="btn-link btn-mp4" href="/output/{{ a.mp4_wide }}" target="_blank">Video 16:9</a>{% endif %}
+        {% if a.mp4_tall %}<a class="btn-link btn-mp4" href="/output/{{ a.mp4_tall }}" target="_blank">Video 9:16</a>{% endif %}
+        {% if a.video_meta %}<a class="btn-link btn-mp4" href="/output/{{ a.video_meta }}" target="_blank">Post text</a>{% endif %}
         {% if a.thumb_file %}<a class="btn-link btn-thumb" href="/output/{{ a.thumb_file }}" target="_blank">Share card</a>{% endif %}
         {% if a.has_review %}<a class="btn-link btn-rev" href="/review/{{ a.slug }}">Review</a>{% endif %}
       </div>

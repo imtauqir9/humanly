@@ -3834,6 +3834,366 @@ def generate_voiceover(script: str, slug: str, output_dir: Path) -> Path | None:
     return path
 
 
+# ---------------------------------------------------------------------------
+# Step 11: The finished video
+# ---------------------------------------------------------------------------
+#
+# The script and the voiceover were the ingredients; this is the dish. Each
+# beat becomes one slide (a headline drawn from the narration, the diagram
+# where it belongs, the brand) under that beat's narration in the author's
+# voice, with captions burned in - most of a LinkedIn feed plays muted - and
+# the whole thing rendered twice: 16:9 for YouTube and the LinkedIn feed,
+# 9:16 for Shorts and Reels. ElevenLabs returns per-character timings with
+# the audio, so the captions land on the word, not on a guess. ffmpeg does
+# the assembly; Pillow draws the slides.
+
+VIDEO_FORMATS = {"16x9": (1920, 1080), "9x16": (1080, 1920)}
+CAPTION_MAX_CHARS = 42
+_VIDEO_BG = "#0f1115"
+_VIDEO_FG = "#ffffff"
+_VIDEO_MUTED = "#9aa3ad"
+_VIDEO_ACCENT = "#3b5bdb"
+
+
+def video_beats(script: str) -> list[dict]:
+    """The script's beats: title, visual note, narration lines."""
+    beats, current = [], None
+    for line in script.splitlines():
+        if line.startswith("## Narration only"):
+            break
+        heading = re.match(r"^##\s+(.*)", line)
+        if heading:
+            if current:
+                beats.append(current)
+            current = {"title": heading.group(1).strip(), "visual": "", "lines": []}
+            continue
+        if current is None:
+            continue
+        visual = re.match(r"^\*\*Visual:\*\*\s*(.*)", line)
+        if visual:
+            current["visual"] = visual.group(1).strip()
+        elif line.strip() and not line.startswith("---"):
+            current["lines"].append(line.strip())
+    if current:
+        beats.append(current)
+    beats = [b for b in beats if b["lines"]]
+    for b in beats:
+        # "## 2. The core idea (0:15-0:45)" -> "The core idea"
+        b["label"] = re.sub(r"^\d+\.\s*", "", re.sub(r"\s*\([^)]*\)\s*$", "", b["title"])).strip()
+        text = " ".join(b["lines"])
+        text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+        text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+        b["narration"] = text.strip()
+    return beats
+
+
+def slide_headline(beat: dict) -> str:
+    """What goes on the slide: the on-screen text the visual note names, else
+    the narration's first sentence."""
+    m = re.search(r'[Tt]ext on screen:?\s*["“](.+?)["”]', beat.get("visual", ""))
+    if m:
+        return m.group(1).strip()
+    first = re.split(r"(?<=[.!?])\s+", beat.get("narration", ""))[0].strip()
+    return first[:140]
+
+
+def _tts_with_timestamps(text: str) -> tuple[bytes, list[tuple[str, float, float]]]:
+    """The narration as mp3 plus (character, start, end) for every character."""
+    key = os.getenv("ELEVENLABS_API_KEY", "").strip()
+    voice = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
+    resp = requests.post(
+        f"{ELEVENLABS_BASE}/text-to-speech/{voice}/with-timestamps",
+        headers={"xi-api-key": key},
+        json={"text": text, "model_id": ELEVENLABS_MODEL,
+              "voice_settings": {"stability": 0.5, "similarity_boost": 0.8,
+                                 "style": 0.2, "use_speaker_boost": True}},
+        timeout=240,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    import base64
+    audio = base64.b64decode(data["audio_base64"])
+    al = data.get("alignment") or {}
+    chars = list(zip(al.get("characters", []),
+                     al.get("character_start_times_seconds", []),
+                     al.get("character_end_times_seconds", [])))
+    return audio, chars
+
+
+def caption_cues(chars: list[tuple[str, float, float]], max_chars: int = CAPTION_MAX_CHARS
+                 ) -> list[tuple[float, float, str]]:
+    """Group timed characters into caption lines: break at sentence ends, or at
+    a space once a line is long enough. Returns (start, end, text)."""
+    cues, buf, start = [], [], None
+    for i, (ch, s, e) in enumerate(chars):
+        if start is None:
+            if ch.isspace():
+                continue
+            start = s
+        buf.append((ch, s, e))
+        text = "".join(c for c, _, _ in buf)
+        at_sentence_end = ch in ".!?" and (i + 1 == len(chars) or chars[i + 1][0].isspace())
+        long_enough = len(text) >= max_chars and ch.isspace()
+        if at_sentence_end or long_enough or i + 1 == len(chars):
+            clean = text.strip()
+            if clean:
+                cues.append((start, buf[-1][2], clean))
+            buf, start = [], None
+    # A caption that vanishes the instant its last word ends reads as a flicker.
+    out = []
+    for n, (s, e, t) in enumerate(cues):
+        nxt = cues[n + 1][0] if n + 1 < len(cues) else e + 0.6
+        out.append((round(s, 3), round(min(e + 0.35, nxt), 3), t))
+    return out
+
+
+def _srt_time(t: float) -> str:
+    ms = int(round(t * 1000))
+    h, ms = divmod(ms, 3600000)
+    m, ms = divmod(ms, 60000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def write_srt(cues: list[tuple[float, float, str]], path: Path):
+    lines = []
+    for n, (s, e, text) in enumerate(cues, 1):
+        lines += [str(n), f"{_srt_time(s)} --> {_srt_time(e)}", text, ""]
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _slide_font(size: int, bold: bool = False):
+    from PIL import ImageFont
+    for name in (("arialbd.ttf", "DejaVuSans-Bold.ttf") if bold else ("arial.ttf", "DejaVuSans.ttf")):
+        try:
+            return ImageFont.truetype(name, size)
+        except Exception:
+            continue
+    return ImageFont.load_default(size=size)
+
+
+def _wrap_px(draw, text: str, font, max_w: float, max_lines: int) -> list[str]:
+    words, lines, cur = text.split(), [], ""
+    for w in words:
+        cand = f"{cur} {w}".strip()
+        if draw.textlength(cand, font=font) <= max_w:
+            cur = cand
+        else:
+            if cur:
+                lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        lines[-1] = lines[-1].rstrip(".,;:") + "…"
+    return lines
+
+
+def render_slide(beat: dict, index: int, total: int, size: tuple[int, int], path: Path,
+                 diagram: Path | None = None, brand: str = ""):
+    """One slide: brand and beat label at the top, the headline, the diagram
+    where the beat calls for one, and room at the bottom for captions."""
+    from PIL import Image, ImageDraw
+    W, H = size
+    portrait = H > W
+    im = Image.new("RGB", (W, H), _VIDEO_BG)
+    d = ImageDraw.Draw(im)
+    pad = int(W * 0.06)
+    unit = min(W, H) / 1080          # scale type against the short edge
+
+    # Accent bar and header line
+    d.rectangle([0, 0, W, int(10 * unit)], fill=_VIDEO_ACCENT)
+    small = _slide_font(int(28 * unit))
+    d.text((pad, int(44 * unit)), brand or "Humanly", font=small, fill=_VIDEO_MUTED)
+    label = f"{index} / {total}  ·  {beat.get('label', '')}"
+    d.text((W - pad, int(44 * unit)), label, font=small, fill=_VIDEO_MUTED, anchor="ra")
+
+    caption_zone = int(H * (0.22 if portrait else 0.20))
+    body_top = int(120 * unit)
+    body_bottom = H - caption_zone
+
+    wants_diagram = diagram is not None and diagram.exists() and (
+        "diagram" in beat.get("visual", "").lower() or index == 2)
+    head_size = int((58 if portrait else 62) * unit)
+    head_font = _slide_font(head_size, bold=True)
+    max_lines = 4 if portrait else 3
+    lines = _wrap_px(d, slide_headline(beat), head_font, W - 2 * pad, max_lines)
+    line_h = int(head_size * 1.22)
+    text_h = line_h * len(lines)
+
+    if wants_diagram:
+        dg = Image.open(diagram).convert("RGB")
+        # The diagram is 1200 wide with white ground; place it on a white panel.
+        avail_h = body_bottom - body_top - text_h - int(48 * unit)
+        avail_w = W - 2 * pad
+        scale = min(avail_w / dg.width, avail_h / dg.height)
+        if scale > 0.15:
+            dg = dg.resize((int(dg.width * scale), int(dg.height * scale)))
+            y = body_top
+            for ln in lines:
+                d.text((pad, y), ln, font=head_font, fill=_VIDEO_FG)
+                y += line_h
+            y += int(36 * unit)
+            x = (W - dg.width) // 2
+            d.rounded_rectangle([x - 12, y - 12, x + dg.width + 12, y + dg.height + 12],
+                                radius=int(18 * unit), fill="#ffffff")
+            im.paste(dg, (x, y))
+            im.save(path, "PNG")
+            return
+    # Headline only, vertically centred in the body
+    y = body_top + max(0, (body_bottom - body_top - text_h) // 2)
+    for ln in lines:
+        d.text((pad, y), ln, font=head_font, fill=_VIDEO_FG)
+        y += line_h
+    im.save(path, "PNG")
+
+
+def _ffmpeg() -> str | None:
+    import shutil
+    return shutil.which("ffmpeg")
+
+
+def _run(cmd: list[str], cwd: Path):
+    import subprocess
+    r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True)
+    if r.returncode != 0:
+        raise ClaudeError(f"ffmpeg failed: {(r.stderr or '')[-600:]}")
+
+
+def _duration(path: Path, cwd: Path) -> float:
+    import subprocess
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                        "-of", "csv=p=0", path.name], cwd=str(cwd), capture_output=True, text=True)
+    try:
+        return float(r.stdout.strip())
+    except ValueError:
+        return 0.0
+
+
+def make_video(script: str, slug: str, output_dir: Path, diagram: Path | None = None,
+               formats: tuple[str, ...] = ("16x9", "9x16"),
+               tts=None) -> dict:
+    """Script -> per-beat narration with timings -> slides -> mp4 per format,
+    with burned captions, plus the joined voiceover mp3 and an .srt.
+    `tts` is injectable for tests; it defaults to ElevenLabs."""
+    log("STEP 11", "Rendering the video")
+    if not _ffmpeg():
+        print("  Skipped: ffmpeg is not installed (apt-get install ffmpeg, or winget install ffmpeg).")
+        return {}
+    if tts is None:
+        if not (os.getenv("ELEVENLABS_API_KEY", "").strip() and os.getenv("ELEVENLABS_VOICE_ID", "").strip()):
+            print("  Skipped: set ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID in .env.")
+            return {}
+        tts = _tts_with_timestamps
+    beats = video_beats(script)
+    if not beats:
+        print("  Skipped: no beats found in the script.")
+        return {}
+
+    work = output_dir / f"{slug}_video"
+    work.mkdir(parents=True, exist_ok=True)
+
+    # 1. Narration per beat, with timings
+    cues, offset, seg_audio = [], 0.0, []
+    for n, beat in enumerate(beats, 1):
+        audio, chars = tts(beat["narration"])
+        mp3 = work / f"beat_{n}.mp3"
+        mp3.write_bytes(audio)
+        dur = _duration(mp3, work) or (chars[-1][2] if chars else 0.0)
+        beat["duration"] = dur
+        for s, e, text in caption_cues(chars):
+            cues.append((s + offset, min(e, dur) + offset, text))
+        offset += dur
+        seg_audio.append(mp3)
+        print(f"  Beat {n}: {len(beat['narration'].split())} words, {dur:.1f}s - {beat['label']}")
+    total = offset
+    srt = work / "captions.srt"
+    write_srt(cues, srt)
+    (output_dir / f"{slug}_captions.srt").write_text(srt.read_text(encoding="utf-8"), encoding="utf-8")
+
+    # 2. The joined voiceover, so --mp4 does not pay for the narration twice
+    (work / "audio.txt").write_text("".join(f"file '{p.name}'\n" for p in seg_audio), encoding="utf-8")
+    _run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", "audio.txt",
+          "-c", "copy", f"../{slug}_voiceover.mp3"], work)
+
+    # 3. Slides and segments per format, then one pass to join and burn captions
+    out = {"captions": f"{slug}_captions.srt", "voiceover": f"{slug}_voiceover.mp3",
+           "duration": round(total, 1), "beats": len(beats)}
+    for fmt in formats:
+        size = VIDEO_FORMATS[fmt]
+        segs = []
+        for n, beat in enumerate(beats, 1):
+            slide = work / f"slide_{fmt}_{n}.png"
+            render_slide(beat, n, len(beats), size, slide, diagram=diagram, brand=f"Humanly · {AUTHOR_NAME}")
+            seg = work / f"seg_{fmt}_{n}.mp4"
+            _run(["ffmpeg", "-y", "-loglevel", "error", "-loop", "1", "-framerate", "30", "-i", slide.name,
+                  "-i", f"beat_{n}.mp3", "-c:v", "libx264", "-tune", "stillimage", "-preset", "veryfast",
+                  "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-shortest",
+                  "-vf", f"scale={size[0]}:{size[1]}", seg.name], work)
+            segs.append(seg)
+        (work / f"list_{fmt}.txt").write_text("".join(f"file '{p.name}'\n" for p in segs), encoding="utf-8")
+        font_px = 40 if fmt == "16x9" else 44
+        margin = 56 if fmt == "16x9" else 220
+        style = (f"FontName=Arial,FontSize={font_px},Bold=1,PrimaryColour=&H00FFFFFF,"
+                 f"OutlineColour=&H00000000,BackColour=&H80000000,BorderStyle=3,Outline=2,"
+                 f"Shadow=0,MarginV={margin},Alignment=2")
+        final = f"{slug}_video_{fmt}.mp4"
+        _run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", f"list_{fmt}.txt",
+              "-vf", f"subtitles=captions.srt:force_style='{style}'",
+              "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+              "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", f"../{final}"], work)
+        out[f"video_{fmt}"] = final
+        print(f"  {fmt}: {final} ({(output_dir / final).stat().st_size // 1024} KB)")
+    print(f"  Video: {len(beats)} beats, {total:.0f}s, {len(cues)} captions")
+    return out
+
+
+def generate_video_meta(title: str, script: str, article: str, research: dict,
+                        beats: list[dict] | None = None) -> str:
+    """YouTube title, description with chapters, tags, and a LinkedIn caption
+    for the video post - all from the script, so nothing is claimed twice."""
+    log("STEP 11.5", "Writing the YouTube and LinkedIn text for the video")
+    beats = beats or video_beats(script)
+    chapters, t = [], 0.0
+    for b in beats:
+        m, s = divmod(int(t), 60)
+        chapters.append(f"{m}:{s:02d} {b['label']}")
+        t += b.get("duration", 0.0)
+    kw = research.get("keywords", {})
+    prompt = f"""Write the publishing text for a short video made from the script below.
+{date_context()}
+{voice_block(research.get("voice_profile", ""))}
+TOPIC: {kw.get("primary_keyword", title)}
+ARTICLE TITLE: {title}
+CHAPTERS (use exactly these timestamps):
+{chr(10).join(chapters)}
+
+THE SCRIPT
+{script[:6000]}
+
+Return exactly this markdown and nothing else:
+
+# Video text: {title}
+
+## YouTube title
+<under 70 characters, the specific claim, no clickbait>
+
+## YouTube description
+<2-3 plain sentences on what the viewer learns, then a blank line, then the
+chapters one per line as "m:ss Label", then a blank line, then "Full article: [link]">
+
+## YouTube tags
+<8-12 comma-separated tags>
+
+## LinkedIn caption
+<60-120 words in the author's voice for the post that carries this video:
+open on the single most useful specific, one line on what the video shows,
+end with a question that invites engineers to disagree. No hashtags in the
+body; three at the end.>"""
+    return _strip_em_dashes(call_claude(prompt, max_tokens=1500).strip())
+
+
 def generate_thumbnail_copy(title: str, article: str, research: dict) -> dict:
     """Headline copy for the share card, drawn from the finished article.
 
@@ -4834,7 +5194,7 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
         verify: bool = True, verify_rounds: int = 2, words: str = "default",
         linkedin: bool = False, video: bool = False, thumbnail: bool = False,
         take: str = "", facts: bool = True, diagram: bool = True,
-        voiceover: bool = False):
+        voiceover: bool = False, mp4: bool = False):
     profile = length_profile(words)
     take = (take or "").strip()
     if not take:
@@ -4963,11 +5323,23 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
 
     video_path = None
     voice_path = None
+    video_files: dict = {}
     if video:
         script = generate_video_script(refined_title, humanized, research)
         video_path = output_dir / f"{slug}_video.md"
         video_path.write_text(script, encoding="utf-8")
-        if voiceover:
+        if mp4:
+            # The video step records the narration beat by beat (with timings
+            # for the captions) and joins it into the voiceover mp3 itself.
+            first_diagram = output_dir / f"{slug}_diagram_1.png"
+            video_files = make_video(script, slug, output_dir,
+                                     diagram=first_diagram if first_diagram.exists() else None)
+            if video_files:
+                voice_path = output_dir / video_files["voiceover"]
+                meta_text = generate_video_meta(refined_title, script, humanized, research,
+                                                beats=video_beats(script))
+                (output_dir / f"{slug}_video_meta.md").write_text(meta_text, encoding="utf-8")
+        if voiceover and not voice_path:
             voice_path = generate_voiceover(script, slug, output_dir)
 
     thumb_path = None
@@ -5001,6 +5373,11 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
         print(f"  Video      : {video_path}")
     if voice_path:
         print(f"  Voiceover  : {voice_path}")
+    for fmt in ("16x9", "9x16"):
+        if video_files.get(f"video_{fmt}"):
+            print(f"  Video {fmt}: {output_dir / video_files[f'video_{fmt}']}")
+    if video_files:
+        print(f"  Video text : {output_dir / f'{slug}_video_meta.md'}")
     if thumb_path:
         print(f"  Thumbnail  : {thumb_path}")
     print(f"  Usage JSON : {usage_path}")
@@ -5205,6 +5582,16 @@ def main():
               "ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID in .env"),
     )
     parser.add_argument(
+        "--mp4",
+        action="store_true",
+        help=("Also render the finished video: one slide per beat under your cloned "
+              "voice, captions burned in, as <slug>_video_16x9.mp4 (YouTube, LinkedIn) "
+              "and <slug>_video_9x16.mp4 (Shorts, Reels), plus the .srt and a "
+              "<slug>_video_meta.md with the YouTube title, description, tags and a "
+              "LinkedIn caption. Implies --video and --voiceover. Needs ffmpeg and "
+              "the ElevenLabs keys"),
+    )
+    parser.add_argument(
         "--thumbnail",
         action="store_true",
         help=("Also write a LinkedIn share card from the finished article, as "
@@ -5297,9 +5684,10 @@ def main():
             verify_rounds=args.verify_rounds,
             words=args.words,
             linkedin=args.linkedin,
-            video=args.video or args.voiceover,
+            video=args.video or args.voiceover or args.mp4,
             thumbnail=args.thumbnail,
-            voiceover=args.voiceover,
+            voiceover=args.voiceover or args.mp4,
+            mp4=args.mp4,
             take=read_take(args.take),
             facts=not args.no_facts,
             diagram=not args.no_diagram,

@@ -254,6 +254,9 @@ def list_articles() -> list[dict]:
         linkedin_path = OUTPUT_DIR / f"{slug}_linkedin.md"
         video_path = OUTPUT_DIR / f"{slug}_video.md"
         voice_path = OUTPUT_DIR / f"{slug}_voiceover.mp3"
+        mp4_wide = OUTPUT_DIR / f"{slug}_video_16x9.mp4"
+        mp4_tall = OUTPUT_DIR / f"{slug}_video_9x16.mp4"
+        video_meta = OUTPUT_DIR / f"{slug}_video_meta.md"
         diagram_path = OUTPUT_DIR / f"{slug}_diagram_1.png"
         facts_path = OUTPUT_DIR / f"{slug}_facts.json"
         thumb_path = OUTPUT_DIR / f"{slug}_thumbnail.html"
@@ -283,6 +286,9 @@ def list_articles() -> list[dict]:
             "linkedin_file": linkedin_path.name if linkedin_path.exists() else None,
             "video_file": video_path.name if video_path.exists() else None,
             "voice_file": voice_path.name if voice_path.exists() else None,
+            "mp4_wide": mp4_wide.name if mp4_wide.exists() else None,
+            "mp4_tall": mp4_tall.name if mp4_tall.exists() else None,
+            "video_meta": video_meta.name if video_meta.exists() else None,
             "diagram_file": diagram_path.name if diagram_path.exists() else None,
             "facts_file": facts_path.name if facts_path.exists() else None,
             "thumb_file": thumb_path.name if thumb_path.exists() else None,
@@ -517,6 +523,10 @@ def _completion_payload(slug: str | None, external_id: str, status: str,
         "linkedin": f"{slug}_linkedin.md",
         "video": f"{slug}_video.md",
         "voiceover": f"{slug}_voiceover.mp3",
+        "video_16x9": f"{slug}_video_16x9.mp4",
+        "video_9x16": f"{slug}_video_9x16.mp4",
+        "captions": f"{slug}_captions.srt",
+        "video_meta": f"{slug}_video_meta.md",
         "thumbnail": f"{slug}_thumbnail.html",
         "review_md": f"{slug}_review.md",
         "review_json": f"{slug}_review.json",
@@ -532,7 +542,8 @@ def _completion_payload(slug: str | None, external_id: str, status: str,
     # The small extras travel inline too - they are what the downstream media
     # steps consume, and a 200-word post is cheaper to embed than to fetch.
     for key, name in {"linkedin_md": f"{slug}_linkedin.md",
-                      "video_script_md": f"{slug}_video.md"}.items():
+                      "video_script_md": f"{slug}_video.md",
+                      "video_meta_md": f"{slug}_video_meta.md"}.items():
         p = OUTPUT_DIR / name
         if p.exists():
             payload[key] = p.read_text(encoding="utf-8")
@@ -627,6 +638,7 @@ def api_start():
     linkedin = bool(data.get("linkedin"))
     video = bool(data.get("video"))
     voiceover = bool(data.get("voiceover"))
+    mp4 = bool(data.get("mp4"))
     thumbnail = bool(data.get("thumbnail"))
 
     if not topic:
@@ -649,6 +661,8 @@ def api_start():
         cmd.append("--video")
     if voiceover:
         cmd.append("--voiceover")
+    if mp4:
+        cmd.append("--mp4")
     if thumbnail:
         cmd.append("--thumbnail")
 
@@ -662,7 +676,7 @@ def api_start():
             "article_baseline": {p.name for p in OUTPUT_DIR.glob("*_meta.json")},
             "echo": {"topic": topic, "intent": intent, "take": take, "words": words,
                      "edition": edition, "linkedin": linkedin,
-                     "video": video, "voiceover": voiceover, "thumbnail": thumbnail},
+                     "video": video, "voiceover": voiceover, "mp4": mp4, "thumbnail": thumbnail},
         }
 
     job_id = _spawn(cmd, callback=callback)

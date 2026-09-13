@@ -199,6 +199,7 @@ python seo_writer.py "Semantic Caching for LLMs" --output-dir ./articles --editi
 | `--words` | Article length: `default` (2,500–3,500), `2000`, or `1000` |
 | `--linkedin` | Also write a LinkedIn post from the finished article |
 | `--video` | Also write a 2–3 minute video script, timed, with a visual per beat |
+| `--mp4` | Also render the finished video — one slide per beat under your cloned voice, captions burned in — as `<slug>_video_16x9.mp4` (YouTube, LinkedIn) and `<slug>_video_9x16.mp4` (Shorts, Reels), with the `.srt` and a `<slug>_video_meta.md` (YouTube title, description with chapters, tags, LinkedIn caption). Implies `--video --voiceover`. Needs ffmpeg + the ElevenLabs keys |
 | `--voiceover` | Also record that script's narration in your own cloned voice (ElevenLabs) as `<slug>_voiceover.mp3`. Implies `--video`; needs `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID` |
 | `--thumbnail` | Also design a LinkedIn share card, with a button to save it as a PNG |
 | `--audit FILE` | Audit a document you already have instead of writing a new one |
@@ -327,6 +328,30 @@ pass, and the auditor, which flags passages that read nothing like it.
 
 ---
 
+## From article to a video you can post
+
+`--mp4` (the **Finished video** option in the form) turns the video script into
+a file you can upload as it is. Each of the six beats becomes a slide - a
+headline pulled from the narration (or the on-screen text the visual note
+names), the diagram on the beat that calls for it, the brand - under that
+beat's narration recorded in your cloned voice. ElevenLabs returns the timing
+of every character with the audio, so the **captions are burned in on the
+word** (most of a LinkedIn feed plays muted). It renders twice: **16:9** for
+YouTube and the LinkedIn feed, **9:16** for Shorts and Reels. You also get the
+`.srt`, the joined voiceover, and `<slug>_video_meta.md` with a YouTube title,
+a description with chapters at the real timestamps, tags, and a LinkedIn
+caption in your voice.
+
+Posting is the one step it leaves to you or to your automation: LinkedIn has
+no public API for personal posts, and YouTube upload needs your own OAuth
+consent. The callback payload links both mp4 files with signed URLs, so a
+Zapier or Make step can post them; or download from the Library and upload
+by hand. Needs `ffmpeg` (in the Docker image already; `winget install ffmpeg`
+locally) and the ElevenLabs keys. A 3-minute video costs ~2,400 ElevenLabs
+credits and about a minute of rendering.
+
+---
+
 ## Length and the LinkedIn post
 
 `--words` takes `default`, `2000` or `1000`, and the dropdown in the web form
@@ -422,7 +447,8 @@ The callback payload:
 | `external_id`, `job_id`, `request` | What you sent, echoed back |
 | `slug`, `meta`, `images`, `word_count` | SEO title, description, slug and the image list from `_meta.json` |
 | `article_md`, `linkedin_md`, `video_script_md` | The article and the extras, inline |
-| `files` | Download links for `md`, `html`, `docx`, `meta`, `linkedin`, `video`, `voiceover`, `thumbnail`, `review_md`, `review_json`, `facts`, `diagram_png`, `diagram_svg`, `usage` |
+| `files` | Download links for `md`, `html`, `docx`, `meta`, `linkedin`, `video`, `voiceover`, `video_16x9`, `video_9x16`, `captions`, `video_meta`, `thumbnail`, `review_md`, `review_json`, `facts`, `diagram_png`, `diagram_svg`, `usage` |
+| `video_meta_md` | The YouTube/LinkedIn text for the video, inline |
 | `usage` | Calls, tokens and cost for this run |
 
 The links in `files` go through `/dl/<expiry>/<signature>/<file>` — signed
@@ -567,6 +593,8 @@ Each run produces these files in `./output/`:
 | `<slug>_video.md` | Video script, with `--video` |
 | `radar_<date>_brief_N.md` / `.json` | The dig-in brief for theme N: claims with quotes, pushback, practitioner reports, numbers, LinkedIn, open questions |
 | `radar_<date>.md` / `.json` | The topic radar: ranked themes with evidence, angle, title, intent and takes. `radar_latest.json` always points at the newest |
+| `<slug>_video_16x9.mp4` / `_9x16.mp4` | The finished video in both formats, with `--mp4`; `<slug>_captions.srt` alongside |
+| `<slug>_video_meta.md` | YouTube title, description with chapters, tags, and the LinkedIn caption for the video post |
 | `<slug>_voiceover.mp3` | The script's narration, spoken in your cloned voice, with `--voiceover` |
 | `<slug>_thumbnail.html` | Share card, with `--thumbnail`. Open it and click to save a PNG |
 | `<slug>_usage.json` | Tokens and cost for this run, per model and per step |

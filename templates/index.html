@@ -151,6 +151,7 @@
   .btn-deck  { color: #7a5a00; border-color: #ead7a0; background: #fdf8ec; }
   .btn-dia   { color: var(--accent); border-color: #c7d2f5; background: var(--accent-soft); }
   .btn-facts { color: #555; border-color: #d6dae1; background: #f7f7f7; }
+  .btn-mp4   { color: #b3005f; border-color: #efb8d4; background: #fdeef6; }
   .btn-link:hover { filter: brightness(.96); }
   .card-foot { padding: 14px 20px; border-top: 1px solid var(--line); }
   .library-link { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; color: var(--ink); text-decoration: none; }
@@ -288,6 +289,7 @@
               <label class="opt"><input type="checkbox" id="linkedin"><span>LinkedIn post<small>written from the finished article</small></span></label>
               <label class="opt"><input type="checkbox" id="video"><span>Video script<small>2–3 minutes, six timed beats</small></span></label>
               <label class="opt"><input type="checkbox" id="voiceover"><span>Voiceover in my voice<small>ElevenLabs clone, mp3</small></span></label>
+              <label class="opt"><input type="checkbox" id="mp4"><span>Finished video<small>slides + your voice + captions · 16:9 and 9:16</small></span></label>
               <label class="opt"><input type="checkbox" id="thumbnail"><span>LinkedIn share card<small>1200×627, save as PNG</small></span></label>
             </div>
             <p class="hint">Every article also gets the fact pack, the layered structure, a diagram the app draws, and the three-agent audit.</p>
@@ -342,6 +344,9 @@
               {% if a.linkedin_file %}<a class="btn-link btn-li" href="/output/{{ a.linkedin_file }}" target="_blank">LinkedIn</a>{% endif %}
               {% if a.video_file %}<a class="btn-link btn-vid" href="/output/{{ a.video_file }}" target="_blank">Video script</a>{% endif %}
               {% if a.voice_file %}<a class="btn-link btn-vid" href="/output/{{ a.voice_file }}" target="_blank">Voiceover</a>{% endif %}
+              {% if a.mp4_wide %}<a class="btn-link btn-mp4" href="/output/{{ a.mp4_wide }}" target="_blank">Video 16:9</a>{% endif %}
+              {% if a.mp4_tall %}<a class="btn-link btn-mp4" href="/output/{{ a.mp4_tall }}" target="_blank">Video 9:16</a>{% endif %}
+              {% if a.video_meta %}<a class="btn-link btn-mp4" href="/output/{{ a.video_meta }}" target="_blank">Post text</a>{% endif %}
               {% if a.thumb_file %}<a class="btn-link btn-thumb" href="/output/{{ a.thumb_file }}" target="_blank">Share card</a>{% endif %}
               {% if a.has_review %}<a class="btn-link btn-rev" href="/review/{{ a.slug }}">Review</a>{% endif %}
             </div>
@@ -396,6 +401,9 @@ function renderArticles(articles) {
         ${a.linkedin_file ? `<a class="btn-link btn-li" href="/output/${encodeURIComponent(a.linkedin_file)}" target="_blank">LinkedIn</a>` : ''}
         ${a.video_file ? `<a class="btn-link btn-vid" href="/output/${encodeURIComponent(a.video_file)}" target="_blank">Video script</a>` : ''}
         ${a.voice_file ? `<a class="btn-link btn-vid" href="/output/${encodeURIComponent(a.voice_file)}" target="_blank">Voiceover</a>` : ''}
+        ${a.mp4_wide ? `<a class="btn-link btn-mp4" href="/output/${encodeURIComponent(a.mp4_wide)}" target="_blank">Video 16:9</a>` : ''}
+        ${a.mp4_tall ? `<a class="btn-link btn-mp4" href="/output/${encodeURIComponent(a.mp4_tall)}" target="_blank">Video 9:16</a>` : ''}
+        ${a.video_meta ? `<a class="btn-link btn-mp4" href="/output/${encodeURIComponent(a.video_meta)}" target="_blank">Post text</a>` : ''}
         ${a.thumb_file ? `<a class="btn-link btn-thumb" href="/output/${encodeURIComponent(a.thumb_file)}" target="_blank">Share card</a>` : ''}
         ${a.has_review ? `<a class="btn-link btn-rev" href="/review/${encodeURIComponent(a.slug)}">Review</a>` : ''}
       </div>
@@ -733,8 +741,9 @@ form.addEventListener('submit', async (e) => {
   const edition  = parseInt(document.getElementById('edition').value) || 0;
   const words    = document.getElementById('words').value;
   const linkedin = document.getElementById('linkedin').checked;
-  const video    = document.getElementById('video').checked || document.getElementById('voiceover').checked;
-  const voiceover = document.getElementById('voiceover').checked;
+  const mp4      = document.getElementById('mp4').checked;
+  const video    = document.getElementById('video').checked || document.getElementById('voiceover').checked || mp4;
+  const voiceover = document.getElementById('voiceover').checked || mp4;
   const thumbnail = document.getElementById('thumbnail').checked;
 
   if (!topic) return;
@@ -747,6 +756,7 @@ form.addEventListener('submit', async (e) => {
     ...(linkedin ? ['Extra  : LinkedIn post'] : []),
     ...(video ? ['Extra  : video script'] : []),
     ...(voiceover ? ['Extra  : voiceover in your voice'] : []),
+    ...(mp4 ? ['Extra  : finished video, 16:9 and 9:16, captions burned in'] : []),
     ...(thumbnail ? ['Extra  : share card'] : []),
     ...(intent ? [`Intent : ${intent}`] : []),
     ...(take ? [`Take   : ${take.split('\n').length} point(s)`] : ['Take   : none — the article will have no first-person view']),
@@ -759,7 +769,7 @@ form.addEventListener('submit', async (e) => {
     const startResp = await fetch('/api/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ topic, intent: intent || keywords, take, edition, words, linkedin, video, voiceover, thumbnail }),
+      body: JSON.stringify({ topic, intent: intent || keywords, take, edition, words, linkedin, video, voiceover, mp4, thumbnail }),
     });
     const startData = await startResp.json();
     if (startData.error) throw new Error(startData.error);
