@@ -155,4 +155,4 @@ def test_app_dig_route(tmp_path: Path, monkeypatch):
     assert c.post("/api/radar/dig", json={"index": 2}).get_json() == {"job_id": "job-2"}
     assert spawned["cmd"][spawned["cmd"].index("--dig") + 1] == "2"
     html = c.get("/").get_data(as_text=True)
-    assert "class=\"radar-dig\"" in html and "async function digTheme" in html
+    assert "radar-dig" in html and "async function digTheme" in html

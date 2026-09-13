@@ -510,7 +510,7 @@ def test_the_page_offers_both_modes():
         m = make_app(d)
         body = m.app.test_client().get("/").data.decode()
         assert "Evaluate a draft" in body
-        assert "Generate New Article" in body
+        assert "Generate article" in body
 
 
 def test_docx_headings_survive_the_conversion():
@@ -685,7 +685,7 @@ def test_the_form_offers_the_share_card():
         m = make_app(d)
         body = m.app.test_client().get("/").data.decode()
         assert 'id="thumbnail"' in body
-        assert "Also design a LinkedIn share card" in body
+        assert "LinkedIn share card" in body
 
 
 CASES = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

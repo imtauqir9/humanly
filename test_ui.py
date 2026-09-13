@@ -22,11 +22,11 @@ def test_home_shows_five_recent_and_links_to_the_library(tmp_path: Path, monkeyp
     for i in range(7):
         _article(tmp_path, f"art-{i}", f"Article {i}")
     html = a.app.test_client().get("/").get_data(as_text=True)
-    main = html[html.index('<main class="panel-articles">'):html.index('</main>')]   # the JS template has one too
-    assert main.count('class="article-card"') == 5
+    recent = html[html.index('id="articlesGrid"'):html.index('id="libraryLink"')]   # the JS template has one too
+    assert recent.count('<article class="item">') == 5
     assert "Open the library (7 articles)" in html
     assert '<a href="/library">Library</a>' in html and '<a href="/" class="active">Write</a>' in html
-    assert '<details id="radarPanel"' in html
+    assert 'id="radarPanel"' in html and 'id="radarBtn"' in html
 
 
 def test_library_lists_everything_with_every_file(tmp_path: Path, monkeypatch):
