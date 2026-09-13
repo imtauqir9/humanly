@@ -3034,6 +3034,77 @@ teleprompter or a text-to-speech tool>"""
     return script
 
 
+# ---------------------------------------------------------------------------
+# Step 10.5: Voiceover, in the author's own voice
+# ---------------------------------------------------------------------------
+#
+# The script's "Narration only" block is already written for the ear. This
+# sends it to the author's cloned voice on ElevenLabs and saves the mp3 next
+# to the script. Nothing else in the pipeline touches audio; without the two
+# environment variables the step reports itself skipped and the run goes on.
+
+ELEVENLABS_BASE = "https://api.elevenlabs.io/v1"
+ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2")
+
+
+def narration_text(script: str) -> str:
+    """The spoken lines only. Prefers the script's "## Narration only" block;
+    otherwise keeps every beat's narration and drops headings, the Runtime
+    line, the **Visual:** notes and rules. Bold and link markup are not spoken."""
+    tail = script.split("## Narration only")
+    if len(tail) > 1:
+        text = tail[-1]
+    else:
+        kept = []
+        for line in script.split("\n"):
+            stripped = line.strip()
+            if (not stripped or stripped.startswith("#") or stripped == "---"
+                    or stripped.startswith(("**Visual:", "**Runtime:"))):
+                continue
+            kept.append(stripped)
+        text = "\n".join(kept)
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def generate_voiceover(script: str, slug: str, output_dir: Path) -> Path | None:
+    log("STEP 10.5", "Recording the voiceover")
+    key = os.getenv("ELEVENLABS_API_KEY", "").strip()
+    voice = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
+    if not key or not voice:
+        print("  Skipped: set ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID in .env.")
+        return None
+    text = narration_text(script)
+    if len(text.split()) < 20:
+        print("  Skipped: no narration found in the script.")
+        return None
+    try:
+        resp = requests.post(
+            f"{ELEVENLABS_BASE}/text-to-speech/{voice}",
+            headers={"xi-api-key": key, "accept": "audio/mpeg"},
+            json={"text": text, "model_id": ELEVENLABS_MODEL,
+                  "voice_settings": {"stability": 0.5, "similarity_boost": 0.8,
+                                     "style": 0.2, "use_speaker_boost": True}},
+            timeout=180,
+        )
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        body = getattr(getattr(e, "response", None), "text", "") or ""
+        print(f"  ElevenLabs request failed: {str(e)[:120]} {body[:200]}")
+        return None
+    if not resp.headers.get("content-type", "").startswith("audio"):
+        print("  ElevenLabs returned no audio.")
+        return None
+    path = output_dir / f"{slug}_voiceover.mp3"
+    path.write_bytes(resp.content)
+    words = len(text.split())
+    print(f"  Voiceover: {words} words, {len(text):,} characters (credits) -> "
+          f"{path.name}, {len(resp.content) // 1024} KB, about "
+          f"{words // 150}:{(words % 150) * 60 // 150:02d}")
+    return path
+
+
 def generate_thumbnail_copy(title: str, article: str, research: dict) -> dict:
     """Headline copy for the share card, drawn from the finished article.
 
@@ -4033,7 +4104,8 @@ def review_stats(record: dict) -> dict:
 def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: str = "",
         verify: bool = True, verify_rounds: int = 2, words: str = "default",
         linkedin: bool = False, video: bool = False, thumbnail: bool = False,
-        take: str = "", facts: bool = True, diagram: bool = True):
+        take: str = "", facts: bool = True, diagram: bool = True,
+        voiceover: bool = False):
     profile = length_profile(words)
     take = (take or "").strip()
     if not take:
@@ -4161,10 +4233,13 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
         linkedin_path.write_text(post, encoding="utf-8")
 
     video_path = None
+    voice_path = None
     if video:
         script = generate_video_script(refined_title, humanized, research)
         video_path = output_dir / f"{slug}_video.md"
         video_path.write_text(script, encoding="utf-8")
+        if voiceover:
+            voice_path = generate_voiceover(script, slug, output_dir)
 
     thumb_path = None
     if thumbnail:
@@ -4195,6 +4270,8 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
         print(f"  LinkedIn   : {linkedin_path}")
     if video_path:
         print(f"  Video      : {video_path}")
+    if voice_path:
+        print(f"  Voiceover  : {voice_path}")
     if thumb_path:
         print(f"  Thumbnail  : {thumb_path}")
     print(f"  Usage JSON : {usage_path}")
@@ -4392,6 +4469,13 @@ def main():
               "with a visual note per beat, saved as <slug>_video.md"),
     )
     parser.add_argument(
+        "--voiceover",
+        action="store_true",
+        help=("Also record the video script's narration in your own cloned voice "
+              "via ElevenLabs, saved as <slug>_voiceover.mp3. Implies --video. Needs "
+              "ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID in .env"),
+    )
+    parser.add_argument(
         "--thumbnail",
         action="store_true",
         help=("Also write a LinkedIn share card from the finished article, as "
@@ -4451,8 +4535,9 @@ def main():
             verify_rounds=args.verify_rounds,
             words=args.words,
             linkedin=args.linkedin,
-            video=args.video,
+            video=args.video or args.voiceover,
             thumbnail=args.thumbnail,
+            voiceover=args.voiceover,
             take=read_take(args.take),
             facts=not args.no_facts,
             diagram=not args.no_diagram,

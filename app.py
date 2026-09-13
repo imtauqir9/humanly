@@ -253,6 +253,7 @@ def list_articles() -> list[dict]:
         docx_file = docx_files[0].name if docx_files else None
         linkedin_path = OUTPUT_DIR / f"{slug}_linkedin.md"
         video_path = OUTPUT_DIR / f"{slug}_video.md"
+        voice_path = OUTPUT_DIR / f"{slug}_voiceover.mp3"
         thumb_path = OUTPUT_DIR / f"{slug}_thumbnail.html"
         review_path = OUTPUT_DIR / f"{slug}_review.json"
 
@@ -279,6 +280,7 @@ def list_articles() -> list[dict]:
             "image_count": len(meta.get("images", [])),
             "linkedin_file": linkedin_path.name if linkedin_path.exists() else None,
             "video_file": video_path.name if video_path.exists() else None,
+            "voice_file": voice_path.name if voice_path.exists() else None,
             "thumb_file": thumb_path.name if thumb_path.exists() else None,
             "has_review": review_path.exists(),
         })
@@ -475,6 +477,7 @@ def _completion_payload(slug: str | None, external_id: str, status: str,
         "meta": f"{slug}_meta.json",
         "linkedin": f"{slug}_linkedin.md",
         "video": f"{slug}_video.md",
+        "voiceover": f"{slug}_voiceover.mp3",
         "thumbnail": f"{slug}_thumbnail.html",
         "review_md": f"{slug}_review.md",
         "review_json": f"{slug}_review.json",
@@ -562,6 +565,7 @@ def api_start():
         words = "default"
     linkedin = bool(data.get("linkedin"))
     video = bool(data.get("video"))
+    voiceover = bool(data.get("voiceover"))
     thumbnail = bool(data.get("thumbnail"))
 
     if not topic:
@@ -582,6 +586,8 @@ def api_start():
         cmd.append("--linkedin")
     if video:
         cmd.append("--video")
+    if voiceover:
+        cmd.append("--voiceover")
     if thumbnail:
         cmd.append("--thumbnail")
 
@@ -595,7 +601,7 @@ def api_start():
             "article_baseline": {p.name for p in OUTPUT_DIR.glob("*_meta.json")},
             "echo": {"topic": topic, "intent": intent, "take": take, "words": words,
                      "edition": edition, "linkedin": linkedin,
-                     "video": video, "thumbnail": thumbnail},
+                     "video": video, "voiceover": voiceover, "thumbnail": thumbnail},
         }
 
     job_id = _spawn(cmd, callback=callback)

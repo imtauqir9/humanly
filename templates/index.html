@@ -376,6 +376,10 @@
         <label for="video">Also write a 2-3 minute video script</label>
       </div>
       <div class="checkline" style="margin-top:8px">
+        <input type="checkbox" id="voiceover">
+        <label for="voiceover">Also record the script in my voice (ElevenLabs clone, mp3)</label>
+      </div>
+      <div class="checkline" style="margin-top:8px">
         <input type="checkbox" id="thumbnail">
         <label for="thumbnail">Also design a LinkedIn share card</label>
       </div>
@@ -423,6 +427,9 @@
             {% endif %}
             {% if a.video_file %}
             <a class="btn-link btn-vid" href="/output/{{ a.video_file }}" target="_blank">Video script</a>
+            {% endif %}
+            {% if a.voice_file %}
+            <a class="btn-link btn-vid" href="/output/{{ a.voice_file }}" target="_blank">Voiceover (mp3)</a>
             <a class="btn-link btn-deck" href="/deck/{{ a.slug }}" target="_blank">Visual track</a>
             {% endif %}
             {% if a.thumb_file %}
@@ -483,6 +490,7 @@ function renderArticles(articles) {
         ${a.linkedin_file ? `<a class="btn-link btn-li" href="/output/${encodeURIComponent(a.linkedin_file)}" target="_blank">LinkedIn</a>` : ''}
         ${a.video_file ? `<a class="btn-link btn-vid" href="/output/${encodeURIComponent(a.video_file)}" target="_blank">Video script</a>` : ''}
         ${a.video_file ? `<a class="btn-link btn-deck" href="/deck/${encodeURIComponent(a.slug)}" target="_blank">Visual track</a>` : ''}
+        ${a.voice_file ? `<a class="btn-link btn-vid" href="/output/${encodeURIComponent(a.voice_file)}" target="_blank">Voiceover (mp3)</a>` : ''}
         ${a.thumb_file ? `<a class="btn-link btn-thumb" href="/output/${encodeURIComponent(a.thumb_file)}" target="_blank">Share card</a>` : ''}
         ${a.has_review ? `<a class="btn-link btn-rev" href="/review/${encodeURIComponent(a.slug)}">Review</a>` : ''}
       </div>
@@ -667,7 +675,8 @@ form.addEventListener('submit', async (e) => {
   const edition  = parseInt(document.getElementById('edition').value) || 0;
   const words    = document.getElementById('words').value;
   const linkedin = document.getElementById('linkedin').checked;
-  const video    = document.getElementById('video').checked;
+  const video    = document.getElementById('video').checked || document.getElementById('voiceover').checked;
+  const voiceover = document.getElementById('voiceover').checked;
   const thumbnail = document.getElementById('thumbnail').checked;
 
   if (!topic) return;
@@ -679,6 +688,7 @@ form.addEventListener('submit', async (e) => {
     `Length : ${document.getElementById('words').selectedOptions[0].text}`,
     ...(linkedin ? ['Extra  : LinkedIn post'] : []),
     ...(video ? ['Extra  : video script'] : []),
+    ...(voiceover ? ['Extra  : voiceover in your voice'] : []),
     ...(thumbnail ? ['Extra  : share card'] : []),
     ...(intent ? [`Intent : ${intent}`] : []),
     ...(take ? [`Take   : ${take.split('\n').length} point(s)`] : ['Take   : none — the article will have no first-person view']),
@@ -691,7 +701,7 @@ form.addEventListener('submit', async (e) => {
     const startResp = await fetch('/api/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ topic, intent: intent || keywords, take, edition, words, linkedin, video, thumbnail }),
+      body: JSON.stringify({ topic, intent: intent || keywords, take, edition, words, linkedin, video, voiceover, thumbnail }),
     });
     const startData = await startResp.json();
     if (startData.error) throw new Error(startData.error);

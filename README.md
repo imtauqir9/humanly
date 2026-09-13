@@ -196,6 +196,7 @@ python seo_writer.py "Semantic Caching for LLMs" --output-dir ./articles --editi
 | `--words` | Article length: `default` (2,500–3,500), `2000`, or `1000` |
 | `--linkedin` | Also write a LinkedIn post from the finished article |
 | `--video` | Also write a 2–3 minute video script, timed, with a visual per beat |
+| `--voiceover` | Also record that script's narration in your own cloned voice (ElevenLabs) as `<slug>_voiceover.mp3`. Implies `--video`; needs `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID` |
 | `--thumbnail` | Also design a LinkedIn share card, with a button to save it as a PNG |
 | `--audit FILE` | Audit a document you already have instead of writing a new one |
 | `--apply` | With `--audit`, also save the revised document |
@@ -360,7 +361,7 @@ The callback payload:
 | `external_id`, `job_id`, `request` | What you sent, echoed back |
 | `slug`, `meta`, `images`, `word_count` | SEO title, description, slug and the image list from `_meta.json` |
 | `article_md`, `linkedin_md`, `video_script_md` | The article and the extras, inline |
-| `files` | Download links for `md`, `html`, `docx`, `meta`, `linkedin`, `video`, `thumbnail`, `review_md`, `review_json`, `facts`, `diagram_png`, `diagram_svg`, `usage` |
+| `files` | Download links for `md`, `html`, `docx`, `meta`, `linkedin`, `video`, `voiceover`, `thumbnail`, `review_md`, `review_json`, `facts`, `diagram_png`, `diagram_svg`, `usage` |
 | `usage` | Calls, tokens and cost for this run |
 
 The links in `files` go through `/dl/<expiry>/<signature>/<file>` — signed
@@ -503,6 +504,7 @@ Each run produces these files in `./output/`:
 | `<slug>_review.json` | The same argument as raw data |
 | `<slug>_linkedin.md` | LinkedIn post, with `--linkedin` |
 | `<slug>_video.md` | Video script, with `--video` |
+| `<slug>_voiceover.mp3` | The script's narration, spoken in your cloned voice, with `--voiceover` |
 | `<slug>_thumbnail.html` | Share card, with `--thumbnail`. Open it and click to save a PNG |
 | `<slug>_usage.json` | Tokens and cost for this run, per model and per step |
 | `usage.jsonl` | One line per run — the rolling log behind `/usage` |
