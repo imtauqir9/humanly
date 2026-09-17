@@ -7,6 +7,12 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# ffmpeg assembles the finished video (slides + narration + burned captions);
+# the DejaVu face is what the captions and slides are drawn with on Linux.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core \
+ && rm -rf /var/lib/apt/lists/*
+
 # Install deps first for better layer caching
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -14,6 +20,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # App source
 COPY seo_writer.py app.py ./
 COPY templates ./templates
+# The writer's style exemplars and the source of the voice profile. Without
+# this the deployed app wrote in nobody's voice; .dockerignore alone did not
+# put the folder in the image.
+COPY sample-articles ./sample-articles
 
 # Article output lives here; mounted as a Fly volume for persistence
 RUN mkdir -p /app/output

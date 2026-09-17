@@ -29,7 +29,8 @@ The pipeline runs in 10 stages: live SERP research, title refinement, key takeaw
 ## What it does
 
 - **Deep research first** — pulls live Google search results via SerpAPI before writing a single word. The agent reads what's ranking, identifies gaps, and builds the article around those findings.
-- **Learns from your sample articles** — drop your best articles into `sample-articles/` and the agent uses them as style references. The output reads like you wrote it, not like ChatGPT.
+- **Learns from your sample articles** — drop your best articles into `sample-articles/` and the agent uses them as style references, and builds a short *voice profile* from them (cached, rebuilt when they change) that every prose-touching step is held to. The output reads like you wrote it, not like ChatGPT.
+- **Teaches in layers, with a diagram it draws itself** — every article opens with the simple version for a newcomer (analogy, example, terms defined, a real diagram), then climbs to how it works, then to where it gets hard. The diagram is rendered by the app, not searched for.
 - **Finds real images** — searches Google Images (with SerpAPI) or Unsplash and embeds them directly into the DOCX. No placeholder images.
 - **Humanization pass built in** — after writing, the agent rewrites the draft to remove AI patterns before you ever see it. The last pass is measured, not vibed: a scanner counts the tells that survived and hands the model the exact phrase list to repair.
 - **The draft has to survive an argument** — a second model audits the finished article against the brief it was written from. The writer can dispute findings it thinks are wrong, a third model settles what stays contested, and only what survives gets applied.
@@ -47,16 +48,25 @@ Topic + Intent
 1. SERP Research      — pulls live Google results via SerpAPI, reads what's ranking
       │
       ▼
+1.5 Fact pack         — opens the primary pages (vendor pricing, docs, exam guides,
+      │                 first-party reports) with Claude's web search + fetch tools,
+      │                 and pins every specific to a URL and a verbatim quote. The
+      │                 writer may state no figure that is not in the pack, and may
+      │                 not widen a pack value into a range. Saved as <slug>_facts.json.
+      ▼
 2. Title Refinement   — picks the best angle and target keyword
       │
       ▼
 3. Key Takeaways      — identifies what the article must cover to outrank competitors
       │
       ▼
-4. Outline            — structures the article before writing begins
+4. Outline            — structures the article in three levels: the simple version
+      │                 (with a [DIAGRAM:] marker), how it actually works, where it
+      │                 gets hard
       │
       ▼
-5. Write              — full draft grounded in research and your sample articles
+5. Write              — full draft grounded in research, your sample articles and
+      │                 the voice profile built from them
       │
       ▼
 6. Humanize           — strips AI patterns, rewrites to match your voice
@@ -67,6 +77,9 @@ Topic + Intent
       │           title-cased headings, inline-header bullets, em dashes,
       │           uniform sentence length — and the model repairs the named
       │           phrases only. If the count goes up, pass 2 is kept.
+      ▼
+6.2 Level 1 check     — measures the simple version's sentences (mean ≤ 17 words,
+      │                 none over 30) and rewrites just that section if it is dense
       ▼
 6.4 Answer block      — a 40–60 word extractable answer placed under the H1,
       │                 written to survive being quoted on its own
@@ -87,7 +100,12 @@ Topic + Intent
 8. Images             — finds real images via Google Images or Unsplash, embeds in DOCX
       │
       ▼
-Output: .md  .html  .docx  _meta.json
+8.5 Diagram           — turns the Level 1 [DIAGRAM:] marker into a spec (flow, cycle,
+      │                 layers or compare) and renders it: SVG inline in the HTML,
+      │                 PNG in the Markdown and the DOCX. No browser, no fonts to install.
+      │
+      ▼
+Output: .md  .html  .docx  _meta.json  _diagram_1.png/.svg
 ```
 
 ---
@@ -172,12 +190,172 @@ python seo_writer.py "Semantic Caching for LLMs" --output-dir ./articles --editi
 | `--edition` | Newsletter edition number |
 | `--no-verify` | Skip the step 6.5 audit — faster and cheaper, but nothing checks the article's claims or structure before it hits disk |
 | `--verify-rounds` | Maximum audit/fix rounds before accepting the article (default: `2`) |
+| `--take` | Your own positions and experiences, one per line (or a path to a text file). Each is written into the article in first person and the auditor checks it survived. The run warns loudly when this is missing, because it is the single biggest reason an article reads as generic |
+| `--no-facts` | Skip the Step 1.5 fact pack. The writer is then forbidden from stating any price, date, version or statistic |
+| `--radar` | Don't write; find out what to write. See *Topic radar* below |
+| `--radar-days` | How far back the radar looks (default `14`) |
+| `--dig N` | Deep research on theme N of the latest radar: discussion threads, transcripts, public LinkedIn posts, practitioners' write-ups → a one-page brief |
+| `--no-diagram` | Skip the Step 8.5 diagram. The `[DIAGRAM:]` marker in the Level 1 section is dropped instead of drawn |
 | `--words` | Article length: `default` (2,500–3,500), `2000`, or `1000` |
 | `--linkedin` | Also write a LinkedIn post from the finished article |
 | `--video` | Also write a 2–3 minute video script, timed, with a visual per beat |
+| `--mp4` | Also render the finished video — one slide per beat under your cloned voice, captions burned in — as `<slug>_video_16x9.mp4` (YouTube, LinkedIn) and `<slug>_video_9x16.mp4` (Shorts, Reels), with the `.srt` and a `<slug>_video_meta.md` (YouTube title, description with chapters, tags, LinkedIn caption). Implies `--video --voiceover`. Needs ffmpeg + the ElevenLabs keys |
+| `--voiceover` | Also record that script's narration in your own cloned voice (ElevenLabs) as `<slug>_voiceover.mp3`. Implies `--video`; needs `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID` |
 | `--thumbnail` | Also design a LinkedIn share card, with a button to save it as a PNG |
 | `--audit FILE` | Audit a document you already have instead of writing a new one |
 | `--apply` | With `--audit`, also save the revised document |
+
+---
+
+## What makes it yours: the author's take
+
+The pipeline can research, structure, humanize and verify, but it cannot know
+what you think. `--take` (or the "Your take" box in the web form) is where that
+goes: three to five lines of your own positions and experience on the topic.
+
+```bash
+python seo_writer.py "NVIDIA AI certification guide" \
+  --intent "help engineers pick the right track and budget for it" \
+  --take "I took the DLI CUDA workshop; the graded lab is harder than the exam guide implies.
+The networking track is underrated: few people hold it and DGX shops need it.
+Skip the Associate exam if you already have a year on GPU clusters."
+```
+
+Each line is written into the article in first person, in the section where it
+belongs, and the Step 6.5 auditor flags any that went missing or got neutralised
+into a hedge. Without a take, the run prints a warning and produces what it can:
+a well-sourced summary of what everyone else already wrote.
+
+Two related fixes shipped with this: the writer now actually receives its system
+prompt (it was built and never sent), and the sample articles in
+`sample-articles/` are now actually loaded as style exemplars (the README said
+they were; the code did not do it).
+
+---
+
+## Topic radar: what should I write?
+
+The pipeline writes whatever topic it is handed. The radar answers the question
+before that one. Press **Run the radar** in the app (or `python seo_writer.py
+--radar`) and one research pass reads the last two weeks of the AI industry's
+conversation:
+
+| Source | How it is read |
+|---|---|
+| YouTube — the most-watched AI videos and the big channels | Claude's web search + fetch, with the view counts the pages show |
+| Podcasts — Latent Space, Lex, No Priors, a16z, Practical AI, Dwarkesh, … | same |
+| Newsletters and posts — Simon Willison, Karpathy, Mollick, swyx, Hamel Husain, The Batch, … | same |
+| Hacker News | the Algolia API, free, no key |
+| Reddit — r/LocalLLaMA, r/MachineLearning, r/artificial, … | the RSS feeds, best effort (Reddit rate-limits them) |
+| LinkedIn — public posts and articles by AI practitioners | web search (`site:linkedin.com/posts`, `/pulse`); only pages that open without login |
+
+The signals are clustered into **up to eight themes**, each needing at least
+two independent sources, and scored on breadth, heat, freshness and — most
+heavily — the **gap**: whether the sources already treat it the way an engineer
+who ships would. A theme everyone is covering well scores low. For each theme
+you get why it is live now, who is talking, the angle your readers need that
+nobody is giving, a working title, an intent, and two or three first-person
+takes to edit. Every evidence link is one the radar actually saw; it cannot
+cite a URL it did not open or find.
+
+Everything the app produces is saved under `output/` (on Fly, the mounted
+volume, so it survives deploys) and browsable on the **Library** page: every
+article with all its files — HTML, DOCX, Markdown, diagram, facts, LinkedIn,
+video script, visual track, voiceover, share card, review — with search, plus
+every radar run and the briefs dug on it. The Write page shows only the five
+most recent.
+
+**Write this** on a theme fills the form — topic, intent, take — and the normal
+pipeline takes it from there. Results are saved as `radar_<date>.md` and
+`.json`, and `radar_latest.json` is what the app shows on load.
+
+**Memory.** Each theme has **Approve** (queue it), **Skip** (never propose it
+again) and, once an article is started from it with *Write this*, is marked
+**written** when that run finishes. Decisions live in
+`output/radar_decisions.json`; the next radar is told what is written, skipped
+and queued, and anything that still comes back too close to a skipped or
+written title is dropped before you see it.
+
+**Weekly.** Set `RADAR_WEEKLY=mon` (any day) and the deployed app runs it on
+that day whenever the last radar is more than six days old; the result waits in
+the app. Set `RADAR_CALLBACK_URL` too and it is POSTed there (Zapier, n8n) with
+the themes inline and signed links to the files. `POST /api/radar` with a
+`callback_url` does the same on demand. `RADAR_LENS` describes who you write
+for; it steers what counts as a gap.
+
+**Dig in.** The radar knows *what* people are talking about; it has not read
+the arguments. **Dig in** on a theme (or `--dig N`) reads them: the Hacker News
+comment threads (by API), the Reddit threads (feeds, when they answer), the
+episode and video transcripts, public LinkedIn posts and articles, and
+write-ups by people who actually built the thing. It returns a one-page brief
+— `radar_<date>_brief_N.md` — with the strongest claims and verbatim quotes,
+the pushback, what practitioners reported, every number with its source, the
+questions nobody answers, and a sharper angle, title, intent and takes.
+The brief attaches to the theme, so **Write this** uses it. About $2–3 and
+five minutes per theme.
+
+A radar run costs about $1–1.50 (most of it is reading the pages) and takes three to five minutes. Reddit rate-limits its feeds, so some subreddits are skipped on a given run; the radar says which.
+
+---
+
+## Teach in layers, with a diagram the app draws
+
+A flat article pitches every section at the same reader, which is nobody. Every
+article now climbs three levels, and the outline, the writer and the auditor all
+hold to the shape:
+
+| Level | Who it is for | What it must contain |
+|---|---|---|
+| 1 — The simple version | Someone smart who has never met the topic | One everyday analogy, one concrete example, every term defined in plain words on first use, sentences mostly under 15 words, and the diagram |
+| 2 — How it actually works | A practitioner | The moving parts, the numbers from the fact pack, the comparison table, the tradeoffs |
+| 3 — Where it gets hard | Someone who has done it | What experienced people argue about, where it breaks, what you have seen first-hand — most of `--take` lands here |
+
+Level 1 is checked by measurement, not by asking: if its sentences average more
+than 17 words or any runs past 30, that one section is rewritten before the
+auditor sees it. The auditor then has a `layering` category of its own — jargon
+left undefined in Level 1, or a Level 3 that never rises above a beginner's guide.
+
+**The diagram.** The Level 1 section carries one marker,
+`[DIAGRAM: <title> | Shows: <the one thing the picture must make obvious>]`.
+After verification, Claude turns it into a small structured spec — a `flow` of
+steps, a `cycle`, stacked `layers`, or side-by-side `compare` columns; never
+free-form drawing — and the app renders that spec itself: an SVG inlined in the
+HTML (crisp at any width) and a PNG for the Markdown and the DOCX. It needs only
+Pillow, which ships its own scalable font, so it works on Fly's slim image with
+nothing else installed. A stock photo next to "the simple version" explained
+nothing; this shows the mechanism.
+
+**Your voice, described.** The sample articles were only ever shown to the
+writer, and only as raw text. On first run the app reads them once and writes a
+short voice profile — sentence rhythm, how the reader is addressed, how terms
+are handled, what you never do — cached at `sample-articles/.voice_profile.json`
+and rebuilt when the samples change. That profile now goes to every call that
+touches the prose: writer, both humanizer passes, the Level 1 rewrite, the fix
+pass, and the auditor, which flags passages that read nothing like it.
+
+---
+
+## From article to a video you can post
+
+`--mp4` (the **Finished video** option in the form) turns the video script into
+a file you can upload as it is. Each of the six beats becomes a slide - a
+headline pulled from the narration (or the on-screen text the visual note
+names), the diagram on the beat that calls for it, the brand - under that
+beat's narration recorded in your cloned voice. ElevenLabs returns the timing
+of every character with the audio, so the **captions are burned in on the
+word** (most of a LinkedIn feed plays muted). It renders twice: **16:9** for
+YouTube and the LinkedIn feed, **9:16** for Shorts and Reels. You also get the
+`.srt`, the joined voiceover, and `<slug>_video_meta.md` with a YouTube title,
+a description with chapters at the real timestamps, tags, and a LinkedIn
+caption in your voice.
+
+Posting is the one step it leaves to you or to your automation: LinkedIn has
+no public API for personal posts, and YouTube upload needs your own OAuth
+consent. The callback payload links both mp4 files with signed URLs, so a
+Zapier or Make step can post them; or download from the Library and upload
+by hand. Needs `ffmpeg` (in the Docker image already; `winget install ffmpeg`
+locally) and the ElevenLabs keys. A 3-minute video costs ~2,400 ElevenLabs
+credits and about a minute of rendering.
 
 ---
 
@@ -244,6 +422,87 @@ flyctl secrets set APP_PASSWORD='something-long' -a your-app
 
 `GET /healthz` reports `{"ok": true, "protected": true|false}`, so you can check
 from the outside whether the deployed app is actually locked.
+
+---
+
+## Starting runs from Zapier, n8n or a script
+
+The browser follows a run over a live event stream, which an automation
+platform cannot hold open for ten minutes. So `POST /api/start` takes an
+optional `callback_url`: when the pipeline exits, the app POSTs one JSON
+payload there, and echoes your `external_id` so you can find your own record.
+
+```bash
+curl -u admin:$APP_PASSWORD https://your-app.fly.dev/api/start \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "topic": "Semantic caching for LLM apps",
+    "intent": "convince platform engineers it is worth the infra cost",
+    "words": "2000",
+    "linkedin": true, "video": true,
+    "callback_url": "https://hooks.zapier.com/hooks/catch/…",
+    "external_id": "recAIRTABLE123"
+  }'
+# → {"job_id": "…", "external_id": "recAIRTABLE123"}
+```
+
+The callback payload:
+
+| Field | What it is |
+|---|---|
+| `status` | `done` or `error`; `error` carries the message |
+| `external_id`, `job_id`, `request` | What you sent, echoed back |
+| `slug`, `meta`, `images`, `word_count` | SEO title, description, slug and the image list from `_meta.json` |
+| `article_md`, `linkedin_md`, `video_script_md` | The article and the extras, inline |
+| `files` | Download links for `md`, `html`, `docx`, `meta`, `linkedin`, `video`, `voiceover`, `video_16x9`, `video_9x16`, `captions`, `video_meta`, `thumbnail`, `review_md`, `review_json`, `facts`, `diagram_png`, `diagram_svg`, `usage` |
+| `video_meta_md` | The YouTube/LinkedIn text for the video, inline |
+| `usage` | Calls, tokens and cost for this run |
+
+The links in `files` go through `/dl/<expiry>/<signature>/<file>` — signed
+with an expiring HMAC, so the receiver fetches finished files without the app
+password. They are built from `PUBLIC_URL` (set it on Fly), and expire after
+`DOWNLOAD_TTL_SECS` (default seven days). Delivery retries three times with
+backoff; the outcome is in the server log under `[callback]`.
+
+On Fly, keep `min_machines_running = 1` in `fly.toml`: a run started this way
+has no browser connection holding the machine awake, and scale-to-zero would
+stop it mid-job.
+
+---
+
+## Importing your articles into another site
+
+Three public, unauthenticated endpoints publish the catalog for a portfolio
+site, a static-site build step, or a no-code importer to pull in - none of
+them need the app password, the same trust level as a signed `/dl/` link:
+
+| Endpoint | For |
+|---|---|
+| `GET /feed.json` | A [JSON Feed 1.1](https://www.jsonfeed.org/version/1.1/) - the natural fit for a JS/TS site (Next.js, Astro, Eleventy) that fetches it at build or request time |
+| `GET /feed.xml` | Standard RSS 2.0 with `<content:encoded>` - what WordPress importers, Zapier's RSS trigger, IFTTT, and most no-code tools expect |
+| `GET /embed.js` | A dependency-free widget for a site with **no build step at all** |
+
+Both feeds include, per article: title, summary, a usable image (never a
+stale CDN blob - the same check the writer applies), the publish date, and
+`content_html` - the article's own rendered body, so the importer needs no
+second request. Query params: `?limit=20` (default 50, max 200), and
+`?content=0` on `/feed.json` to drop the body and get a lighter list.
+
+The article's `url` is `SITE_URL/<slug>` once you set `SITE_URL` to a real
+domain that serves those pages; until then it's a signed link straight to
+this app's own rendered HTML (`FEED_LINK_TTL_SECS`, default 30 days), which
+works today with nothing else set up.
+
+**Zero-build-step import** - paste this into any HTML page:
+
+```html
+<div id="humanly-articles"></div>
+<script src="https://your-app.fly.dev/embed.js" data-limit="6" defer></script>
+```
+
+It renders a card grid (image, title, summary, date) linking out to each
+article. `data-limit` controls how many show; `data-target` points it at a
+different element if `#humanly-articles` doesn't suit.
 
 ---
 
@@ -368,11 +627,20 @@ Each run produces these files in `./output/`:
 | `<slug>.md` | Full article in Markdown |
 | `<slug>.html` | Styled HTML, ready to copy into a CMS |
 | `<slug>.docx` | Word document with embedded images |
+
+Images come from Google Images (SerpAPI) only when the result is a real, durable image URL; a blob or an expiring CDN link is refused and the placement is dropped rather than shipped broken. The diagrams the app draws (one in Level 1, optionally one in Level 2) are always reliable. Internal links are placed only to articles that already exist in the Library (needs `SITE_URL`); the writer never emits a `#` placeholder. The newsletter greeting appears only when `--edition` is above 0.
 | `<slug>_meta.json` | SEO title, meta description, slug, image URLs |
+| `<slug>_facts.json` | The fact pack the article was held to: every figure with its source URL and quote, plus the gaps no source filled |
+| `<slug>_diagram_1.png` / `.svg` | The Level 1 diagram, drawn by the app. The PNG is what the Markdown and DOCX embed; the SVG is inlined in the HTML |
 | `<slug>_review.md` | What the three agents argued about, and what survived |
 | `<slug>_review.json` | The same argument as raw data |
 | `<slug>_linkedin.md` | LinkedIn post, with `--linkedin` |
 | `<slug>_video.md` | Video script, with `--video` |
+| `radar_<date>_brief_N.md` / `.json` | The dig-in brief for theme N: claims with quotes, pushback, practitioner reports, numbers, LinkedIn, open questions |
+| `radar_<date>.md` / `.json` | The topic radar: ranked themes with evidence, angle, title, intent and takes. `radar_latest.json` always points at the newest |
+| `<slug>_video_16x9.mp4` / `_9x16.mp4` | The finished video in both formats, with `--mp4`; `<slug>_captions.srt` alongside |
+| `<slug>_video_meta.md` | YouTube title, description with chapters, tags, and the LinkedIn caption for the video post |
+| `<slug>_voiceover.mp3` | The script's narration, spoken in your cloned voice, with `--voiceover` |
 | `<slug>_thumbnail.html` | Share card, with `--thumbnail`. Open it and click to save a PNG |
 | `<slug>_usage.json` | Tokens and cost for this run, per model and per step |
 | `usage.jsonl` | One line per run — the rolling log behind `/usage` |

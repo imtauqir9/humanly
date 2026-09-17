@@ -4,252 +4,176 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Humanly — Imran Tauqir's AI writing pipeline</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
 <style>
+  :root {
+    --bg: #f4f5f7; --surface: #ffffff; --ink: #15171a; --ink-2: #3f4650; --muted: #6b7280;
+    --line: #e5e7eb; --line-2: #d6dae1; --accent: #3b5bdb; --accent-2: #2f49b3; --accent-soft: #eef2fc;
+    --ok: #158a5a; --ok-soft: #e8f7ef; --bad: #c0392b; --bad-soft: #fdecea;
+    --radius: 12px; --shadow: 0 1px 2px rgba(16,24,40,.04), 0 1px 3px rgba(16,24,40,.06);
+    --shadow-2: 0 8px 24px rgba(16,24,40,.08);
+    --sans: "Inter", -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { font-family: var(--sans); font-size: 14px; line-height: 1.5; color: var(--ink); background: var(--bg); min-height: 100vh; }
+  a { color: var(--accent); }
 
-  body {
-    font-family: Arial, sans-serif;
-    background: #f5f5f5;
-    color: #222;
-    min-height: 100vh;
+  /* ---- header ---- */
+  header { position: sticky; top: 0; z-index: 10; background: rgba(21,23,26,.96); backdrop-filter: blur(8px); color: #fff;
+           padding: 0 28px; height: 56px; display: flex; align-items: center; gap: 14px; }
+  header h1 { font-size: 16px; font-weight: 700; letter-spacing: -.2px; }
+  header .tag { font-size: 12.5px; color: #9aa3ad; }
+  nav { margin-left: auto; display: flex; gap: 4px; align-items: center; }
+  nav a { color: #b6bec7; font-size: 13px; font-weight: 500; text-decoration: none; padding: 6px 10px; border-radius: 8px; }
+  nav a:hover { color: #fff; background: rgba(255,255,255,.08); }
+  nav a.active { color: #fff; background: rgba(255,255,255,.14); }
+
+  /* ---- layout ---- */
+  .page { max-width: 1360px; margin: 0 auto; padding: 24px 28px 64px; display: grid; grid-template-columns: minmax(460px, 560px) minmax(0, 1fr); gap: 24px; align-items: start; }
+  .col { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
+  .card-head { display: flex; align-items: center; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--line); }
+  .card-head h2 { font-size: 15px; font-weight: 600; letter-spacing: -.1px; }
+  .card-head .sub { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+  .card-head .grow { flex: 1; min-width: 0; }
+  .card-body { padding: 20px; }
+  .muted { color: var(--muted); }
+
+  /* ---- buttons ---- */
+  .btn { font-family: inherit; font-size: 13.5px; font-weight: 600; border-radius: 9px; padding: 9px 14px; cursor: pointer;
+         border: 1px solid transparent; transition: background .12s, border-color .12s, color .12s, transform .05s; white-space: nowrap; }
+  .btn:active { transform: translateY(1px); }
+  .btn:disabled { opacity: .55; cursor: not-allowed; transform: none; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: var(--accent-2); }
+  .btn-dark { background: var(--ink); color: #fff; }
+  .btn-dark:hover:not(:disabled) { background: #2b3036; }
+  .btn-ghost { background: #fff; color: var(--accent); border-color: #c7d2f5; }
+  .btn-ghost:hover:not(:disabled) { background: var(--accent-soft); }
+  .btn.sm { font-size: 12.5px; padding: 6px 11px; border-radius: 8px; }
+  .btn.block { width: 100%; padding: 12px 16px; font-size: 14.5px; }
+
+  /* ---- segmented mode switch ---- */
+  .tabs { display: inline-flex; background: #eceef2; border-radius: 10px; padding: 3px; gap: 2px; }
+  .tabs button { font-family: inherit; font-size: 13px; font-weight: 600; color: var(--muted); background: transparent; border: none;
+                 padding: 7px 14px; border-radius: 8px; cursor: pointer; transition: background .12s, color .12s; }
+  .tabs button.active { background: #fff; color: var(--ink); box-shadow: var(--shadow); }
+  .mode { display: none; }
+  .mode.active { display: block; }
+
+  /* ---- form ---- */
+  .step { padding: 18px 20px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 14px; }
+  .step:last-of-type { border-bottom: none; }
+  .step-title { display: flex; align-items: baseline; gap: 10px; }
+  .step-title .n { font-size: 11px; font-weight: 700; color: var(--accent); background: var(--accent-soft); border-radius: 999px; padding: 2px 8px; letter-spacing: .3px; }
+  .step-title h3 { font-size: 14px; font-weight: 600; }
+  .step-title .why { font-size: 12.5px; color: var(--muted); }
+  label { display: block; font-size: 13px; font-weight: 500; color: var(--ink-2); margin-bottom: 6px; }
+  label .opt-note { color: var(--muted); font-weight: 400; }
+  input[type="text"], input[type="number"], select, textarea {
+    width: 100%; font-family: inherit; font-size: 14px; color: var(--ink); background: #fff;
+    border: 1px solid var(--line-2); border-radius: 9px; padding: 10px 12px; transition: border-color .12s, box-shadow .12s; resize: vertical;
   }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(59,91,219,.15); }
+  textarea { min-height: 96px; line-height: 1.5; }
+  textarea::placeholder, input::placeholder { color: #9aa3ad; }
+  .hint { font-size: 12.5px; color: var(--muted); margin-top: 6px; line-height: 1.45; }
+  .row-2 { display: grid; grid-template-columns: 1fr 96px; gap: 12px; }
+  .row-3 { display: grid; grid-template-columns: 1.25fr 1fr 84px; gap: 12px; }
 
-  header {
-    background: #111;
-    color: #fff;
-    padding: 18px 32px;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-  header h1 { font-size: 1.2rem; font-weight: 700; letter-spacing: -0.3px; }
-  header span { font-size: 0.85rem; color: #aaa; }
+  .opts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .opt { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border: 1px solid var(--line-2); border-radius: 9px; cursor: pointer;
+         font-size: 13px; font-weight: 500; color: var(--ink-2); margin: 0; background: #fff; transition: border-color .12s, background .12s; }
+  .opt:hover { border-color: #b9c3d3; }
+  .opt:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); color: var(--ink); }
+  .opt input { margin: 3px 0 0; accent-color: var(--accent); flex: none; }
+  .opt small { display: block; font-weight: 400; color: var(--muted); margin-top: 1px; font-size: 12px; }
 
-  .layout {
-    display: grid;
-    grid-template-columns: 420px 1fr;
-    gap: 0;
-    min-height: calc(100vh - 58px);
-  }
-
-  /* ---- LEFT PANEL: Form ---- */
-  .panel-form {
-    background: #fff;
-    border-right: 1px solid #e0e0e0;
-    padding: 28px 24px;
-    display: flex;
-    flex-direction: column;
-    gap: 20px;
-  }
-
-  .panel-form h2 { font-size: 1rem; font-weight: 700; color: #111; }
-
-  /* Mode switch: write a new article, or evaluate one you already have */
-  .tabs { display: flex; gap: 0; border: 1px solid #ddd; border-radius: 6px; overflow: hidden; }
-  .tabs button {
-    flex: 1; padding: 9px 8px; font-family: inherit; font-size: 0.82rem; font-weight: 600;
-    background: #fafafa; color: #666; border: none; cursor: pointer; transition: background 0.12s, color 0.12s;
-  }
-  .tabs button + button { border-left: 1px solid #ddd; }
-  .tabs button.active { background: #111; color: #fff; }
-  .mode { display: none; flex-direction: column; gap: 20px; }
-  .mode.active { display: flex; }
-
-  .filedrop {
-    border: 1px dashed #ccc; border-radius: 6px; padding: 14px; text-align: center;
-    font-size: 0.8rem; color: #888; background: #fafafa; cursor: pointer;
-  }
-  .filedrop:hover { border-color: #111; color: #555; }
+  .filedrop { display: block; border: 1px dashed var(--line-2); border-radius: 9px; padding: 18px; text-align: center; font-size: 13px; color: var(--muted); background: #fafbfc; cursor: pointer; }
+  .filedrop:hover { border-color: var(--accent); color: var(--ink-2); }
   .filedrop input { display: none; }
-  .filedrop.has-file { border-style: solid; border-color: #1a7a45; color: #1a7a45; background: #f2fbf6; }
+  .filedrop.has-file { border-style: solid; border-color: var(--ok); color: var(--ok); background: var(--ok-soft); }
+  .checkline { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-2); }
+  .checkline input { margin: 0; accent-color: var(--accent); }
+  .checkline label { margin: 0; font-weight: 500; }
 
-  .checkline { display: flex; align-items: center; gap: 7px; font-size: 0.82rem; color: #555; }
-  .checkline input { margin: 0; }
-  .checkline label { margin: 0; text-transform: none; letter-spacing: 0; font-size: 0.82rem; font-weight: 400; color: #555; }
+  /* ---- radar ---- */
+  .theme { border-top: 1px solid var(--line); }
+  .theme summary { list-style: none; cursor: pointer; display: grid; grid-template-columns: 28px minmax(0,1fr) auto auto; align-items: center; gap: 12px; padding: 12px 20px; }
+  .theme summary::-webkit-details-marker { display: none; }
+  .theme summary:hover { background: #fafbfc; }
+  .rank { width: 26px; height: 26px; border-radius: 8px; background: var(--ink); color: #fff; font-size: 12px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
+  .theme-title { font-size: 14px; font-weight: 600; line-height: 1.35; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .chip { font-size: 11.5px; font-weight: 600; color: var(--muted); background: #f0f2f5; border-radius: 999px; padding: 3px 9px; white-space: nowrap; }
+  .chip-low { color: var(--ok); background: var(--ok-soft); }
+  .chip-high { color: var(--bad); background: var(--bad-soft); }
+  .chip-done { color: var(--accent); background: var(--accent-soft); }
+  .chip-approved { color: var(--ok); background: var(--ok-soft); }
+  .chip-skipped { color: var(--muted); background: #eceef2; text-decoration: line-through; }
+  .chip-written { color: #7a4a00; background: #fef3dd; }
+  .theme-skipped summary { opacity: .55; }
+  .theme-written .theme-title { color: var(--muted); }
+  .theme-actions { display: flex; gap: 6px; }
+  .theme-body { padding: 4px 20px 18px 60px; font-size: 13.5px; color: var(--ink-2); display: flex; flex-direction: column; gap: 8px; }
+  .theme-body strong { color: var(--ink); }
+  .theme-body ul { margin: 0 0 0 18px; }
+  .theme-body .evidence { font-size: 12.5px; line-height: 1.7; }
+  .theme-body .evidence span { color: var(--muted); }
+  .brief { border-left: 3px solid var(--accent); background: var(--accent-soft); border-radius: 0 8px 8px 0; padding: 10px 14px; display: flex; flex-direction: column; gap: 6px; }
+  .radar-empty { padding: 18px 20px; font-size: 13.5px; color: var(--muted); }
 
-  label { display: block; font-size: 0.8rem; font-weight: 600; color: #555; margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.4px; }
+  /* ---- run log ---- */
+  .progress-box { display: none; }
+  .progress-box.visible { display: block; }
+  .log-output { background: #0f1115; color: #9be7a9; font-family: var(--mono); font-size: 12.5px; line-height: 1.55; padding: 14px 16px;
+                height: 300px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; border-radius: 0 0 var(--radius) var(--radius); }
+  .log-output .err { color: #ff8a80; }
+  .log-output .done { color: #ffd54f; font-weight: 600; }
+  .status-badge { display: none; margin: 0 20px 16px; padding: 10px 12px; border-radius: 9px; font-size: 13px; font-weight: 600; }
+  .status-badge.success { display: block; background: var(--ok-soft); color: var(--ok); }
+  .status-badge.error { display: block; background: var(--bad-soft); color: var(--bad); }
 
-  input[type="text"],
-  input[type="number"],
-  select,
-  textarea {
-    width: 100%;
-    border: 1px solid #ddd;
-    border-radius: 6px;
-    padding: 9px 12px;
-    font-size: 0.9rem;
-    font-family: Arial, sans-serif;
-    color: #222;
-    background: #fafafa;
-    transition: border-color 0.15s;
-    resize: vertical;
+  /* ---- recent ---- */
+  .items { display: flex; flex-direction: column; }
+  .item { padding: 14px 20px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
+  .item:first-child { border-top: none; }
+  .item-title { font-size: 14px; font-weight: 600; color: var(--ink); text-decoration: none; line-height: 1.4; }
+  .item-title:hover { color: var(--accent); }
+  .item-meta { font-size: 12.5px; color: var(--muted); }
+  .btn-link { font-size: 11.5px; font-weight: 600; padding: 3px 9px; border-radius: 999px; text-decoration: none; border: 1px solid; line-height: 1.5; }
+  .btn-html  { color: #1a5fb4; border-color: #c2d8f4; background: #eef5fc; }
+  .btn-docx  { color: #1a7a45; border-color: #bfe3cf; background: #eef8f2; }
+  .btn-md    { color: #7a4a00; border-color: #f0d9a8; background: #fef9ee; }
+  .btn-li    { color: #0a66c2; border-color: #bcd6f1; background: #eef5fc; }
+  .btn-rev   { color: #6b3fa0; border-color: #d8c8ec; background: #f5f0fb; }
+  .btn-vid   { color: #b03a2e; border-color: #efc7c2; background: #fdf1ef; }
+  .btn-thumb { color: #1a7a6b; border-color: #bfe3dc; background: #eef8f6; }
+  .btn-deck  { color: #7a5a00; border-color: #ead7a0; background: #fdf8ec; }
+  .btn-dia   { color: var(--accent); border-color: #c7d2f5; background: var(--accent-soft); }
+  .btn-facts { color: #555; border-color: #d6dae1; background: #f7f7f7; }
+  .btn-mp4   { color: #b3005f; border-color: #efb8d4; background: #fdeef6; }
+  .btn-link:hover { filter: brightness(.96); }
+  .card-foot { padding: 14px 20px; border-top: 1px solid var(--line); }
+  .library-link { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; color: var(--ink); text-decoration: none; }
+  .library-link:hover { color: var(--accent); }
+  .empty-state { padding: 22px 20px; color: var(--muted); font-size: 13.5px; }
+
+  @media (max-width: 1040px) {
+    .page { grid-template-columns: 1fr; }
+    .theme summary { grid-template-columns: 28px minmax(0,1fr); }
+    .theme summary .chips { grid-column: 2; }
+    .theme summary .theme-actions { grid-column: 2; }
+    .theme-body { padding-left: 20px; }
   }
-  input[type="text"]:focus,
-  input[type="number"]:focus,
-  select:focus,
-  textarea:focus {
-    outline: none;
-    border-color: #111;
-    background: #fff;
-  }
-
-  textarea { min-height: 90px; }
-
-  .hint { font-size: 0.75rem; color: #888; margin-top: 4px; }
-
-  .row-2 { display: grid; grid-template-columns: 1fr 80px; gap: 12px; }
-
-  button[type="submit"] {
-    background: #111;
-    color: #fff;
-    border: none;
-    border-radius: 6px;
-    padding: 11px 0;
-    font-size: 0.95rem;
-    font-weight: 600;
-    font-family: Arial, sans-serif;
-    cursor: pointer;
-    transition: background 0.15s;
-    width: 100%;
-  }
-  button[type="submit"]:hover { background: #333; }
-  button[type="submit"]:disabled { background: #999; cursor: not-allowed; }
-
-  /* Progress log */
-  .progress-box {
-    display: none;
-    flex-direction: column;
-    gap: 8px;
-  }
-  .progress-box.visible { display: flex; }
-  .progress-label { font-size: 0.8rem; font-weight: 600; color: #555; text-transform: uppercase; letter-spacing: 0.4px; }
-  .log-output {
-    background: #111;
-    color: #00d084;
-    font-family: 'Courier New', monospace;
-    font-size: 0.78rem;
-    border-radius: 6px;
-    padding: 12px;
-    height: 280px;
-    overflow-y: auto;
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-  .log-output .err { color: #ff6b6b; }
-  .log-output .done { color: #ffd700; font-weight: bold; }
-
-  /* Status badge */
-  .status-badge {
-    display: none;
-    padding: 8px 12px;
-    border-radius: 6px;
-    font-size: 0.82rem;
-    font-weight: 600;
-  }
-  .status-badge.success { display: block; background: #e6f9f0; color: #1a8a56; border: 1px solid #b2dfce; }
-  .status-badge.error   { display: block; background: #fdecea; color: #c0392b; border: 1px solid #f5c6c2; }
-
-  /* ---- RIGHT PANEL: Articles ---- */
-  .panel-articles {
-    padding: 28px 28px 40px;
-    overflow-y: auto;
-  }
-
-  .panel-articles h2 {
-    font-size: 1rem;
-    font-weight: 700;
-    color: #111;
-    margin-bottom: 20px;
-  }
-
-  .articles-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-    gap: 16px;
-  }
-
-  .article-card {
-    background: #fff;
-    border: 1px solid #e0e0e0;
-    border-radius: 8px;
-    padding: 16px 18px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    transition: box-shadow 0.15s;
-  }
-  .article-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
-
-  .card-title {
-    font-size: 0.92rem;
-    font-weight: 700;
-    color: #111;
-    line-height: 1.4;
-  }
-
-  .card-desc {
-    font-size: 0.78rem;
-    color: #666;
-    line-height: 1.5;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-
-  .card-meta {
-    display: flex;
-    gap: 10px;
-    font-size: 0.72rem;
-    color: #999;
-    flex-wrap: wrap;
-    margin-top: 2px;
-  }
-  .card-meta span { display: flex; align-items: center; gap: 3px; }
-
-  .card-actions {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    margin-top: 4px;
-  }
-
-  .btn-link {
-    font-size: 0.75rem;
-    font-weight: 600;
-    padding: 4px 10px;
-    border-radius: 4px;
-    text-decoration: none;
-    border: 1px solid;
-    transition: background 0.12s;
-  }
-  .btn-html  { color: #1a6fc4; border-color: #9ec5f0; background: #eef5fc; }
-  .btn-html:hover  { background: #d7eaf9; }
-  .btn-docx  { color: #1a7a45; border-color: #9ed4b8; background: #eef8f2; }
-  .btn-docx:hover  { background: #d6f0e2; }
-  .btn-md    { color: #7a4a00; border-color: #f0ca80; background: #fef9ee; }
-  .btn-md:hover    { background: #fdf0cc; }
-  .btn-li    { color: #0a66c2; border-color: #9dc4ec; background: #eef5fc; }
-  .btn-li:hover    { background: #d9e9f8; }
-  .btn-rev   { color: #6b3fa0; border-color: #c4aede; background: #f5f0fb; }
-  .btn-rev:hover   { background: #eadff7; }
-  .btn-vid   { color: #b03a2e; border-color: #e6b0aa; background: #fdf1ef; }
-  .btn-vid:hover   { background: #fadfda; }
-  .btn-thumb { color: #1a7a6b; border-color: #9ed4cb; background: #eef8f6; }
-  .btn-thumb:hover { background: #d6f0ea; }
-  .btn-deck  { color: #7a5a00; border-color: #e0c67a; background: #fdf8ec; }
-  .btn-deck:hover  { background: #f8eecd; }
-
-  .empty-state {
-    color: #aaa;
-    font-size: 0.9rem;
-    padding: 40px 0;
-    text-align: center;
-  }
-
-  @media (max-width: 800px) {
-    .layout { grid-template-columns: 1fr; }
-    .panel-form { border-right: none; border-bottom: 1px solid #e0e0e0; }
+  @media (max-width: 640px) {
+    header { padding: 0 16px; } header .tag { display: none; }
+    .page { padding: 16px 12px 48px; }
+    .opts, .row-2, .row-3 { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -257,183 +181,193 @@
 
 <header>
   <h1>Humanly</h1>
-  <span>Imran Tauqir's AI writing pipeline</span>
-  <a href="/usage" style="margin-left:auto;color:#aaa;font-size:0.85rem;text-decoration:none;"
-     onmouseover="this.style.color='#fff'" onmouseout="this.style.color='#aaa'">Token usage &rarr;</a>
-  <a href="/logout" style="color:#aaa;font-size:0.85rem;text-decoration:none;margin-left:18px;"
-     onmouseover="this.style.color='#fff'" onmouseout="this.style.color='#aaa'">Sign out</a>
+  <span class="tag">Imran Tauqir's AI writing pipeline</span>
+  <nav>
+    <a href="/" class="active">Write</a>
+    <a href="/library">Library</a>
+    <a href="/usage">Usage</a>
+    <a href="/logout">Sign out</a>
+  </nav>
 </header>
 
-<div class="layout">
+<div class="page">
 
-  <!-- LEFT: Generate form -->
-  <aside class="panel-form">
-    <div class="tabs">
-      <button type="button" id="tabWrite" class="active">Write new</button>
-      <button type="button" id="tabAudit">Evaluate a draft</button>
-    </div>
-
-    <!-- MODE: evaluate an existing document -->
-    <div class="mode" id="modeAudit">
-      <h2>Evaluate a Draft</h2>
-      <p class="hint" style="margin-top:-12px">
-        Three agents argue about a document you already have. The auditor attacks it,
-        the writer answers back, a judge settles what stays contested. No article,
-        images or meta are generated.
-      </p>
-
-      <form id="auditForm">
-        <label class="filedrop" id="fileDrop" for="auditFile">
-          <input type="file" id="auditFile" accept=".md,.markdown,.txt,.docx">
-          <span id="fileLabel">Choose a .md, .txt or .docx file</span>
-        </label>
-
-        <div style="margin-top:14px">
-          <label for="auditText">…or paste the article</label>
-          <textarea id="auditText" style="min-height:150px"
-                    placeholder="Paste the full draft here. Anything under 50 words is too short to audit meaningfully."></textarea>
-        </div>
-
-        <div style="margin-top:14px">
-          <label for="auditTopic">Topic (optional)</label>
-          <input type="text" id="auditTopic" placeholder="Names the report and its filenames">
-        </div>
-
-        <div style="margin-top:14px">
-          <label for="auditIntent">What were you going for? (optional)</label>
-          <textarea id="auditIntent" style="min-height:70px"
-                    placeholder="e.g. convince platform engineers this is worth the infra cost"></textarea>
-          <p class="hint">A document has no brief, so one call reconstructs the brief it
-            appears to be written to. This sharpens that, and the coverage findings with it.</p>
-        </div>
-
-        <div class="row-2" style="margin-top:14px">
-          <div class="checkline" style="align-self:end;padding-bottom:9px">
-            <input type="checkbox" id="auditApply">
-            <label for="auditApply">Also save a corrected version</label>
-          </div>
-          <div>
-            <label for="auditRounds">Rounds</label>
-            <input type="number" id="auditRounds" value="2" min="1" max="4">
+  <!-- LEFT: the brief -->
+  <div class="col">
+    <div class="card">
+      <div class="card-head">
+        <div class="grow">
+          <div class="tabs">
+            <button type="button" id="tabWrite" class="active">Write an article</button>
+            <button type="button" id="tabAudit">Evaluate a draft</button>
           </div>
         </div>
+      </div>
 
-        <button type="submit" id="auditBtn" style="margin-top:16px">Run the Audit</button>
-      </form>
+      <!-- MODE: evaluate an existing document -->
+      <div class="mode" id="modeAudit">
+        <form id="auditForm">
+          <div class="step">
+            <div class="step-title"><span class="n">AUDIT</span><h3>The draft</h3><span class="why">three agents argue about it; nothing is generated</span></div>
+            <label class="filedrop" id="fileDrop" for="auditFile">
+              <input type="file" id="auditFile" accept=".md,.markdown,.txt,.docx">
+              <span id="fileLabel">Choose a .md, .txt or .docx file</span>
+            </label>
+            <div>
+              <label for="auditText">…or paste it</label>
+              <textarea id="auditText" style="min-height:140px" placeholder="Paste the full draft. Under 50 words is too short to audit."></textarea>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-title"><span class="n">CONTEXT</span><h3>What it was for</h3><span class="why">optional</span></div>
+            <div class="row-2">
+              <div>
+                <label for="auditTopic">Topic</label>
+                <input type="text" id="auditTopic" placeholder="Names the report and its files">
+              </div>
+              <div>
+                <label for="auditRounds">Rounds</label>
+                <input type="number" id="auditRounds" value="2" min="1" max="4">
+              </div>
+            </div>
+            <div>
+              <label for="auditIntent">What were you going for?</label>
+              <textarea id="auditIntent" style="min-height:70px" placeholder="e.g. convince platform engineers this is worth the infra cost"></textarea>
+              <p class="hint">A draft has no brief; one call reconstructs the one it seems written to. This sharpens it.</p>
+            </div>
+            <div class="checkline">
+              <input type="checkbox" id="auditApply">
+              <label for="auditApply">Also save a corrected version</label>
+            </div>
+          </div>
+          <div class="step">
+            <button type="submit" id="auditBtn" class="btn btn-dark block">Run the audit</button>
+          </div>
+        </form>
+      </div>
+
+      <!-- MODE: write a new article -->
+      <div class="mode active" id="modeWrite">
+        <form id="genForm">
+          <input type="hidden" id="fromTheme" value="">
+          <div class="step">
+            <div class="step-title"><span class="n">1</span><h3>The topic</h3><span class="why">or pick a theme from the radar</span></div>
+            <div>
+              <label for="topic">Article topic</label>
+              <input type="text" id="topic" name="topic" placeholder="e.g. ReAct agents explained" required>
+            </div>
+            <div>
+              <label for="intent">Intent <span class="opt-note">— what the reader should walk away with, and who they are</span></label>
+              <textarea id="intent" name="intent" placeholder="e.g. Explain to developers how ReAct agents work step by step, and why they beat plain LLM calls on tool use."></textarea>
+              <p class="hint">Steers the research, the angle and the audience. The keywords come from this.</p>
+            </div>
+          </div>
+
+          <div class="step">
+            <div class="step-title"><span class="n">2</span><h3>Your take</h3><span class="why">what makes it yours</span></div>
+            <div>
+              <textarea id="take" name="take" style="min-height:112px" placeholder="One point per line, 3–5 lines. What do you actually think, and what have you seen?&#10;&#10;I took the DLI CUDA workshop; the graded lab was harder than the exam guide implies.&#10;The networking track is underrated: few people hold it and DGX shops need it."></textarea>
+              <p class="hint">Each line is written into the article in first person and the auditor checks it survived. Leave it empty and you get a summary of the web, not an article by you.</p>
+            </div>
+          </div>
+
+          <div class="step">
+            <div class="step-title"><span class="n">3</span><h3>Shape and extras</h3></div>
+            <div class="row-3">
+              <div>
+                <label for="words">Length</label>
+                <select id="words" name="words">
+                  <option value="default" selected>Long · 2.5–3.5k words</option>
+                  <option value="2000">Medium · ~2,000 words</option>
+                  <option value="1000">Short · ~1,000 words</option>
+                </select>
+              </div>
+              <div>
+                <label for="keywords">Keywords <span class="opt-note">(optional)</span></label>
+                <input type="text" id="keywords" name="keywords" placeholder="Override keyword">
+              </div>
+              <div>
+                <label for="edition">Edition</label>
+                <input type="number" id="edition" name="edition" value="0" min="0">
+              </div>
+            </div>
+            <div class="opts">
+              <label class="opt"><input type="checkbox" id="linkedin"><span>LinkedIn post<small>written from the finished article</small></span></label>
+              <label class="opt"><input type="checkbox" id="video"><span>Video script<small>2–3 minutes, six timed beats</small></span></label>
+              <label class="opt"><input type="checkbox" id="voiceover"><span>Voiceover in my voice<small>ElevenLabs clone, mp3</small></span></label>
+              <label class="opt"><input type="checkbox" id="mp4"><span>Finished video<small>slides + your voice + captions · 16:9 and 9:16</small></span></label>
+              <label class="opt"><input type="checkbox" id="thumbnail"><span>LinkedIn share card<small>1200×627, save as PNG</small></span></label>
+            </div>
+            <p class="hint">Every article also gets the fact pack, the layered structure, a diagram the app draws, and the three-agent audit.</p>
+          </div>
+
+          <div class="step">
+            <button type="submit" id="submitBtn" class="btn btn-primary block">Generate article</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT: radar, the run, recent -->
+  <div class="col">
+
+    <div class="card" id="radarPanel">
+      <div class="card-head">
+        <div class="grow">
+          <h2>What should I write?</h2>
+          <div class="sub" id="radarMeta"></div>
+        </div>
+        <button type="button" id="radarBtn" class="btn btn-dark">Run the radar</button>
+      </div>
+      <p class="radar-empty">One research pass over the most-watched AI videos, the podcasts, the newsletters, LinkedIn and the forums of the last two weeks, ranked by what engineers need and nobody is covering. <strong>Dig in</strong> reads the arguments behind a theme; <strong>Write this</strong> fills the form.</p>
+      <div id="radarThemes"></div>
     </div>
 
-    <!-- MODE: write a new article -->
-    <div class="mode active" id="modeWrite">
-    <h2>Generate New Article</h2>
-
-    <form id="genForm">
-      <div>
-        <label for="topic">Article Topic</label>
-        <input type="text" id="topic" name="topic" placeholder="e.g. ReAct Agents Explained" required>
+    <div class="card progress-box" id="progressBox">
+      <div class="card-head">
+        <div class="grow"><h2>The run</h2><div class="sub">live log from the pipeline</div></div>
       </div>
-
-      <div>
-        <label for="intent">Intent / Abstract</label>
-        <textarea id="intent" name="intent" placeholder="Describe what you want to achieve and who it's for. Claude will extract the best search keywords from this.&#10;&#10;e.g. I want to explain to developers how ReAct agents work step by step, and why they outperform standard LLMs on tool-use tasks."></textarea>
-        <p class="hint">Replaces the old --keywords flag. More context = better research.</p>
-      </div>
-
-      <div class="row-2">
-        <div>
-          <label for="keywords">Keywords (optional)</label>
-          <input type="text" id="keywords" name="keywords" placeholder="e.g. react agents, AI agents">
-          <p class="hint">Legacy shorthand. Use Intent above instead.</p>
-        </div>
-        <div>
-          <label for="edition">Edition</label>
-          <input type="number" id="edition" name="edition" value="0" min="0">
-        </div>
-      </div>
-
-      <div style="margin-top:14px">
-        <label for="words">Length</label>
-        <select id="words" name="words">
-          <option value="default" selected>Default — 2,500–3,500 words</option>
-          <option value="2000">Medium — about 2,000 words</option>
-          <option value="1000">Short — about 1,000 words</option>
-        </select>
-        <p class="hint">Sections, images and FAQ count scale with this, so a short
-          article reads short rather than cramped.</p>
-      </div>
-
-      <div class="checkline" style="margin-top:14px">
-        <input type="checkbox" id="linkedin">
-        <label for="linkedin">Also write a LinkedIn post</label>
-      </div>
-      <div class="checkline" style="margin-top:8px">
-        <input type="checkbox" id="video">
-        <label for="video">Also write a 2-3 minute video script</label>
-      </div>
-      <div class="checkline" style="margin-top:8px">
-        <input type="checkbox" id="thumbnail">
-        <label for="thumbnail">Also design a LinkedIn share card</label>
-      </div>
-      <p class="hint" style="margin-top:4px">Both are written from the finished
-        article, so they can only claim what it actually established. The script
-        comes as timed beats with a visual note on each.</p>
-
-      <button type="submit" id="submitBtn" style="margin-top:16px">Generate Article</button>
-    </form>
-    </div><!-- /modeWrite -->
-
-    <div class="progress-box" id="progressBox">
-      <div class="progress-label">Pipeline Output</div>
+      <div class="status-badge" id="statusBadge" style="margin-top:16px"></div>
       <div class="log-output" id="logOutput"></div>
-      <div class="status-badge" id="statusBadge"></div>
     </div>
-  </aside>
 
-  <!-- RIGHT: Article list -->
-  <main class="panel-articles">
-    <h2>Published Articles</h2>
-    <div class="articles-grid" id="articlesGrid">
-      {% if articles %}
-        {% for a in articles %}
-        <div class="article-card">
-          <div class="card-title">{{ a.title }}</div>
-          {% if a.description %}
-          <div class="card-desc">{{ a.description }}</div>
-          {% endif %}
-          <div class="card-meta">
-            {% if a.generated_at %}<span>{{ a.generated_at }}</span>{% endif %}
-            {% if a.word_count %}<span>{{ "{:,}".format(a.word_count) }} words</span>{% endif %}
-            {% if a.image_count %}<span>{{ a.image_count }} images</span>{% endif %}
-          </div>
-          <div class="card-actions">
-            {% if a.html_file %}
-            <a class="btn-link btn-html" href="/output/{{ a.html_file }}" target="_blank">HTML</a>
-            {% endif %}
-            {% if a.docx_file %}
-            <a class="btn-link btn-docx" href="/output/{{ a.docx_file }}" download>DOCX</a>
-            {% endif %}
-            <a class="btn-link btn-md" href="/output/{{ a.slug }}.md" target="_blank">Markdown</a>
-            {% if a.linkedin_file %}
-            <a class="btn-link btn-li" href="/output/{{ a.linkedin_file }}" target="_blank">LinkedIn</a>
-            {% endif %}
-            {% if a.video_file %}
-            <a class="btn-link btn-vid" href="/output/{{ a.video_file }}" target="_blank">Video script</a>
-            <a class="btn-link btn-deck" href="/deck/{{ a.slug }}" target="_blank">Visual track</a>
-            {% endif %}
-            {% if a.thumb_file %}
-            <a class="btn-link btn-thumb" href="/output/{{ a.thumb_file }}" target="_blank">Share card</a>
-            {% endif %}
-            {% if a.has_review %}
-            <a class="btn-link btn-rev" href="/review/{{ a.slug }}">Review</a>
-            {% endif %}
-          </div>
-        </div>
-        {% endfor %}
-      {% else %}
-        <p class="empty-state">No articles yet. Generate your first one!</p>
-      {% endif %}
+    <div class="card">
+      <div class="card-head">
+        <div class="grow"><h2>Recent</h2><div class="sub">the last five articles</div></div>
+      </div>
+      <div class="items" id="articlesGrid">
+        {% if articles %}
+          {% for a in articles %}
+          <article class="item">
+            <a class="item-title" href="/output/{{ a.html_file or (a.slug ~ '.md') }}" target="_blank">{{ a.title }}</a>
+            <div class="item-meta">{{ [a.generated_at, ("{:,} words".format(a.word_count) if a.word_count else ""), (a.image_count ~ " images" if a.image_count else "")] | select | join(" · ") }}</div>
+            <div class="chips">
+              {% if a.html_file %}<a class="btn-link btn-html" href="/output/{{ a.html_file }}" target="_blank">HTML</a>{% endif %}
+              {% if a.docx_file %}<a class="btn-link btn-docx" href="/output/{{ a.docx_file }}" download>DOCX</a>{% endif %}
+              <a class="btn-link btn-md" href="/output/{{ a.slug }}.md" target="_blank">Markdown</a>
+              {% if a.diagram_file %}<a class="btn-link btn-dia" href="/output/{{ a.diagram_file }}" target="_blank">Diagram</a>{% endif %}
+              {% if a.linkedin_file %}<a class="btn-link btn-li" href="/output/{{ a.linkedin_file }}" target="_blank">LinkedIn</a>{% endif %}
+              {% if a.video_file %}<a class="btn-link btn-vid" href="/output/{{ a.video_file }}" target="_blank">Video script</a>{% endif %}
+              {% if a.voice_file %}<a class="btn-link btn-vid" href="/output/{{ a.voice_file }}" target="_blank">Voiceover</a>{% endif %}
+              {% if a.mp4_wide %}<a class="btn-link btn-mp4" href="/output/{{ a.mp4_wide }}" target="_blank">Video 16:9</a>{% endif %}
+              {% if a.mp4_tall %}<a class="btn-link btn-mp4" href="/output/{{ a.mp4_tall }}" target="_blank">Video 9:16</a>{% endif %}
+              {% if a.video_meta %}<a class="btn-link btn-mp4" href="/output/{{ a.video_meta }}" target="_blank">Post text</a>{% endif %}
+              {% if a.thumb_file %}<a class="btn-link btn-thumb" href="/output/{{ a.thumb_file }}" target="_blank">Share card</a>{% endif %}
+              {% if a.has_review %}<a class="btn-link btn-rev" href="/review/{{ a.slug }}">Review</a>{% endif %}
+            </div>
+          </article>
+          {% endfor %}
+        {% else %}
+          <p class="empty-state">No articles yet. Your first one will appear here.</p>
+        {% endif %}
+      </div>
+      <div class="card-foot">
+        <a class="library-link" id="libraryLink" href="/library">Open the library ({{ total_articles }} article{{ '' if total_articles == 1 else 's' }}) &rarr;</a>
+      </div>
     </div>
-  </main>
 
+  </div>
 </div>
 
 <script>
@@ -458,29 +392,28 @@ function escHtml(s) {
 
 function renderArticles(articles) {
   if (!articles.length) {
-    articlesGrid.innerHTML = '<p class="empty-state">No articles yet. Generate your first one!</p>';
+    articlesGrid.innerHTML = '<p class="empty-state">No articles yet. Your first one will appear here.</p>';
     return;
   }
   articlesGrid.innerHTML = articles.map(a => `
-    <div class="article-card">
-      <div class="card-title">${escHtml(a.title)}</div>
-      ${a.description ? `<div class="card-desc">${escHtml(a.description)}</div>` : ''}
-      <div class="card-meta">
-        ${a.generated_at ? `<span>${escHtml(a.generated_at)}</span>` : ''}
-        ${a.word_count ? `<span>${a.word_count.toLocaleString()} words</span>` : ''}
-        ${a.image_count ? `<span>${a.image_count} images</span>` : ''}
-      </div>
-      <div class="card-actions">
+    <article class="item">
+      <a class="item-title" href="/output/${encodeURIComponent(a.html_file || a.slug + '.md')}" target="_blank">${escHtml(a.title)}</a>
+      <div class="item-meta">${[a.generated_at, a.word_count ? a.word_count.toLocaleString() + ' words' : '', a.image_count ? a.image_count + ' images' : ''].filter(Boolean).map(escHtml).join(' · ')}</div>
+      <div class="chips">
         ${a.html_file ? `<a class="btn-link btn-html" href="/output/${encodeURIComponent(a.html_file)}" target="_blank">HTML</a>` : ''}
         ${a.docx_file ? `<a class="btn-link btn-docx" href="/output/${encodeURIComponent(a.docx_file)}" download>DOCX</a>` : ''}
         <a class="btn-link btn-md" href="/output/${encodeURIComponent(a.slug)}.md" target="_blank">Markdown</a>
+        ${a.diagram_file ? `<a class="btn-link btn-dia" href="/output/${encodeURIComponent(a.diagram_file)}" target="_blank">Diagram</a>` : ''}
         ${a.linkedin_file ? `<a class="btn-link btn-li" href="/output/${encodeURIComponent(a.linkedin_file)}" target="_blank">LinkedIn</a>` : ''}
         ${a.video_file ? `<a class="btn-link btn-vid" href="/output/${encodeURIComponent(a.video_file)}" target="_blank">Video script</a>` : ''}
-        ${a.video_file ? `<a class="btn-link btn-deck" href="/deck/${encodeURIComponent(a.slug)}" target="_blank">Visual track</a>` : ''}
+        ${a.voice_file ? `<a class="btn-link btn-vid" href="/output/${encodeURIComponent(a.voice_file)}" target="_blank">Voiceover</a>` : ''}
+        ${a.mp4_wide ? `<a class="btn-link btn-mp4" href="/output/${encodeURIComponent(a.mp4_wide)}" target="_blank">Video 16:9</a>` : ''}
+        ${a.mp4_tall ? `<a class="btn-link btn-mp4" href="/output/${encodeURIComponent(a.mp4_tall)}" target="_blank">Video 9:16</a>` : ''}
+        ${a.video_meta ? `<a class="btn-link btn-mp4" href="/output/${encodeURIComponent(a.video_meta)}" target="_blank">Post text</a>` : ''}
         ${a.thumb_file ? `<a class="btn-link btn-thumb" href="/output/${encodeURIComponent(a.thumb_file)}" target="_blank">Share card</a>` : ''}
         ${a.has_review ? `<a class="btn-link btn-rev" href="/review/${encodeURIComponent(a.slug)}">Review</a>` : ''}
       </div>
-    </div>
+    </article>
   `).join('');
 }
 
@@ -488,13 +421,15 @@ async function refreshArticles() {
   try {
     const resp = await fetch('/api/articles');
     const articles = await resp.json();
-    renderArticles(articles);
+    renderArticles(articles.slice(0, 5));
+    const link = document.getElementById('libraryLink');
+    if (link) link.textContent = `Open the library (${articles.length} article${articles.length === 1 ? '' : 's'}) →`;
   } catch (e) { /* silent */ }
 }
 
 function resetSubmit() {
   submitBtn.disabled = false;
-  submitBtn.textContent = 'Generate Article';
+  submitBtn.textContent = 'Generate article';
 }
 
 /* ---- mode switch ---------------------------------------------------- */
@@ -568,6 +503,176 @@ function startProgress(header) {
   progressBox.classList.add('visible');
   header.forEach(line => appendLog(line));
 }
+
+/* ---- topic radar ------------------------------------------------------ */
+const radarBtn = document.getElementById('radarBtn');
+const radarThemes = document.getElementById('radarThemes');
+const radarMeta = document.getElementById('radarMeta');
+
+function escHtml(s) {
+  return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+function renderRadar(r) {
+  if (!r || !r.themes || !r.themes.length) {
+    radarMeta.textContent = 'Nothing yet. Run it to see what the industry is talking about.';
+    radarThemes.innerHTML = '';
+    return;
+  }
+  const when = r.generated_at ? new Date(r.generated_at).toLocaleDateString(undefined, {month: 'short', day: 'numeric'}) : '';
+  radarMeta.textContent = `${r.themes.length} themes from ${r.signals || '?'} signals · last ${r.days || 14} days${when ? ' · run ' + when : ''}`;
+  radarThemes.innerHTML = r.themes.map((t, i) => {
+    const b = t.brief;
+    const takes = (b && b.suggested_take && b.suggested_take.length) ? b.suggested_take : (t.suggested_take || []);
+    const brief = b ? `
+      <div class="brief">
+        <p><strong>Dug in.</strong> ${escHtml(b.summary)}</p>
+        <p><strong>Sharper angle.</strong> ${escHtml(b.sharper_angle)}</p>
+        <p class="muted">${b.counts ? `${b.counts.claims} claims · ${b.counts.counterarguments} pushback · ${b.counts.practitioners_said} practitioner reports · ${b.counts.numbers} numbers · ${b.counts.linkedin} LinkedIn · ` : ''}<a href="/output/${encodeURIComponent(b.file)}" target="_blank">Full brief</a></p>
+        ${(b.unanswered || []).length ? `<p><strong>Nobody answers:</strong> ${b.unanswered.map(escHtml).join(' · ')}</p>` : ''}
+      </div>` : '';
+    return `
+    <details class="theme${t.decision === 'skipped' ? ' theme-skipped' : ''}${t.decision === 'written' ? ' theme-written' : ''}">
+      <summary>
+        <span class="rank">${i + 1}</span>
+        <span class="theme-title">${escHtml(t.title)}</span>
+        <span class="chips">
+          <span class="chip">score ${t.score}</span>
+          <span class="chip chip-${escHtml(t.saturation)}">${escHtml(t.saturation)} saturation</span>
+          ${b ? '<span class="chip chip-done">dug in</span>' : ''}
+          ${t.decision ? `<span class="chip chip-${escHtml(t.decision)}">${escHtml(t.decision)}</span>` : ''}
+        </span>
+        <span class="theme-actions">
+          ${t.decision === 'written' ? '' : t.decision === 'approved'
+            ? `<button type="button" class="btn btn-ghost sm radar-decide" data-i="${i}" data-status="clear" title="Remove from the queue">Queued ✓</button>`
+            : `<button type="button" class="btn btn-ghost sm radar-decide" data-i="${i}" data-status="approved" title="Keep it in the queue">Approve</button>`}
+          ${t.decision === 'skipped'
+            ? `<button type="button" class="btn btn-ghost sm radar-decide" data-i="${i}" data-status="clear" title="Un-skip">Skipped ✕</button>`
+            : t.decision === 'written' ? '' : `<button type="button" class="btn btn-ghost sm radar-decide" data-i="${i}" data-status="skipped" title="Never propose this again">Skip</button>`}
+          <button type="button" class="btn btn-ghost sm radar-dig" data-i="${i}">${b ? 'Dig again' : 'Dig in'}</button>
+          <button type="button" class="btn btn-primary sm radar-write" data-i="${i}">${t.decision === 'written' ? 'Write again' : 'Write this'}</button>
+        </span>
+      </summary>
+      <div class="theme-body">
+        ${brief}
+        <p><strong>Why now.</strong> ${escHtml(t.why_now)}</p>
+        <p><strong>Your angle.</strong> ${escHtml(b ? b.sharper_angle : t.engineer_angle)}</p>
+        <p><strong>Takes to edit</strong></p>
+        <ul>${takes.map(x => `<li>${escHtml(x)}</li>`).join('')}</ul>
+        <p class="muted evidence">${(t.evidence || []).map(e =>
+          `<a href="${escHtml(e.url)}" target="_blank" rel="noopener">${escHtml(e.title || e.source)}</a> <span>(${escHtml(e.source)}${e.signal ? ', ' + escHtml(e.signal) : ''})</span>`
+        ).join(' · ')}</p>
+      </div>
+    </details>`;
+  }).join('');
+  radarThemes.querySelectorAll('.radar-write').forEach(btn => btn.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    const t = r.themes[+btn.dataset.i];
+    const b = t.brief || {};
+    document.getElementById('topic').value = b.suggested_title || t.suggested_title || t.title;
+    document.getElementById('intent').value = b.suggested_intent || t.suggested_intent || '';
+    const takes = (b.suggested_take && b.suggested_take.length) ? b.suggested_take : (t.suggested_take || []);
+    document.getElementById('take').value = takes.join('\n');
+    document.getElementById('fromTheme').value = t.title;
+    document.getElementById('topic').scrollIntoView({behavior: 'smooth', block: 'center'});
+    document.getElementById('topic').focus();
+  }));
+  document.getElementById('topic').addEventListener('input', () => { document.getElementById('fromTheme').value = ''; });
+  radarThemes.querySelectorAll('.radar-dig').forEach(btn => btn.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    digTheme(+btn.dataset.i + 1, r.themes[+btn.dataset.i].title);
+  }));
+  radarThemes.querySelectorAll('.radar-decide').forEach(btn => btn.addEventListener('click', async (ev) => {
+    ev.preventDefault();
+    const t = r.themes[+btn.dataset.i];
+    btn.disabled = true;
+    try {
+      await fetch('/api/radar/decide', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                        body: JSON.stringify({title: t.title, status: btn.dataset.status})});
+    } catch {}
+    await loadRadar();
+  }));
+}
+
+async function digTheme(index, title) {
+  radarBtn.disabled = true;
+  radarBtn.textContent = 'Digging…';
+  startProgress([`Dig in: ${title}`, 'Reading the discussion threads, transcripts, LinkedIn and practitioners\' write-ups…\n']);
+  let jobId;
+  try {
+    const resp = await fetch('/api/radar/dig', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({index}),
+    });
+    const d = await resp.json();
+    if (d.error) throw new Error(d.error);
+    jobId = d.job_id;
+  } catch (err) {
+    appendLog(`\nFailed to start: ${err.message}`, 'err');
+    resetRadar();
+    return;
+  }
+  streamJob(jobId, {
+    onDone: async () => {
+      appendLog('\nDone!', 'done');
+      statusBadge.className = 'status-badge success';
+      statusBadge.textContent = 'Brief ready. Open the theme to read it.';
+      await loadRadar();
+      resetRadar();
+    },
+    onFail: async (msg) => {
+      if (msg) {
+        appendLog(`\nERROR: ${msg}`, 'err');
+        statusBadge.className = 'status-badge error';
+        statusBadge.textContent = `Error: ${msg}`;
+      }
+      resetRadar();
+    },
+  });
+}
+
+async function loadRadar() {
+  try { const r = await fetch('/api/radar/latest'); renderRadar(await r.json()); } catch {}
+}
+loadRadar();
+
+function resetRadar() { radarBtn.disabled = false; radarBtn.textContent = 'Run the radar'; }
+
+radarBtn.addEventListener('click', async (ev) => {
+  ev.preventDefault();
+  radarBtn.disabled = true;
+  radarBtn.textContent = 'Researching…';
+  startProgress(['Topic radar: reading the last 14 days of AI videos, podcasts, newsletters and forums…\n']);
+  let jobId;
+  try {
+    const resp = await fetch('/api/radar', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({days: 14}),
+    });
+    const d = await resp.json();
+    if (d.error) throw new Error(d.error);
+    jobId = d.job_id;
+  } catch (err) {
+    appendLog(`\nFailed to start: ${err.message}`, 'err');
+    resetRadar();
+    return;
+  }
+  streamJob(jobId, {
+    onDone: async () => {
+      appendLog('\nDone!', 'done');
+      statusBadge.className = 'status-badge success';
+      statusBadge.textContent = 'Radar ready. Pick a theme.';
+      await loadRadar();
+      resetRadar();
+    },
+    onFail: async (msg) => {
+      if (msg) {
+        appendLog(`\nERROR: ${msg}`, 'err');
+        statusBadge.className = 'status-badge error';
+        statusBadge.textContent = `Error: ${msg}`;
+      }
+      resetRadar();
+    },
+  });
+});
 
 /* ---- evaluate an existing draft -------------------------------------- */
 const auditForm = document.getElementById('auditForm');
@@ -656,11 +761,15 @@ form.addEventListener('submit', async (e) => {
 
   const topic    = document.getElementById('topic').value.trim();
   const intent   = document.getElementById('intent').value.trim();
+  const take     = document.getElementById('take').value.trim();
   const keywords = document.getElementById('keywords').value.trim();
   const edition  = parseInt(document.getElementById('edition').value) || 0;
   const words    = document.getElementById('words').value;
   const linkedin = document.getElementById('linkedin').checked;
-  const video    = document.getElementById('video').checked;
+  const mp4      = document.getElementById('mp4').checked;
+  const from_theme = document.getElementById('fromTheme').value;
+  const video    = document.getElementById('video').checked || document.getElementById('voiceover').checked || mp4;
+  const voiceover = document.getElementById('voiceover').checked || mp4;
   const thumbnail = document.getElementById('thumbnail').checked;
 
   if (!topic) return;
@@ -672,8 +781,11 @@ form.addEventListener('submit', async (e) => {
     `Length : ${document.getElementById('words').selectedOptions[0].text}`,
     ...(linkedin ? ['Extra  : LinkedIn post'] : []),
     ...(video ? ['Extra  : video script'] : []),
+    ...(voiceover ? ['Extra  : voiceover in your voice'] : []),
+    ...(mp4 ? ['Extra  : finished video, 16:9 and 9:16, captions burned in'] : []),
     ...(thumbnail ? ['Extra  : share card'] : []),
     ...(intent ? [`Intent : ${intent}`] : []),
+    ...(take ? [`Take   : ${take.split('\n').length} point(s)`] : ['Take   : none — the article will have no first-person view']),
     'Starting pipeline…\n',
   ]);
 
@@ -683,7 +795,7 @@ form.addEventListener('submit', async (e) => {
     const startResp = await fetch('/api/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ topic, intent: intent || keywords, edition, words, linkedin, video, thumbnail }),
+      body: JSON.stringify({ topic, intent: intent || keywords, take, edition, words, linkedin, video, voiceover, mp4, thumbnail, from_theme }),
     });
     const startData = await startResp.json();
     if (startData.error) throw new Error(startData.error);

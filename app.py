@@ -10,7 +10,11 @@ Run:
 Then open http://localhost:5000
 """
 
+import base64
 import hashlib
+import os as _os
+_os.environ.setdefault("ANTHROPIC_API_KEY", _os.environ.get("ANTHROPIC_API_KEY", "unset"))
+import seo_writer as sw_decisions  # noqa: E402  (decision helpers only)
 import hmac
 import json
 import os
@@ -113,7 +117,7 @@ app.config.update(
 
 # Public because a browser must reach them before it can authenticate, and
 # because a health check should not need a credential.
-_OPEN_PATHS = {"/healthz", "/login"}
+_OPEN_PATHS = {"/healthz", "/login", "/feed.json", "/feed.xml", "/embed.js"}
 
 # A login form on a public URL is a brute-force target. This is deliberately
 # small: a per-IP counter, not a rate-limiting library.
@@ -170,6 +174,10 @@ def _logged_in() -> bool:
 @app.before_request
 def require_password():
     if not APP_PASSWORD or request.path in _OPEN_PATHS:
+        return None
+    # Signed download links carry their own credential (an expiring HMAC), so
+    # an automation platform can fetch one finished file without the password.
+    if request.path.startswith("/dl/"):
         return None
     if _logged_in() or _basic_auth_ok():
         return None
@@ -248,6 +256,12 @@ def list_articles() -> list[dict]:
         docx_file = docx_files[0].name if docx_files else None
         linkedin_path = OUTPUT_DIR / f"{slug}_linkedin.md"
         video_path = OUTPUT_DIR / f"{slug}_video.md"
+        voice_path = OUTPUT_DIR / f"{slug}_voiceover.mp3"
+        mp4_wide = OUTPUT_DIR / f"{slug}_video_16x9.mp4"
+        mp4_tall = OUTPUT_DIR / f"{slug}_video_9x16.mp4"
+        video_meta = OUTPUT_DIR / f"{slug}_video_meta.md"
+        diagram_path = OUTPUT_DIR / f"{slug}_diagram_1.png"
+        facts_path = OUTPUT_DIR / f"{slug}_facts.json"
         thumb_path = OUTPUT_DIR / f"{slug}_thumbnail.html"
         review_path = OUTPUT_DIR / f"{slug}_review.json"
 
@@ -274,6 +288,12 @@ def list_articles() -> list[dict]:
             "image_count": len(meta.get("images", [])),
             "linkedin_file": linkedin_path.name if linkedin_path.exists() else None,
             "video_file": video_path.name if video_path.exists() else None,
+            "voice_file": voice_path.name if voice_path.exists() else None,
+            "mp4_wide": mp4_wide.name if mp4_wide.exists() else None,
+            "mp4_tall": mp4_tall.name if mp4_tall.exists() else None,
+            "video_meta": video_meta.name if video_meta.exists() else None,
+            "diagram_file": diagram_path.name if diagram_path.exists() else None,
+            "facts_file": facts_path.name if facts_path.exists() else None,
             "thumb_file": thumb_path.name if thumb_path.exists() else None,
             "has_review": review_path.exists(),
         })
@@ -284,10 +304,45 @@ def list_articles() -> list[dict]:
 # Routes
 # ---------------------------------------------------------------------------
 
+def list_radars() -> list[dict]:
+    """Every dated radar run, newest first, with the briefs dug on its themes."""
+    runs = []
+    for path in sorted(OUTPUT_DIR.glob("radar_????-??-??.json"), reverse=True):
+        date = path.stem[len("radar_"):]
+        try:
+            radar = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            radar = {}
+        themes = radar.get("themes") or []
+        briefs = []
+        for brief in sorted(OUTPUT_DIR.glob(f"radar_{date}_brief_*.md")):
+            try:
+                index = int(brief.stem.rsplit("_", 1)[1])
+            except ValueError:
+                continue
+            title = themes[index - 1].get("title", "") if 0 < index <= len(themes) else ""
+            briefs.append({"index": index, "file": brief.name, "title": title or brief.name})
+        runs.append({
+            "date": date, "theme_count": len(themes),
+            "top_theme": themes[0].get("title", "") if themes else "",
+            "md": f"radar_{date}.md", "json": path.name, "briefs": briefs,
+        })
+    return runs
+
+
+RECENT_ON_HOME = 5
+
+
 @app.route("/")
 def index():
     articles = list_articles()
-    return render_template("index.html", articles=articles)
+    return render_template("index.html", articles=articles[:RECENT_ON_HOME],
+                           total_articles=len(articles))
+
+
+@app.route("/library")
+def library():
+    return render_template("library.html", articles=list_articles(), radars=list_radars())
 
 
 @app.route("/output/<path:filename>")
@@ -375,15 +430,452 @@ def usage_dashboard():
     return render_template("usage.html", runs=runs, **roll)
 
 
+# ---------------------------------------------------------------------------
+# Completion callback + signed downloads
+# ---------------------------------------------------------------------------
+#
+# The browser follows a run over /api/stream/<job_id>, but an automation
+# platform (Zapier, n8n, Make) cannot hold an SSE stream open for a ten-minute
+# job. So /api/start accepts an optional callback_url: when the pipeline exits,
+# the app POSTs one JSON payload there describing what was produced, and echoes
+# the caller's external_id so the receiver can find its own record.
+#
+# The files in that payload are linked through /dl/... - URLs that carry an
+# expiring HMAC instead of the app password, so the receiver can fetch them
+# without a credential it would otherwise have to store.
+
+DOWNLOAD_TTL_SECS = int(os.environ.get("DOWNLOAD_TTL_SECS", 7 * 24 * 3600))
+CALLBACK_TIMEOUT_SECS = 15
+CALLBACK_ATTEMPTS = 3
+
+
+def _public_base_url() -> str:
+    """Where the outside world reaches this app. PUBLIC_URL wins; otherwise the
+    request's own host, forced to https on Fly where the edge terminates TLS."""
+    configured = os.environ.get("PUBLIC_URL", "").rstrip("/")
+    if configured:
+        return configured
+    root = request.url_root.rstrip("/")
+    if os.environ.get("FLY_APP_NAME") and root.startswith("http://"):
+        root = "https://" + root[len("http://"):]
+    return root
+
+
+def _b64(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _download_sig(filename: str, exp: int) -> str:
+    msg = f"{exp}|{filename}".encode()
+    return _b64(hmac.new(app.secret_key.encode(), msg, hashlib.sha256).digest())
+
+
+def signed_download_url(filename: str, base_url: str,
+                        ttl: int = DOWNLOAD_TTL_SECS) -> str:
+    exp = int(time.time()) + ttl
+    return f"{base_url}/dl/{exp}/{_download_sig(filename, exp)}/{filename}"
+
+
+# ---------------------------------------------------------------------------
+# Public feed: import published articles into another site
+# ---------------------------------------------------------------------------
+#
+# A portfolio site has no login and no reason to hold this app's password, so
+# the feed and the embed widget are public read-only endpoints - the same
+# trust level as a signed /dl/ link, just for the whole catalog instead of one
+# file. JSON Feed (feed.json) and RSS (feed.xml) cover the two things a static
+# site, a build script, or a no-code importer (Zapier, IFTTT, a WordPress RSS
+# importer) is likely to already speak; /embed.js is for a site with no build
+# step at all - paste a <div> and a <script src>, done.
+
+FEED_LINK_TTL_SECS = int(os.environ.get("FEED_LINK_TTL_SECS", 30 * 24 * 3600))
+FEED_DEFAULT_LIMIT = 50
+FEED_MAX_LIMIT = 200
+
+
+def _rfc822(dt_iso: str) -> str:
+    try:
+        dt = datetime.fromisoformat(dt_iso.replace("Z", "+00:00"))
+    except Exception:
+        dt = datetime.now(timezone.utc)
+    return dt.strftime("%a, %d %b %Y %H:%M:%S %z")
+
+
+def _feed_article_url(slug: str, html_file: str | None, base_url: str) -> str:
+    """SITE_URL/<slug> once the author has a real page there; until then, a
+    signed link straight to the app's own rendered HTML, which works today."""
+    site = sw_decisions.SITE_URL
+    if site:
+        return f"{site}/{slug}"
+    if html_file:
+        return signed_download_url(html_file, base_url, ttl=FEED_LINK_TTL_SECS)
+    return f"{base_url}/library"
+
+
+def _feed_image_url(meta: dict, slug: str, base_url: str) -> str | None:
+    for img in meta.get("images", []) or []:
+        url = img.get("url", "")
+        if sw_decisions.usable_image_url(url):
+            return url
+    diagram = OUTPUT_DIR / f"{slug}_diagram_1.png"
+    if diagram.exists():
+        return signed_download_url(diagram.name, base_url, ttl=FEED_LINK_TTL_SECS)
+    return None
+
+
+def _feed_content_html(slug: str) -> str | None:
+    """The article's own rendered body, so an importer needs no second fetch."""
+    html_files = sorted(OUTPUT_DIR.glob(f"{slug}*.html"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not html_files:
+        return None
+    try:
+        text = html_files[0].read_text(encoding="utf-8")
+    except Exception:
+        return None
+    m = re.search(r"<body[^>]*>(.*)</body>", text, re.DOTALL | re.IGNORECASE)
+    return m.group(1).strip() if m else None
+
+
+def feed_items(base_url: str, limit: int = FEED_DEFAULT_LIMIT, include_content: bool = True) -> list[dict]:
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    items = []
+    for meta_file in sorted(OUTPUT_DIR.glob("*_meta.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if len(items) >= limit:
+            break
+        slug = meta_file.stem[:-len("_meta")]
+        try:
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        seo = meta.get("seo_meta") or {}
+        title = seo.get("title") or slug.replace("-", " ").title()
+        html_files = sorted(OUTPUT_DIR.glob(f"{slug}*.html"), key=lambda p: p.stat().st_mtime, reverse=True)
+        html_file = html_files[0].name if html_files else None
+        published = meta.get("generated_at") or datetime.now(timezone.utc).isoformat()
+        md_path = OUTPUT_DIR / f"{slug}.md"
+        word_count = len(md_path.read_text(encoding="utf-8").split()) if md_path.exists() else None
+        item = {
+            "id": slug,
+            "slug": slug,
+            "title": title,
+            "summary": seo.get("description", ""),
+            "url": _feed_article_url(slug, html_file, base_url),
+            "image": _feed_image_url(meta, slug, base_url),
+            "date_published": published,
+            "author": sw_decisions.AUTHOR_NAME,
+            "word_count": word_count,
+        }
+        if include_content:
+            item["content_html"] = _feed_content_html(slug)
+        items.append(item)
+    return items
+
+
+@app.route("/feed.json")
+def feed_json():
+    base_url = _public_base_url()
+    try:
+        limit = min(FEED_MAX_LIMIT, max(1, int(request.args.get("limit", FEED_DEFAULT_LIMIT))))
+    except (TypeError, ValueError):
+        limit = FEED_DEFAULT_LIMIT
+    include_content = request.args.get("content", "1") != "0"
+    items = feed_items(base_url, limit=limit, include_content=include_content)
+    feed = {
+        "version": "https://jsonfeed.org/version/1.1",
+        "title": f"{sw_decisions.AUTHOR_NAME} — Articles",
+        "home_page_url": sw_decisions.AUTHOR_URL or base_url,
+        "feed_url": f"{base_url}/feed.json",
+        "description": f"Articles written by {sw_decisions.AUTHOR_NAME}, published via Humanly.",
+        "author": {"name": sw_decisions.AUTHOR_NAME, "url": sw_decisions.AUTHOR_URL},
+        "items": [{
+            "id": it["id"], "url": it["url"], "title": it["title"],
+            "summary": it["summary"],
+            **({"content_html": it["content_html"]} if it.get("content_html") else
+               {"content_text": it["summary"] or it["title"]}),
+            **({"image": it["image"]} if it["image"] else {}),
+            "date_published": it["date_published"],
+            "authors": [{"name": it["author"]}],
+            "_word_count": it["word_count"],
+        } for it in items],
+    }
+    resp = jsonify(feed)
+    resp.headers["Content-Type"] = "application/feed+json; charset=utf-8"
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Cache-Control"] = "public, max-age=300"
+    return resp
+
+
+@app.route("/feed.xml")
+def feed_rss():
+    base_url = _public_base_url()
+    try:
+        limit = min(FEED_MAX_LIMIT, max(1, int(request.args.get("limit", FEED_DEFAULT_LIMIT))))
+    except (TypeError, ValueError):
+        limit = FEED_DEFAULT_LIMIT
+    items = feed_items(base_url, limit=limit, include_content=True)
+    site = sw_decisions.AUTHOR_URL or base_url
+    parts = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" '
+        'xmlns:atom="http://www.w3.org/2005/Atom">',
+        "<channel>",
+        f"<title>{sw_decisions._esc(sw_decisions.AUTHOR_NAME)} — Articles</title>",
+        f"<link>{sw_decisions._esc(site)}</link>",
+        f'<atom:link href="{sw_decisions._esc(base_url)}/feed.xml" rel="self" type="application/rss+xml"/>',
+        f"<description>Articles written by {sw_decisions._esc(sw_decisions.AUTHOR_NAME)}, published via Humanly.</description>",
+        "<language>en</language>",
+    ]
+    for it in items:
+        parts.append("<item>")
+        parts.append(f"<title>{sw_decisions._esc(it['title'])}</title>")
+        parts.append(f"<link>{sw_decisions._esc(it['url'])}</link>")
+        parts.append(f'<guid isPermaLink="false">{sw_decisions._esc(it["id"])}</guid>')
+        parts.append(f"<pubDate>{_rfc822(it['date_published'])}</pubDate>")
+        parts.append(f"<description>{sw_decisions._esc(it['summary'])}</description>")
+        if it.get("content_html"):
+            parts.append(f"<content:encoded><![CDATA[{it['content_html']}]]></content:encoded>")
+        if it.get("image"):
+            parts.append(f'<enclosure url="{sw_decisions._esc(it["image"])}" type="image/jpeg"/>')
+        parts.append("</item>")
+    parts += ["</channel>", "</rss>"]
+    resp = Response("\n".join(parts), mimetype="application/rss+xml")
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Cache-Control"] = "public, max-age=300"
+    return resp
+
+
+@app.route("/embed.js")
+def embed_js():
+    """A dependency-free widget: paste one <div> and this <script src> into any
+    HTML page (no build step, no framework) and it renders an article grid
+    from /feed.json. data-limit and data-target on the <script> tag configure it."""
+    base_url = _public_base_url()
+    js = """(function() {
+  var thisScript = document.currentScript;
+  var limit = (thisScript && thisScript.getAttribute('data-limit')) || 6;
+  var targetSel = (thisScript && thisScript.getAttribute('data-target')) || '#humanly-articles';
+  var feedUrl = '%(base)s/feed.json?limit=' + limit + '&content=0';
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"]/g, function(c) {
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
+    });
+  }
+
+  function render(target, feed) {
+    var css = '.humanly-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:20px;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif}' +
+      '.humanly-card{display:flex;flex-direction:column;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;text-decoration:none;color:inherit;background:#fff;transition:box-shadow .15s}' +
+      '.humanly-card:hover{box-shadow:0 8px 24px rgba(16,24,40,.08)}' +
+      '.humanly-card img{width:100%%;height:150px;object-fit:cover;background:#f4f5f7}' +
+      '.humanly-card-body{padding:14px 16px;display:flex;flex-direction:column;gap:6px}' +
+      '.humanly-card-title{font-size:15px;font-weight:700;line-height:1.4;color:#15171a}' +
+      '.humanly-card-desc{font-size:13px;color:#3f4650;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}' +
+      '.humanly-card-date{font-size:12px;color:#6b7280}';
+    var style = document.createElement('style');
+    style.textContent = css;
+    document.head.appendChild(style);
+
+    var grid = document.createElement('div');
+    grid.className = 'humanly-grid';
+    (feed.items || []).forEach(function(item) {
+      var a = document.createElement('a');
+      a.className = 'humanly-card';
+      a.href = item.url;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      var img = item.image ? '<img src="' + esc(item.image) + '" alt="">' : '';
+      var date = item.date_published ? new Date(item.date_published).toLocaleDateString(undefined, {year:'numeric',month:'short',day:'numeric'}) : '';
+      a.innerHTML = img +
+        '<div class="humanly-card-body">' +
+        '<div class="humanly-card-title">' + esc(item.title) + '</div>' +
+        '<div class="humanly-card-desc">' + esc(item.summary) + '</div>' +
+        '<div class="humanly-card-date">' + esc(date) + '</div>' +
+        '</div>';
+      grid.appendChild(a);
+    });
+    target.innerHTML = '';
+    target.appendChild(grid);
+  }
+
+  function boot() {
+    var target = document.querySelector(targetSel);
+    if (!target) return;
+    fetch(feedUrl).then(function(r) { return r.json(); }).then(function(feed) {
+      render(target, feed);
+    }).catch(function() {
+      target.textContent = 'Articles could not be loaded.';
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot);
+  } else {
+    boot();
+  }
+})();
+""" % {"base": base_url}
+    resp = Response(js, mimetype="application/javascript; charset=utf-8")
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Cache-Control"] = "public, max-age=300"
+    return resp
+
+
+@app.route("/dl/<int:exp>/<sig>/<path:filename>")
+def signed_download(exp: int, sig: str, filename: str):
+    if time.time() > exp:
+        return Response("This download link has expired.\n", 410)
+    if not hmac.compare_digest(sig.encode(), _download_sig(filename, exp).encode()):
+        return Response("Invalid download link.\n", 403)
+    return send_from_directory(OUTPUT_DIR, filename)
+
+
+def _valid_callback_url(url: str) -> bool:
+    return bool(re.match(r"^https?://[^\s/]+", url or ""))
+
+
+def _completion_payload(slug: str | None, external_id: str, status: str,
+                        error: str, base_url: str, echo: dict) -> dict:
+    payload = {
+        "external_id": external_id,
+        "status": status,
+        "error": error or None,
+        "slug": slug,
+        "request": echo,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if not slug:
+        return payload
+
+    meta_path = OUTPUT_DIR / f"{slug}_meta.json"
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        meta = {}
+    payload["meta"] = meta.get("seo_meta", {})
+    payload["images"] = meta.get("images", [])
+
+    md_path = OUTPUT_DIR / f"{slug}.md"
+    if md_path.exists():
+        text = md_path.read_text(encoding="utf-8")
+        payload["word_count"] = len(text.split())
+        # Inline the article so a receiver with no file step still gets it.
+        payload["article_md"] = text
+
+    files = {}
+    for key, name in {
+        "md": f"{slug}.md",
+        "html": f"{slug}.html",
+        "docx": f"{slug}.docx",
+        "meta": f"{slug}_meta.json",
+        "linkedin": f"{slug}_linkedin.md",
+        "video": f"{slug}_video.md",
+        "voiceover": f"{slug}_voiceover.mp3",
+        "video_16x9": f"{slug}_video_16x9.mp4",
+        "video_9x16": f"{slug}_video_9x16.mp4",
+        "captions": f"{slug}_captions.srt",
+        "video_meta": f"{slug}_video_meta.md",
+        "thumbnail": f"{slug}_thumbnail.html",
+        "review_md": f"{slug}_review.md",
+        "review_json": f"{slug}_review.json",
+        "facts": f"{slug}_facts.json",
+        "diagram_png": f"{slug}_diagram_1.png",
+        "diagram_svg": f"{slug}_diagram_1.svg",
+        "usage": f"{slug}_usage.json",
+    }.items():
+        if (OUTPUT_DIR / name).exists():
+            files[key] = signed_download_url(name, base_url)
+    payload["files"] = files
+
+    # The small extras travel inline too - they are what the downstream media
+    # steps consume, and a 200-word post is cheaper to embed than to fetch.
+    for key, name in {"linkedin_md": f"{slug}_linkedin.md",
+                      "video_script_md": f"{slug}_video.md",
+                      "video_meta_md": f"{slug}_video_meta.md"}.items():
+        p = OUTPUT_DIR / name
+        if p.exists():
+            payload[key] = p.read_text(encoding="utf-8")
+
+    usage_path = OUTPUT_DIR / f"{slug}_usage.json"
+    try:
+        u = json.loads(usage_path.read_text(encoding="utf-8"))
+        payload["usage"] = {k: u.get(k) for k in
+                            ("calls", "input_tokens", "output_tokens",
+                             "total_tokens", "cost_usd", "fully_priced")
+                            if k in u}
+    except Exception:
+        pass
+    return payload
+
+
+def _post_callback(url: str, payload: dict):
+    """Deliver the completion payload, retrying briefly. Runs on its own thread."""
+    import requests
+    delay = 2
+    for attempt in range(1, CALLBACK_ATTEMPTS + 1):
+        try:
+            r = requests.post(url, json=payload, timeout=CALLBACK_TIMEOUT_SECS)
+            if r.status_code < 400:
+                print(f"[callback] delivered to {url} ({r.status_code})", flush=True)
+                return
+            print(f"[callback] attempt {attempt}: {url} answered {r.status_code}",
+                  flush=True)
+        except Exception as e:
+            print(f"[callback] attempt {attempt}: {e}", flush=True)
+        time.sleep(delay)
+        delay *= 3
+    print(f"[callback] gave up on {url} after {CALLBACK_ATTEMPTS} attempts", flush=True)
+
+
+def _radar_payload(callback: dict, status: str, error: str) -> dict:
+    payload = {
+        "kind": "radar", "external_id": callback["external_id"], "status": status,
+        "error": error or None,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+    }
+    latest = OUTPUT_DIR / "radar_latest.json"
+    if status == "done" and latest.exists():
+        try:
+            radar = json.loads(latest.read_text(encoding="utf-8"))
+        except Exception:
+            radar = {}
+        payload.update({k: radar.get(k) for k in ("generated_at", "days", "signals", "themes", "skipped")})
+        stamp = str(radar.get("generated_at") or "")[:10]
+        files = {}
+        for key, name in {"radar_md": f"radar_{stamp}.md", "radar_json": f"radar_{stamp}.json"}.items():
+            if (OUTPUT_DIR / name).exists():
+                files[key] = signed_download_url(name, callback["base_url"])
+        payload["files"] = files
+    return payload
+
+
+def _new_slug(baseline: set) -> str | None:
+    """The article this job wrote: whichever _meta.json did not exist before it."""
+    fresh = [p for p in OUTPUT_DIR.glob("*_meta.json") if p.name not in baseline]
+    if not fresh:
+        return None
+    newest = max(fresh, key=lambda p: p.stat().st_mtime)
+    return newest.stem[:-len("_meta")]
+
+
 @app.route("/api/start", methods=["POST"])
 def api_start():
     """
     Start a pipeline job. Returns { job_id }.
     Frontend then opens EventSource on /api/stream/<job_id>.
+
+    Optional in the JSON body:
+      callback_url  - POSTed a completion payload when the run ends
+      external_id   - echoed back in that payload (e.g. an Airtable record id)
     """
     data = request.get_json(silent=True) or {}
     topic = (data.get("topic") or "").strip()
     intent = (data.get("intent") or "").strip()
+    take = (data.get("take") or "").strip()[:4000]
+    from_theme = (data.get("from_theme") or "").strip()[:140]
+    callback_url = (data.get("callback_url") or "").strip()
+    external_id = str(data.get("external_id") or "")[:200]
+    if callback_url and not _valid_callback_url(callback_url):
+        return jsonify({"error": "callback_url must be an http(s) URL"}), 400
     try:
         edition = int(data.get("edition") or 0)
     except (TypeError, ValueError):
@@ -393,6 +885,8 @@ def api_start():
         words = "default"
     linkedin = bool(data.get("linkedin"))
     video = bool(data.get("video"))
+    voiceover = bool(data.get("voiceover"))
+    mp4 = bool(data.get("mp4"))
     thumbnail = bool(data.get("thumbnail"))
 
     if not topic:
@@ -407,21 +901,47 @@ def api_start():
     ]
     if intent:
         cmd += ["--intent", intent]
+    if take:
+        cmd += ["--take", take]
+    if from_theme:
+        cmd += ["--from-theme", from_theme]
     if linkedin:
         cmd.append("--linkedin")
     if video:
         cmd.append("--video")
+    if voiceover:
+        cmd.append("--voiceover")
+    if mp4:
+        cmd.append("--mp4")
     if thumbnail:
         cmd.append("--thumbnail")
 
-    return jsonify({"job_id": _spawn(cmd)})
+    callback = None
+    if callback_url:
+        OUTPUT_DIR.mkdir(exist_ok=True)
+        callback = {
+            "url": callback_url,
+            "external_id": external_id,
+            "base_url": _public_base_url(),
+            "article_baseline": {p.name for p in OUTPUT_DIR.glob("*_meta.json")},
+            "echo": {"topic": topic, "intent": intent, "take": take, "words": words,
+                     "edition": edition, "linkedin": linkedin,
+                     "video": video, "voiceover": voiceover, "mp4": mp4, "thumbnail": thumbnail},
+        }
+
+    job_id = _spawn(cmd, callback=callback)
+    return jsonify({"job_id": job_id, "external_id": external_id or None})
 
 
-def _spawn(cmd: list[str], review_baseline: set | None = None) -> str:
+def _spawn(cmd: list[str], review_baseline: set | None = None,
+           callback: dict | None = None) -> str:
     """Run seo_writer.py in the background, streaming its output to a job queue.
 
     Shared by generation and audit: both are the same pipeline script with
     different flags, and both want the same live log.
+
+    `callback`, when given, is {url, external_id, base_url, article_baseline,
+    echo}: after the process exits, one completion payload is POSTed to url.
     """
     _reap_jobs()
     job_id = str(uuid.uuid4())
@@ -429,6 +949,20 @@ def _spawn(cmd: list[str], review_baseline: set | None = None) -> str:
     with _jobs_lock:
         _jobs[job_id] = q
         _job_started[job_id] = time.time()
+
+    def notify(status: str, error: str = ""):
+        if not callback:
+            return
+        if callback.get("kind") == "radar":
+            payload = _radar_payload(callback, status, error)
+        else:
+            slug = _new_slug(callback["article_baseline"])
+            payload = _completion_payload(slug, callback["external_id"], status,
+                                          error, callback["base_url"],
+                                          callback["echo"])
+        payload["job_id"] = job_id
+        threading.Thread(target=_post_callback,
+                         args=(callback["url"], payload), daemon=True).start()
 
     def run():
         try:
@@ -459,9 +993,11 @@ def _spawn(cmd: list[str], review_baseline: set | None = None) -> str:
                       flush=True)
                 for line in tail:
                     print(f"[job]   {line}", flush=True)
-                q.put(("error", last_error
-                       or f"Pipeline exited with code {proc.returncode}. "
-                          f"The server log has the last 40 lines."))
+                message = (last_error
+                           or f"Pipeline exited with code {proc.returncode}. "
+                              f"The server log has the last 40 lines.")
+                q.put(("error", message))
+                notify("error", message)
                 return
 
             payload = {}
@@ -474,8 +1010,10 @@ def _spawn(cmd: list[str], review_baseline: set | None = None) -> str:
                     newest = max(fresh, key=lambda p: p.stat().st_mtime)
                     payload["review_slug"] = newest.stem[:-len("_review")]
             q.put(("done", json.dumps(payload)))
+            notify("done")
         except Exception as e:
             q.put(("error", str(e)))
+            notify("error", str(e))
 
     threading.Thread(target=run, daemon=True).start()
     return job_id
@@ -537,6 +1075,133 @@ def _draft_from_request() -> tuple[str, str]:
     if pasted:
         return pasted, ""
     raise ValueError("Paste an article or choose a file to evaluate.")
+
+
+# ---------------------------------------------------------------------------
+# Topic radar: what to write
+# ---------------------------------------------------------------------------
+
+def _radar_cmd(days: int) -> list[str]:
+    return [sys.executable, str(BASE_DIR / "seo_writer.py"), "--radar",
+            "--radar-days", str(days), "--output-dir", str(OUTPUT_DIR)]
+
+
+@app.route("/api/radar", methods=["POST"])
+def api_radar():
+    """Start a radar run. Same job stream as an article; the result lands in
+    output/radar_latest.json and is read back through /api/radar/latest."""
+    data = request.get_json(silent=True) or {}
+    try:
+        days = max(3, min(60, int(data.get("days") or 14)))
+    except (TypeError, ValueError):
+        days = 14
+    callback_url = (data.get("callback_url") or "").strip()
+    if callback_url and not _valid_callback_url(callback_url):
+        return jsonify({"error": "callback_url must be an http(s) URL"}), 400
+    callback = None
+    if callback_url:
+        callback = {"kind": "radar", "url": callback_url,
+                    "external_id": str(data.get("external_id") or "")[:200],
+                    "base_url": _public_base_url()}
+    return jsonify({"job_id": _spawn(_radar_cmd(days), callback=callback)})
+
+
+@app.route("/api/radar/dig", methods=["POST"])
+def api_radar_dig():
+    """Deep research on one theme of the latest radar (1-based index)."""
+    data = request.get_json(silent=True) or {}
+    try:
+        index = int(data.get("index") or 0)
+    except (TypeError, ValueError):
+        index = 0
+    if index < 1:
+        return jsonify({"error": "index must be a theme number, starting at 1"}), 400
+    if not (OUTPUT_DIR / "radar_latest.json").exists():
+        return jsonify({"error": "run the radar first"}), 400
+    cmd = [sys.executable, str(BASE_DIR / "seo_writer.py"), "--dig", str(index),
+           "--output-dir", str(OUTPUT_DIR)]
+    return jsonify({"job_id": _spawn(cmd)})
+
+
+@app.route("/api/radar/latest")
+def api_radar_latest():
+    """The latest radar, each theme annotated with the author's decision."""
+    latest = OUTPUT_DIR / "radar_latest.json"
+    if not latest.exists():
+        return jsonify({"themes": [], "generated_at": None})
+    try:
+        radar = json.loads(latest.read_text(encoding="utf-8"))
+    except Exception:
+        return jsonify({"themes": [], "generated_at": None})
+    decisions = sw_decisions.load_decisions(OUTPUT_DIR)
+    for t in radar.get("themes") or []:
+        d = sw_decisions.decision_for(t.get("title", ""), decisions)
+        t["decision"] = d.get("status") if d else None
+        t["decision_slug"] = d.get("slug") if d else None
+    return jsonify(radar)
+
+
+@app.route("/api/radar/decide", methods=["POST"])
+def api_radar_decide():
+    """Approve, skip, or un-decide a theme. The next radar remembers."""
+    data = request.get_json(silent=True) or {}
+    title = (data.get("title") or "").strip()
+    status = (data.get("status") or "").strip().lower()
+    if not title:
+        return jsonify({"error": "title is required"}), 400
+    if status == "clear":
+        decisions = sw_decisions.load_decisions(OUTPUT_DIR)
+        decisions.pop(sw_decisions._decision_key(title), None)
+        (OUTPUT_DIR / "radar_decisions.json").write_text(json.dumps(decisions, indent=2, ensure_ascii=False), encoding="utf-8")
+        return jsonify({"title": title, "status": None})
+    if status not in sw_decisions.DECISION_STATUSES:
+        return jsonify({"error": "status must be approved, skipped, written or clear"}), 400
+    rec = sw_decisions.record_decision(OUTPUT_DIR, title, status, note=str(data.get("note") or "")[:300])
+    return jsonify(rec)
+
+
+# Weekly run. Fly has no cron of its own and the machine stays up
+# (min_machines_running = 1), so a thread in the one worker checks hourly.
+RADAR_WEEKLY = os.environ.get("RADAR_WEEKLY", "").strip().lower()[:3]
+RADAR_CALLBACK_URL = os.environ.get("RADAR_CALLBACK_URL", "").strip()
+_WEEKDAYS = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+
+
+def _radar_is_stale(max_age_days: int = 6) -> bool:
+    latest = OUTPUT_DIR / "radar_latest.json"
+    if not latest.exists():
+        return True
+    try:
+        stamp = json.loads(latest.read_text(encoding="utf-8")).get("generated_at", "")
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        return age.days >= max_age_days
+    except Exception:
+        return True
+
+
+def _weekly_radar_loop():
+    while True:
+        try:
+            if (datetime.now(timezone.utc).weekday() == _WEEKDAYS[RADAR_WEEKLY]
+                    and _radar_is_stale()):
+                print("[radar] weekly run starting", flush=True)
+                callback = None
+                if RADAR_CALLBACK_URL and _valid_callback_url(RADAR_CALLBACK_URL):
+                    callback = {"kind": "radar", "url": RADAR_CALLBACK_URL, "external_id": "weekly",
+                                "base_url": os.environ.get("PUBLIC_URL", "").rstrip("/")}
+                _spawn(_radar_cmd(14), callback=callback)
+        except Exception as e:
+            print(f"[radar] weekly check failed: {e}", flush=True)
+        time.sleep(3600)
+
+
+def _start_weekly_radar():
+    if RADAR_WEEKLY in _WEEKDAYS:
+        threading.Thread(target=_weekly_radar_loop, daemon=True).start()
+        print(f"[radar] weekly run scheduled for {RADAR_WEEKLY}", flush=True)
+
+
+_start_weekly_radar()
 
 
 @app.route("/api/audit/start", methods=["POST"])

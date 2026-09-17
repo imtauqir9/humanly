@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Library — Humanly</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f4f5f7; --surface: #ffffff; --ink: #15171a; --ink-2: #3f4650; --muted: #6b7280;
+    --line: #e5e7eb; --line-2: #d6dae1; --accent: #3b5bdb; --accent-soft: #eef2fc;
+    --radius: 12px; --shadow: 0 1px 2px rgba(16,24,40,.04), 0 1px 3px rgba(16,24,40,.06);
+    --sans: "Inter", -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: var(--sans); font-size: 14px; line-height: 1.5; color: var(--ink); background: var(--bg); min-height: 100vh; }
+  a { color: var(--accent); }
+
+  header { position: sticky; top: 0; z-index: 10; background: rgba(21,23,26,.96); backdrop-filter: blur(8px); color: #fff;
+           padding: 0 28px; height: 56px; display: flex; align-items: center; gap: 14px; }
+  header h1 { font-size: 16px; font-weight: 700; letter-spacing: -.2px; }
+  header span { font-size: 12.5px; color: #9aa3ad; }
+  nav { margin-left: auto; display: flex; gap: 4px; align-items: center; }
+  nav a { color: #b6bec7; font-size: 13px; font-weight: 500; text-decoration: none; padding: 6px 10px; border-radius: 8px; }
+  nav a:hover { color: #fff; background: rgba(255,255,255,.08); }
+  nav a.active { color: #fff; background: rgba(255,255,255,.14); }
+
+  main { max-width: 1360px; margin: 0 auto; padding: 24px 28px 64px; }
+  .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+  .toolbar h2 { font-size: 16px; font-weight: 600; letter-spacing: -.1px; }
+  .toolbar .count { font-size: 12.5px; color: var(--muted); }
+  .toolbar input { margin-left: auto; width: 340px; max-width: 100%; font-family: inherit; font-size: 14px; color: var(--ink);
+                   border: 1px solid var(--line-2); border-radius: 9px; padding: 9px 12px; background: #fff; transition: border-color .12s, box-shadow .12s; }
+  .toolbar input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(59,91,219,.15); }
+
+  .articles-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
+  .article-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow);
+                  padding: 16px 18px; display: flex; flex-direction: column; gap: 8px; transition: box-shadow .15s, transform .15s; }
+  .article-card:hover { box-shadow: 0 8px 24px rgba(16,24,40,.08); transform: translateY(-1px); }
+  .article-card.hidden { display: none; }
+  .card-title { font-size: 14.5px; font-weight: 600; line-height: 1.4; letter-spacing: -.1px; }
+  .card-desc { font-size: 13px; color: var(--ink-2); line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .card-meta { display: flex; gap: 8px; font-size: 12.5px; color: var(--muted); flex-wrap: wrap; }
+  .card-meta span + span::before { content: "·"; margin-right: 8px; color: var(--line-2); }
+  .card-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+  .btn-link { font-size: 11.5px; font-weight: 600; padding: 3px 9px; border-radius: 999px; text-decoration: none; border: 1px solid; line-height: 1.5; }
+  .btn-html  { color: #1a5fb4; border-color: #c2d8f4; background: #eef5fc; }
+  .btn-docx  { color: #1a7a45; border-color: #bfe3cf; background: #eef8f2; }
+  .btn-md    { color: #7a4a00; border-color: #f0d9a8; background: #fef9ee; }
+  .btn-li    { color: #0a66c2; border-color: #bcd6f1; background: #eef5fc; }
+  .btn-rev   { color: #6b3fa0; border-color: #d8c8ec; background: #f5f0fb; }
+  .btn-vid   { color: #b03a2e; border-color: #efc7c2; background: #fdf1ef; }
+  .btn-thumb { color: #1a7a6b; border-color: #bfe3dc; background: #eef8f6; }
+  .btn-deck  { color: #7a5a00; border-color: #ead7a0; background: #fdf8ec; }
+  .btn-dia   { color: var(--accent); border-color: #c7d2f5; background: var(--accent-soft); }
+  .btn-facts { color: #555; border-color: #d6dae1; background: #f7f7f7; }
+  .btn-mp4   { color: #b3005f; border-color: #efb8d4; background: #fdeef6; }
+  .btn-link:hover { filter: brightness(.96); }
+
+  .section { margin-top: 36px; }
+  .section h2 { font-size: 16px; font-weight: 600; letter-spacing: -.1px; margin-bottom: 2px; }
+  .section .hint { font-size: 12.5px; color: var(--muted); margin-bottom: 12px; }
+  table { width: 100%; border-collapse: separate; border-spacing: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); }
+  th, td { text-align: left; padding: 11px 14px; font-size: 13.5px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { background: #fafbfc; font-size: 11.5px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  td a { text-decoration: none; } td a:hover { text-decoration: underline; }
+  .brief-list { margin: 0; padding: 0; list-style: none; }
+  .brief-list li { font-size: 13px; margin-top: 3px; }
+  .brief-list li:first-child { margin-top: 0; }
+  .empty-state { color: var(--muted); font-size: 13.5px; padding: 28px 20px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+
+  @media (max-width: 640px) { header { padding: 0 16px; } header span { display: none; } main { padding: 16px 12px 48px; } .toolbar input { width: 100%; margin-left: 0; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Humanly</h1>
+  <span>Library</span>
+  <nav>
+    <a href="/">Write</a>
+    <a href="/library" class="active">Library</a>
+    <a href="/usage">Usage</a>
+    <a href="/logout">Sign out</a>
+  </nav>
+</header>
+
+<main>
+  <div class="toolbar">
+    <h2>Articles</h2>
+    <span class="count" id="count">{{ articles|length }} article{{ '' if articles|length == 1 else 's' }}</span>
+    <input type="search" id="search" placeholder="Search titles and descriptions…" autocomplete="off">
+  </div>
+
+  {% if articles %}
+  <div class="articles-grid" id="articlesGrid">
+    {% for a in articles %}
+    <div class="article-card" data-text="{{ (a.title ~ ' ' ~ (a.description or ''))|lower }}">
+      <div class="card-title">{{ a.title }}</div>
+      {% if a.description %}<div class="card-desc">{{ a.description }}</div>{% endif %}
+      <div class="card-meta">
+        {% if a.generated_at %}<span>{{ a.generated_at }}</span>{% endif %}
+        {% if a.word_count %}<span>{{ "{:,}".format(a.word_count) }} words</span>{% endif %}
+        {% if a.image_count %}<span>{{ a.image_count }} images</span>{% endif %}
+      </div>
+      <div class="card-actions">
+        {% if a.html_file %}<a class="btn-link btn-html" href="/output/{{ a.html_file }}" target="_blank">HTML</a>{% endif %}
+        {% if a.docx_file %}<a class="btn-link btn-docx" href="/output/{{ a.docx_file }}" download>DOCX</a>{% endif %}
+        <a class="btn-link btn-md" href="/output/{{ a.slug }}.md" target="_blank">Markdown</a>
+        {% if a.diagram_file %}<a class="btn-link btn-dia" href="/output/{{ a.diagram_file }}" target="_blank">Diagram</a>{% endif %}
+        {% if a.facts_file %}<a class="btn-link btn-facts" href="/output/{{ a.facts_file }}" target="_blank">Facts</a>{% endif %}
+        {% if a.linkedin_file %}<a class="btn-link btn-li" href="/output/{{ a.linkedin_file }}" target="_blank">LinkedIn</a>{% endif %}
+        {% if a.video_file %}
+        <a class="btn-link btn-vid" href="/output/{{ a.video_file }}" target="_blank">Video script</a>
+        <a class="btn-link btn-deck" href="/deck/{{ a.slug }}" target="_blank">Visual track</a>
+        {% endif %}
+        {% if a.voice_file %}<a class="btn-link btn-vid" href="/output/{{ a.voice_file }}" target="_blank">Voiceover (mp3)</a>{% endif %}
+        {% if a.mp4_wide %}<a class="btn-link btn-mp4" href="/output/{{ a.mp4_wide }}" target="_blank">Video 16:9</a>{% endif %}
+        {% if a.mp4_tall %}<a class="btn-link btn-mp4" href="/output/{{ a.mp4_tall }}" target="_blank">Video 9:16</a>{% endif %}
+        {% if a.video_meta %}<a class="btn-link btn-mp4" href="/output/{{ a.video_meta }}" target="_blank">Post text</a>{% endif %}
+        {% if a.thumb_file %}<a class="btn-link btn-thumb" href="/output/{{ a.thumb_file }}" target="_blank">Share card</a>{% endif %}
+        {% if a.has_review %}<a class="btn-link btn-rev" href="/review/{{ a.slug }}">Review</a>{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="empty-state">No articles yet. <a href="/">Write the first one</a>.</p>
+  {% endif %}
+
+  <div class="section">
+    <h2>Radar runs</h2>
+    <p class="hint">Every "what should I write" pass, newest first, with the briefs dug on its themes.</p>
+    {% if radars %}
+    <table>
+      <thead><tr><th style="width:120px">Date</th><th style="width:90px">Themes</th><th>Top theme</th><th style="width:140px">Files</th><th>Briefs</th></tr></thead>
+      <tbody>
+      {% for r in radars %}
+      <tr>
+        <td>{{ r.date }}</td>
+        <td>{{ r.theme_count }}</td>
+        <td>{{ r.top_theme }}</td>
+        <td><a href="/output/{{ r.md }}" target="_blank">Markdown</a> · <a href="/output/{{ r.json }}" target="_blank">JSON</a></td>
+        <td>
+          {% if r.briefs %}
+          <ul class="brief-list">
+            {% for b in r.briefs %}<li><a href="/output/{{ b.file }}" target="_blank">{{ b.index }}. {{ b.title }}</a></li>{% endfor %}
+          </ul>
+          {% else %}<span style="color:#aaa">—</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="empty-state">No radar run yet. Press <a href="/">Run the radar</a> on the Write page.</p>
+    {% endif %}
+  </div>
+</main>
+
+<script>
+  const search = document.getElementById('search');
+  const cards = Array.from(document.querySelectorAll('.article-card'));
+  const count = document.getElementById('count');
+  search.addEventListener('input', () => {
+    const q = search.value.trim().toLowerCase();
+    let shown = 0;
+    cards.forEach(c => {
+      const hit = !q || c.dataset.text.includes(q);
+      c.classList.toggle('hidden', !hit);
+      if (hit) shown++;
+    });
+    count.textContent = q ? `${shown} of ${cards.length} match` : `${cards.length} article${cards.length === 1 ? '' : 's'}`;
+  });
+</script>
+</body>
+</html>
