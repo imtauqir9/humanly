@@ -6,50 +6,59 @@
 <style>
 {% include "_theme.css" %}
 
-  main { max-width: 1360px; margin: 0 auto; padding: 28px 28px 64px; }
-  .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; flex-wrap: wrap; }
-  .filters { display: inline-flex; background: var(--sunken); border-radius: 10px; padding: 3px; gap: 2px; flex-wrap: wrap; }
-  .filters button { font-family: inherit; font-size: 12.5px; font-weight: 600; color: var(--muted); background: transparent; border: none;
-                    padding: 6px 12px; border-radius: 8px; cursor: pointer; transition: background .12s, color .12s; }
+  main { max-width: 1180px; margin: 0 auto; padding: 44px 28px 72px; }
+  .toolbar { display: flex; align-items: center; gap: 16px; margin: -8px 0 8px; flex-wrap: wrap; }
+  .filters { display: inline-flex; gap: 18px; flex-wrap: wrap; }
+  .filters button { font-family: var(--sans); font-size: 13px; font-weight: 500; color: var(--muted); background: none; border: none; padding: 4px 0;
+                    cursor: pointer; border-bottom: 2px solid transparent; transition: color .15s, border-color .15s; }
   .filters button:hover { color: var(--ink); }
-  .filters button.active { background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
-  .filters button .n { font-weight: 500; color: var(--faint); margin-left: 3px; font-variant-numeric: tabular-nums; }
-  .search { position: relative; margin-left: auto; width: 340px; max-width: 100%; }
+  .filters button.active { color: var(--ink); font-weight: 600; border-bottom-color: var(--accent); }
+  .filters button .n { font-family: var(--mono); font-size: 11px; font-weight: 400; color: var(--faint); margin-left: 4px; }
+  .search { position: relative; margin: 0 0 0 auto; width: 320px; max-width: 100%; font-weight: 400; }
   .search svg { position: absolute; left: 11px; top: 50%; width: 15px; height: 15px; transform: translateY(-50%); color: var(--faint); pointer-events: none; }
-  .search input { padding-left: 34px; padding-right: 36px; }
-  .search kbd { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); font-family: var(--sans); font-size: 11px; color: var(--faint);
-                border: 1px solid var(--line-2); border-radius: 5px; padding: 0 6px; background: var(--surface-2); }
+  .search input { padding-left: 34px; padding-right: 36px; background: var(--surface); }
+  .search kbd { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); font-family: var(--mono); font-size: 11px; color: var(--muted);
+                border: 1px solid var(--line-2); border-bottom-width: 2px; border-radius: var(--radius-xs); padding: 0 6px; }
 
-  .articles-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
-  .article-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow);
-                  padding: 18px 18px 16px; display: flex; flex-direction: column; gap: 8px; transition: box-shadow .15s, transform .15s, border-color .15s; }
-  .article-card:hover { box-shadow: var(--shadow-2); transform: translateY(-2px); border-color: var(--line-2); }
+  /* An editorial index: number and date in the margin, the title gets room. */
+  .article-card { display: grid; grid-template-columns: 52px 104px minmax(0,1fr) 150px; gap: 24px; padding: 24px 6px; border-bottom: 1px solid var(--line);
+                  align-items: baseline; transition: background .2s; }
+  .article-card:hover { background: linear-gradient(90deg, transparent, var(--surface) 8%, var(--surface) 92%, transparent); }
   .article-card.hidden { display: none; }
-  .card-title { font-size: 15px; font-weight: 600; line-height: 1.4; letter-spacing: -.15px; color: var(--ink); text-decoration: none; }
+  .entry-no { font-family: var(--serif); font-size: 28px; line-height: 1; font-weight: 300; color: var(--faint); font-variation-settings: "opsz" 144; }
+  .article-card:hover .entry-no { color: var(--accent); }
+  .entry-date { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .card-title { display: block; font-family: var(--serif); font-size: 23px; font-weight: 400; line-height: 1.22; letter-spacing: -.015em; color: var(--ink);
+                font-variation-settings: "opsz" 48; background: none; }
   a.card-title:hover { color: var(--accent); }
-  .card-desc { font-size: 13px; color: var(--ink-2); line-height: 1.55; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .card-meta { display: flex; gap: 8px; font-size: 12.5px; color: var(--muted); flex-wrap: wrap; }
-  .card-meta span + span::before { content: "·"; margin-right: 8px; color: var(--faint); }
-  .card-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: auto; padding-top: 10px; border-top: 1px solid var(--line); }
+  .card-desc { font-size: 14px; color: var(--ink-2); line-height: 1.6; margin-top: 7px; max-width: 680px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .card-actions { display: flex; gap: 6px 16px; flex-wrap: wrap; margin-top: 13px; }
+  .entry-stats { font-family: var(--mono); font-size: 12px; color: var(--muted); text-align: right; line-height: 1.8; }
+  .entry-stats .ok { color: var(--ok); }
   .no-match { display: none; }
   .no-match.visible { display: block; }
-  .empty-box { background: var(--surface); border: 1px dashed var(--line-2); border-radius: var(--radius); }
 
-  .section { margin-top: 44px; }
-  .section-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
-  .section-head h2 { font-size: 17px; font-weight: 700; letter-spacing: -.2px; }
-  .section-head .hint { font-size: 12.5px; color: var(--muted); }
-  td a { text-decoration: none; } td a:hover { text-decoration: underline; }
-  td.date { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--ink-2); }
+  .section { margin-top: 72px; }
+  .section-head { display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap; padding-bottom: 12px; margin-bottom: 18px; border-bottom: 2px solid var(--ink); }
+  .section-head h2 { font-family: var(--serif); font-size: 30px; font-weight: 400; letter-spacing: -.02em; line-height: 1; font-variation-settings: "opsz" 96; }
+  .section-head .hint { font-family: var(--serif); font-style: italic; font-size: 14.5px; color: var(--muted); }
+  td.date { white-space: nowrap; font-family: var(--mono); font-size: 12.5px; color: var(--ink-2); }
+  td.top { font-family: var(--serif); font-size: 16px; font-variation-settings: "opsz" 24; }
   .brief-list { margin: 0; padding: 0; list-style: none; }
-  .brief-list li { font-size: 13px; margin-top: 3px; }
+  .brief-list li { font-size: 13.5px; margin-top: 3px; }
   .brief-list li:first-child { margin-top: 0; }
 
+  @media (max-width: 800px) {
+    .article-card { grid-template-columns: 36px minmax(0,1fr); gap: 4px 14px; }
+    .entry-no { grid-row: 1 / 4; font-size: 22px; }
+    .entry-date, .article-card > div, .entry-stats { grid-column: 2; }
+    .entry-stats { text-align: left; display: flex; gap: 12px; }
+    .entry-stats br { display: none; }
+  }
   @media (max-width: 640px) {
-    main { padding: 18px 12px 48px; }
+    main { padding: 24px 14px 48px; }
     .search { width: 100%; margin-left: 0; }
     .search kbd { display: none; }
-    .articles-grid { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -60,7 +69,7 @@
 
 <main>
   <div class="page-title">
-    <h1>Articles</h1>
+    <h1>Library</h1>
     <span class="sub" id="count">{{ articles|length }} article{{ '' if articles|length == 1 else 's' }}</span>
   </div>
 
@@ -82,17 +91,15 @@
     </label>
   </div>
 
-  <div class="articles-grid" id="articlesGrid">
+  <div class="index" id="articlesGrid">
     {% for a in articles %}
     <div class="article-card" data-text="{{ (a.title ~ ' ' ~ (a.description or ''))|lower }}"
          data-tags="{{ ['video' if a.video_file, 'linkedin' if a.linkedin_file, 'review' if a.has_review]|select|join(' ') }}">
+      <span class="entry-no">{{ '%02d' % (articles|length - loop.index0) }}</span>
+      <span class="entry-date">{{ a.generated_at or '' }}</span>
+      <div>
       {% if a.html_file %}<a class="card-title" href="/output/{{ a.html_file }}" target="_blank">{{ a.title }}</a>{% else %}<div class="card-title">{{ a.title }}</div>{% endif %}
       {% if a.description %}<div class="card-desc">{{ a.description }}</div>{% endif %}
-      <div class="card-meta">
-        {% if a.generated_at %}<span>{{ a.generated_at }}</span>{% endif %}
-        {% if a.word_count %}<span>{{ "{:,}".format(a.word_count) }} words</span>{% endif %}
-        {% if a.image_count %}<span>{{ a.image_count }} images</span>{% endif %}
-      </div>
       <div class="card-actions">
         {% if a.html_file %}<a class="btn-link btn-html" href="/output/{{ a.html_file }}" target="_blank">HTML</a>{% endif %}
         {% if a.docx_file %}<a class="btn-link btn-docx" href="/output/{{ a.docx_file }}" download>DOCX</a>{% endif %}
@@ -111,12 +118,18 @@
         {% if a.thumb_file %}<a class="btn-link btn-thumb" href="/output/{{ a.thumb_file }}" target="_blank">Share card</a>{% endif %}
         {% if a.has_review %}<a class="btn-link btn-rev" href="/review/{{ a.slug }}">Review</a>{% endif %}
       </div>
+      </div>
+      <div class="entry-stats">
+        {% if a.word_count %}{{ "{:,}".format(a.word_count) }} words<br>{% endif %}
+        {% if a.image_count %}{{ a.image_count }} images<br>{% endif %}
+        {% if a.has_review %}<span class="ok">audited ✓</span>{% endif %}
+      </div>
     </div>
     {% endfor %}
   </div>
-  <p class="empty-state empty-box no-match" id="noMatch">Nothing matches. <a href="#" id="clearFilters">Clear the search</a>.</p>
+  <p class="empty-state no-match" id="noMatch">Nothing matches. <a href="#" id="clearFilters">Clear the search</a>.</p>
   {% else %}
-  <p class="empty-state empty-box"><span class="empty-icon">✎</span>No articles yet. <a href="/">Write the first one</a>.</p>
+  <p class="empty-state"><span class="empty-icon">✎</span>No articles yet. <a href="/">Write the first one</a>.</p>
   {% endif %}
 
   <div class="section">
@@ -133,7 +146,7 @@
       <tr>
         <td class="date">{{ r.date }}</td>
         <td class="num">{{ r.theme_count }}</td>
-        <td>{{ r.top_theme }}</td>
+        <td class="top">{{ r.top_theme }}</td>
         <td><a href="/output/{{ r.md }}" target="_blank">Markdown</a> · <a href="/output/{{ r.json }}" target="_blank">JSON</a></td>
         <td>
           {% if r.briefs %}
@@ -148,7 +161,7 @@
     </table>
     </div>
     {% else %}
-    <p class="empty-state empty-box">No radar run yet. Press <a href="/">Run the radar</a> on the Write page.</p>
+    <p class="empty-state">No radar run yet. Press <a href="/">Run the radar</a> on the Write page.</p>
     {% endif %}
   </div>
 </main>

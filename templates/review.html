@@ -6,58 +6,68 @@
 <style>
 {% include "_theme.css" %}
 
-  main, .review-top { max-width: 900px; margin: 0 auto; padding: 4px 28px 64px; }
-  .review-top { padding: 24px 28px 0; }
-  .subbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; }
-  .subbar .back { font-size: 13px; font-weight: 600; color: var(--muted); text-decoration: none; margin-right: auto; }
-  .subbar .back:hover { color: var(--accent); }
+  main, .review-top { max-width: 920px; margin: 0 auto; padding: 4px 28px 72px; }
+  .review-top { padding: 44px 28px 0; }
+  .page-title { margin-bottom: 12px; }
+  .subbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 26px; }
+  .subbar .back { font-size: 13.5px; font-weight: 500; margin-right: auto; }
 
-  .roster { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 16px; }
-  .role { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px 16px; }
-  .role .who { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  .roster { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); margin-bottom: 22px; }
+  .role { padding: 16px 18px; border-left: 1px solid var(--line); }
+  .role:first-child { border-left: none; padding-left: 4px; }
+  .role .who { font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+  .role:nth-child(1) .who { color: var(--link); } .role:nth-child(2) .who { color: var(--accent); } .role:nth-child(3) .who { color: var(--ink); }
   .role .model { font-family: var(--mono); font-size: 13px; color: var(--ink); margin-top: 6px; word-break: break-all; }
-  .role .vendor { font-size: 12px; color: var(--faint); margin-top: 2px; }
+  .role .vendor { font-family: var(--serif); font-style: italic; font-size: 13px; color: var(--muted); margin-top: 1px; }
 
-  .outcome { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px 18px; font-size: 14px; margin-bottom: 8px; }
-  .outcome strong { color: var(--ink); }
-  .counts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; font-size: 12.5px; color: var(--muted); }
-  .counts span { background: var(--sunken); border-radius: 999px; padding: 3px 10px; }
-  .counts b { color: var(--ink); font-variant-numeric: tabular-nums; }
+  .outcome { font-family: var(--serif); font-size: 21px; font-weight: 350; color: var(--ink-2); margin-bottom: 8px; font-variation-settings: "opsz" 36; }
+  .outcome strong { color: var(--ink); font-weight: 450; }
+  .counts { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 10px; font-family: var(--sans); font-size: 12.5px; color: var(--muted); }
+  .counts b { font-family: var(--mono); font-weight: 500; color: var(--ink); }
 
-  h2 { font-size: 16px; font-weight: 700; letter-spacing: -.2px; color: var(--ink); margin: 32px 0 12px; padding-top: 20px; border-top: 1px solid var(--line); }
+  h2 { font-family: var(--serif); font-size: 26px; font-weight: 400; letter-spacing: -.015em; color: var(--ink); margin: 48px 0 16px; padding-bottom: 10px;
+       border-bottom: 2px solid var(--ink); font-variation-settings: "opsz" 72; }
 
-  .scores { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
-  .score { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px 14px; font-size: 12px; color: var(--muted); text-transform: capitalize; }
-  .score b { display: block; font-size: 18px; color: var(--ink); margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .scores { display: flex; flex-wrap: wrap; margin-bottom: 22px; border-bottom: 1px solid var(--line); }
+  .score { padding: 4px 22px 14px 0; margin-right: 22px; border-right: 1px solid var(--line); font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+  .score:last-child { border-right: none; }
+  .score b { display: block; font-family: var(--serif); font-size: 30px; font-weight: 350; letter-spacing: 0; color: var(--ink); margin-top: 2px; font-variation-settings: "opsz" 144; }
 
-  .finding { background: var(--surface); border: 1px solid var(--line); border-left-width: 4px; border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px 18px; margin-bottom: 12px; }
-  .finding.high { border-left-color: var(--bad); }
-  .finding.medium { border-left-color: var(--warn); }
-  .finding.low { border-left-color: var(--line-2); }
+  /* A finding is a marked-up passage with the three voices in the margin. */
+  .finding { display: grid; grid-template-columns: minmax(0,1fr) 250px; gap: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+             box-shadow: var(--shadow); margin-bottom: 14px; overflow: hidden; }
+  .finding { grid-template-columns: minmax(0,1fr) 300px; }
+  .passage { grid-column: 1; padding-bottom: 18px; }
+  .fhead { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 16px 20px 0; }
+  .tag { font-family: var(--mono); font-size: 10.5px; font-weight: 500; text-transform: uppercase; letter-spacing: .12em; }
+  .tag.sev-high { color: var(--bad); } .tag.sev-medium { color: var(--warn); } .tag.sev-low { color: var(--muted); }
+  .tag.cat { color: var(--muted); }
+  .tag.applied, .tag.dropped { margin-left: auto; border: 1.5px solid currentColor; border-radius: var(--radius-xs); padding: 1px 7px; }
+  .tag.applied { color: var(--accent); transform: rotate(-2deg); }
+  .tag.dropped { color: var(--faint); }
+  blockquote { margin: 12px 20px 0; font-family: var(--serif); font-size: 17px; line-height: 1.6; color: var(--ink); font-variation-settings: "opsz" 18; }
+  /* Applied: struck through in red pen, the fix written in underneath. */
+  blockquote.struck { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--accent); text-decoration-thickness: 1.5px; }
+  blockquote.kept { background: linear-gradient(transparent 60%, color-mix(in srgb, var(--accent) 16%, transparent) 60%); display: inline; box-decoration-break: clone; -webkit-box-decoration-break: clone; margin: 12px 0 0 20px; }
+  .fix { margin: 10px 20px 0; font-family: var(--serif); font-style: italic; font-size: 15.5px; line-height: 1.6; color: var(--accent); font-variation-settings: "opsz" 18; }
+  .fix::before { content: "\2038  "; font-style: normal; }
+  .finding > .fhead { grid-column: 1; }
+    .margin { grid-column: 2; grid-row: 1 / span 2; background: var(--surface-2); border-left: 1px solid var(--line); padding: 16px 16px; display: flex; flex-direction: column; gap: 12px; }
+  .voice { font-size: 13px; line-height: 1.55; color: var(--ink-2); border-left: 2px solid var(--line-2); padding-left: 10px; }
+  .voice .who { display: block; font-size: 10.5px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; margin-bottom: 2px; }
+  .voice.auditor { border-color: var(--accent); } .voice.auditor .who { color: var(--accent); }
+  .voice.writer { border-color: var(--link); } .voice.writer .who { color: var(--link); }
+  .voice.judge { border-color: var(--ink); } .voice.judge .who { color: var(--ink); }
+  .voice .wants { display: block; color: var(--muted); margin-top: 3px; font-family: var(--serif); font-style: italic; }
 
-  .fhead { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
-  .tag { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; padding: 3px 8px; border-radius: 999px; }
-  .tag.sev-high { background: var(--bad-soft); color: var(--bad); }
-  .tag.sev-medium { background: var(--warn-soft); color: var(--warn); }
-  .tag.sev-low { background: var(--sunken); color: var(--muted); }
-  .tag.cat { background: var(--accent-soft); color: var(--accent); }
-  .tag.applied { background: var(--ok-soft); color: var(--ok); margin-left: auto; }
-  .tag.dropped { background: var(--sunken); color: var(--muted); margin-left: auto; }
+  .empty { font-family: var(--serif); font-style: italic; font-size: 16px; padding: 48px 24px; text-align: center; color: var(--muted); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .pass { font-family: var(--serif); font-style: italic; font-size: 16px; color: var(--ok); padding: 6px 0 10px; }
 
-  blockquote { border-left: 3px solid var(--line-2); background: var(--surface-2); border-radius: 0 8px 8px 0; padding: 8px 12px; margin: 0 0 12px; color: var(--ink-2); font-size: 13.5px; font-style: italic; }
-
-  .voice { font-size: 13.5px; line-height: 1.6; margin-bottom: 8px; color: var(--ink-2); }
-  .voice:last-child { margin-bottom: 0; }
-  .voice .who { font-weight: 700; color: var(--ink); }
-  .voice.auditor .who { color: var(--bad); }
-  .voice.writer .who { color: var(--accent); }
-  .voice.judge .who { color: #8a5cd0; }
-  .voice .wants { display: block; color: var(--muted); margin-top: 2px; }
-
-  .empty { background: var(--surface); border: 1px dashed var(--line-2); border-radius: var(--radius); padding: 48px 24px; text-align: center; color: var(--muted); }
-  .pass { background: var(--ok-soft); border: 1px solid color-mix(in srgb, var(--ok) 30%, transparent); color: var(--ok); border-radius: var(--radius); padding: 14px 18px; font-size: 13.5px; font-weight: 500; }
-
-  @media (max-width: 640px) { main { padding: 4px 12px 48px; } .review-top { padding: 18px 12px 0; } }
+  @media (max-width: 760px) {
+    main { padding: 4px 14px 48px; } .review-top { padding: 24px 14px 0; }
+    .finding { grid-template-columns: 1fr; } .margin { grid-column: 1; grid-row: auto; border-left: none; border-top: 1px solid var(--line); }
+    .role { border-left: none; padding-left: 4px; }
+  }
 </style>
 </head>
 <body>
@@ -142,15 +152,18 @@
           {% endif %}
         </div>
 
-        {% if issue.quote %}<blockquote>{{ issue.quote }}</blockquote>{% endif %}
+        <div class="passage">
+        {% if issue.quote %}<blockquote class="{{ 'struck' if issue.id in applied else 'kept' }}">{{ issue.quote }}</blockquote>{% endif %}
+        {% if issue.fix %}<p class="fix">{{ issue.fix }}</p>{% endif %}
+        </div>
 
+        <div class="margin">
         <div class="voice auditor">
-          <span class="who">Auditor:</span> {{ issue.problem }}
-          {% if issue.fix %}<span class="wants">Wants: {{ issue.fix }}</span>{% endif %}
+          <span class="who">Auditor</span> {{ issue.problem }}
         </div>
 
         <div class="voice writer">
-          <span class="who">Writer:</span>
+          <span class="who">Writer</span>
           {% if issue.id not in stances %}
             did not respond — counted as accepted.
           {% else %}
@@ -161,13 +174,14 @@
 
         {% if issue.id in rulings %}
           <div class="voice judge">
-            <span class="who">Judge:</span> {{ rulings[issue.id] }}. {{ why.get(issue.id, '') }}
+            <span class="who">Judge</span> {{ rulings[issue.id] }}. {{ why.get(issue.id, '') }}
           </div>
         {% elif stances.get(issue.id) == 'dispute' %}
           <div class="voice judge">
-            <span class="who">Judge:</span> no ruling returned — the text stands.
+            <span class="who">Judge</span> no ruling returned — the text stands.
           </div>
         {% endif %}
+        </div>
       </div>
     {% endfor %}
   {% endfor %}

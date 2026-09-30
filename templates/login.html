@@ -6,33 +6,25 @@
 <style>
 {% include "_theme.css" %}
 
-  body { display: flex; align-items: center; justify-content: center; padding: 24px;
-         background: radial-gradient(1200px 600px at 50% -10%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 70%), var(--bg); }
-  .box { width: 100%; max-width: 380px; padding: 34px 30px 28px; box-shadow: var(--shadow-2); }
-  .brand-row { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
-  .brand-mark { width: 40px; height: 40px; border-radius: 11px; display: grid; place-items: center; font-weight: 800; font-size: 19px; color: #fff;
-                background: linear-gradient(135deg, #6d8bff, #3b5bdb 55%, #7c4dff); box-shadow: 0 4px 16px rgba(91,120,255,.35); }
-  h1 { font-size: 20px; font-weight: 700; letter-spacing: -.3px; }
-  .sub { font-size: 13px; color: var(--muted); margin-top: 1px; }
+  body { display: flex; align-items: center; justify-content: center; padding: 24px; }
+  .box { width: 100%; max-width: 400px; padding: 40px 36px 30px; box-shadow: var(--shadow-2); }
+  .wordmark { font-family: var(--serif); font-size: 44px; font-weight: 400; letter-spacing: -.03em; line-height: 1; font-variation-settings: "opsz" 144; }
+  .wordmark i { color: var(--accent); font-weight: 350; }
+  .sub { font-family: var(--serif); font-style: italic; font-size: 15px; color: var(--muted); margin: 8px 0 28px; padding-bottom: 20px; border-bottom: 1px solid var(--line); }
   .error { display: flex; gap: 8px; background: var(--bad-soft); border: 1px solid color-mix(in srgb, var(--bad) 30%, transparent); color: var(--bad);
-           font-size: 13px; font-weight: 500; padding: 10px 12px; border-radius: var(--radius-sm); margin-bottom: 16px; }
+           font-size: 13.5px; font-weight: 500; padding: 10px 12px; border-radius: var(--radius-sm); margin-bottom: 16px; }
   .btn.block { margin-top: 16px; }
-  .foot { font-size: 12px; color: var(--faint); margin-top: 22px; text-align: center; line-height: 1.55; }
+  .foot { font-family: var(--serif); font-style: italic; font-size: 13.5px; color: var(--muted); margin-top: 24px; text-align: center; line-height: 1.55; }
 </style>
 </head>
 <body>
 
 <form class="box card" method="post" action="/login">
-  <div class="brand-row">
-    <span class="brand-mark">H</span>
-    <div>
-      <h1>Humanly</h1>
-      <div class="sub">Imran Tauqir's AI writing pipeline</div>
-    </div>
-  </div>
+  <div class="wordmark">Human<i>ly</i></div>
+  <div class="sub">Imran Tauqir's writing studio</div>
 
   {% if error %}
-    <div class="error" role="alert">{{ error }}</div>
+    <div class="error" role="alert"><span>✕</span>{{ error }}</div>
   {% endif %}
 
   <input type="hidden" name="next" value="{{ next }}">
