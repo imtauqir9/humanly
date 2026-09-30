@@ -1,77 +1,80 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+{% include "_head.html" %}
 <title>Verification review — Humanly</title>
 <style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: Arial, sans-serif; background: #f5f5f5; color: #222; min-height: 100vh; }
+{% include "_theme.css" %}
 
-  header { background: #111; color: #fff; padding: 18px 32px; display: flex; align-items: center; gap: 12px; }
-  header h1 { font-size: 1.2rem; font-weight: 700; letter-spacing: -0.3px; }
-  header span { font-size: 0.85rem; color: #aaa; }
-  header a { color: #aaa; font-size: 0.85rem; text-decoration: none; }
-  header a:hover { color: #fff; }
-  header .spacer { margin-left: auto; }
+  main, .review-top { max-width: 900px; margin: 0 auto; padding: 4px 28px 64px; }
+  .review-top { padding: 24px 28px 0; }
+  .subbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; }
+  .subbar .back { font-size: 13px; font-weight: 600; color: var(--muted); text-decoration: none; margin-right: auto; }
+  .subbar .back:hover { color: var(--accent); }
 
-  main { max-width: 880px; margin: 0 auto; padding: 28px 24px 60px; }
+  .roster { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .role { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px 16px; }
+  .role .who { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  .role .model { font-family: var(--mono); font-size: 13px; color: var(--ink); margin-top: 6px; word-break: break-all; }
+  .role .vendor { font-size: 12px; color: var(--faint); margin-top: 2px; }
 
-  .roster { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 22px; }
-  .role { background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 14px 16px; }
-  .role .who { font-size: 0.7rem; font-weight: 700; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
-  .role .model { font-family: Consolas, monospace; font-size: 0.85rem; color: #111; margin-top: 5px; word-break: break-all; }
-  .role .vendor { font-size: 0.72rem; color: #999; margin-top: 2px; }
+  .outcome { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px 18px; font-size: 14px; margin-bottom: 8px; }
+  .outcome strong { color: var(--ink); }
+  .counts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; font-size: 12.5px; color: var(--muted); }
+  .counts span { background: var(--sunken); border-radius: 999px; padding: 3px 10px; }
+  .counts b { color: var(--ink); font-variant-numeric: tabular-nums; }
 
-  .outcome { background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 14px 18px; font-size: 0.88rem; margin-bottom: 26px; }
-  .outcome strong { color: #111; }
-  .counts { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 10px; font-size: 0.8rem; color: #666; }
-  .counts b { color: #111; font-variant-numeric: tabular-nums; }
-
-  h2 { font-size: 0.95rem; font-weight: 700; color: #111; margin: 26px 0 12px; }
+  h2 { font-size: 16px; font-weight: 700; letter-spacing: -.2px; color: var(--ink); margin: 32px 0 12px; padding-top: 20px; border-top: 1px solid var(--line); }
 
   .scores { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
-  .score { background: #fff; border: 1px solid #e0e0e0; border-radius: 5px; padding: 8px 12px; font-size: 0.78rem; color: #666; }
-  .score b { display: block; font-size: 1.1rem; color: #111; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .score { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px 14px; font-size: 12px; color: var(--muted); text-transform: capitalize; }
+  .score b { display: block; font-size: 18px; color: var(--ink); margin-top: 2px; font-variant-numeric: tabular-nums; }
 
-  .finding { background: #fff; border: 1px solid #e0e0e0; border-left-width: 4px; border-radius: 6px; padding: 16px 18px; margin-bottom: 12px; }
-  .finding.high { border-left-color: #c0392b; }
-  .finding.medium { border-left-color: #d68910; }
-  .finding.low { border-left-color: #bbb; }
+  .finding { background: var(--surface); border: 1px solid var(--line); border-left-width: 4px; border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px 18px; margin-bottom: 12px; }
+  .finding.high { border-left-color: var(--bad); }
+  .finding.medium { border-left-color: var(--warn); }
+  .finding.low { border-left-color: var(--line-2); }
 
-  .fhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
-  .tag { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; padding: 3px 7px; border-radius: 3px; }
-  .tag.sev-high { background: #fdecea; color: #8a2018; }
-  .tag.sev-medium { background: #fdf3e2; color: #8a5a00; }
-  .tag.sev-low { background: #f0f0f0; color: #666; }
-  .tag.cat { background: #eef2f8; color: #3a5a80; }
-  .tag.applied { background: #e6f9f0; color: #1a7a45; margin-left: auto; }
-  .tag.dropped { background: #f0f0f0; color: #888; margin-left: auto; }
+  .fhead { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+  .tag { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; padding: 3px 8px; border-radius: 999px; }
+  .tag.sev-high { background: var(--bad-soft); color: var(--bad); }
+  .tag.sev-medium { background: var(--warn-soft); color: var(--warn); }
+  .tag.sev-low { background: var(--sunken); color: var(--muted); }
+  .tag.cat { background: var(--accent-soft); color: var(--accent); }
+  .tag.applied { background: var(--ok-soft); color: var(--ok); margin-left: auto; }
+  .tag.dropped { background: var(--sunken); color: var(--muted); margin-left: auto; }
 
-  blockquote { border-left: 3px solid #ddd; padding: 4px 0 4px 12px; margin: 0 0 12px; color: #555; font-size: 0.86rem; font-style: italic; }
+  blockquote { border-left: 3px solid var(--line-2); background: var(--surface-2); border-radius: 0 8px 8px 0; padding: 8px 12px; margin: 0 0 12px; color: var(--ink-2); font-size: 13.5px; font-style: italic; }
 
-  .voice { font-size: 0.86rem; line-height: 1.55; margin-bottom: 7px; }
-  .voice .who { font-weight: 700; color: #111; }
-  .voice.auditor .who { color: #8a2018; }
-  .voice.writer .who { color: #1a6fc4; }
-  .voice.judge .who { color: #6b3fa0; }
-  .voice .wants { color: #666; }
+  .voice { font-size: 13.5px; line-height: 1.6; margin-bottom: 8px; color: var(--ink-2); }
+  .voice:last-child { margin-bottom: 0; }
+  .voice .who { font-weight: 700; color: var(--ink); }
+  .voice.auditor .who { color: var(--bad); }
+  .voice.writer .who { color: var(--accent); }
+  .voice.judge .who { color: #8a5cd0; }
+  .voice .wants { display: block; color: var(--muted); margin-top: 2px; }
 
-  .empty { background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 40px; text-align: center; color: #888; }
-  .pass { background: #e6f9f0; border: 1px solid #b2dfce; color: #1a7a45; border-radius: 6px; padding: 14px 18px; font-size: 0.88rem; }
+  .empty { background: var(--surface); border: 1px dashed var(--line-2); border-radius: var(--radius); padding: 48px 24px; text-align: center; color: var(--muted); }
+  .pass { background: var(--ok-soft); border: 1px solid color-mix(in srgb, var(--ok) 30%, transparent); color: var(--ok); border-radius: var(--radius); padding: 14px 18px; font-size: 13.5px; font-weight: 500; }
+
+  @media (max-width: 640px) { main { padding: 4px 12px 48px; } .review-top { padding: 18px 12px 0; } }
 </style>
 </head>
 <body>
 
-<header>
-  <h1>Verification review</h1>
-  <span>{{ slug }}</span>
-  <span class="spacer"></span>
-  <a href="/">&larr; Back</a>
-  <a href="/output/{{ slug }}_review.md" target="_blank" style="margin-left:18px;">Markdown</a>
-  <a href="/output/{{ slug }}_review.json" target="_blank" style="margin-left:18px;">JSON</a>
-  <a href="/logout" style="margin-left:18px;">Sign out</a>
-</header>
+{% set active = '' %}{% set crumb = 'Review · ' ~ slug %}
+{% include "_header.html" %}
+
+<div class="review-top">
+  <div class="page-title" style="margin-bottom:10px">
+    <h1>Verification review</h1>
+  </div>
+  <div class="subbar">
+    <a class="back" href="/library">&larr; Back to the library</a>
+    <a class="btn btn-quiet sm" href="/output/{{ slug }}_review.md" target="_blank">Markdown</a>
+    <a class="btn btn-quiet sm" href="/output/{{ slug }}_review.json" target="_blank">JSON</a>
+  </div>
+</div>
 
 <main>
 
