@@ -923,9 +923,16 @@ def read_take(value: str | None) -> str:
     """--take accepts inline text, or a path to a text file."""
     if not value:
         return ""
-    p = Path(value)
-    if p.exists() and p.is_file():
-        return p.read_text(encoding="utf-8", errors="ignore")
+    # A multi-line or very long take (a dig angle, say) is text, not a path;
+    # asking the OS about it raises ENAMETOOLONG rather than returning False.
+    if "\n" in value or len(value) > 255:
+        return value
+    try:
+        p = Path(value)
+        if p.is_file():
+            return p.read_text(encoding="utf-8", errors="ignore")
+    except (OSError, ValueError):
+        pass
     return value
 
 
