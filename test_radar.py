@@ -129,7 +129,8 @@ def test_write_radar_writes_dated_files_and_latest(tmp_path: Path):
 def test_run_radar_end_to_end_with_everything_faked(tmp_path: Path, monkeypatch, capsys):
     monkeypatch.setattr(sw, "_hn_top", lambda days, limit=40: [SIGNALS[0]])
     monkeypatch.setattr(sw, "_reddit_top", lambda days, limit=40: [])
-    monkeypatch.setattr(sw, "_radar_web_scan", lambda days: SIGNALS[1:])
+    monkeypatch.setattr(sw, "_radar_web_scan", lambda days, have_channels=False: SIGNALS[1:])
+    monkeypatch.setattr(sw, "_youtube_top", lambda days: [])
     seen = {}
 
     def fake_claude(prompt, **kw):

@@ -242,7 +242,8 @@ conversation:
 
 | Source | How it is read |
 |---|---|
-| YouTube — the most-watched AI videos and the big channels | Claude's web search + fetch, with the view counts the pages show |
+| YouTube — the tracked AI channels' recent uploads | Read directly: the YouTube Data API with `YOUTUBE_API_KEY` (exact views and comments, plus a most-viewed search), or the channels' Videos pages without one |
+| YouTube — big AI videos from other channels | Claude's web search + fetch, with the view counts the pages show |
 | Podcasts — Latent Space, Lex, No Priors, a16z, Practical AI, Dwarkesh, … | same |
 | Newsletters and posts — Simon Willison, Karpathy, Mollick, swyx, Hamel Husain, The Batch, … | same |
 | Hacker News | the Algolia API, free, no key |

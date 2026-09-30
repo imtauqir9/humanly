@@ -71,7 +71,8 @@ def test_run_radar_loads_decisions(tmp_path: Path, monkeypatch, capsys):
     sw.record_decision(tmp_path, "Old theme", "skipped")
     monkeypatch.setattr(sw, "_hn_top", lambda days, limit=40: SIGNALS)
     monkeypatch.setattr(sw, "_reddit_top", lambda days, limit=40: [])
-    monkeypatch.setattr(sw, "_radar_web_scan", lambda days: [])
+    monkeypatch.setattr(sw, "_radar_web_scan", lambda days, have_channels=False: [])
+    monkeypatch.setattr(sw, "_youtube_top", lambda days: [])
     seen = {}
     monkeypatch.setattr(sw, "call_claude", lambda prompt, **kw: (seen.update(p=prompt), json.dumps(
         {"themes": [{"title": "Old theme revisited", "score": 50, "evidence": EV},

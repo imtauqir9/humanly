@@ -28,7 +28,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote_plus
 
@@ -1831,8 +1831,9 @@ Rules for using it:
 # what the industry is actually talking about: the most-watched AI videos,
 # the podcasts engineers listen to, the newsletters and posts of the people
 # they follow, and the two forums where they argue. Signals come from code
-# where a free API exists (Hacker News, Reddit) and from Claude's web tools
-# where none does (YouTube, podcasts, newsletters); one synthesis call then
+# where the data can be read directly (Hacker News, Reddit, and the tracked
+# YouTube channels, with real view counts) and from Claude's web tools where
+# it cannot (podcasts, newsletters, LinkedIn, other videos); one synthesis call then
 # clusters them into themes and says, for each, the angle an engineer-author
 # could own. Every evidence link is one the radar actually saw.
 
@@ -1847,10 +1848,27 @@ RADAR_PODCASTS = [
     "Practical AI", "Dwarkesh Podcast", "The Cognitive Revolution", "AI Engineer",
     "How I AI", "Training Data (Sequoia)",
 ]
-RADAR_YOUTUBE_CHANNELS = [
-    "Fireship", "Matthew Berman", "AI Explained", "Wes Roth", "Two Minute Papers",
-    "Andrej Karpathy", "3Blue1Brown", "IndyDevDan", "Cole Medin", "Sam Witteveen",
-]
+# Channel name -> YouTube handle. The radar reads these channels' recent
+# uploads directly; the names also steer the web scan.
+RADAR_YOUTUBE_HANDLES = {
+    "Fireship": "Fireship", "Matthew Berman": "matthew_berman",
+    "AI Explained": "aiexplained-official", "Wes Roth": "WesRoth",
+    "Two Minute Papers": "TwoMinutePapers", "Andrej Karpathy": "AndrejKarpathy",
+    "3Blue1Brown": "3blue1brown", "IndyDevDan": "indydevdan",
+    "Cole Medin": "ColeMedin", "Sam Witteveen": "samwitteveenai",
+    "Ed Donner": "Edward.Donner", "Aishwarya Srinivasan": "aishwaryasrinivasan",
+    "Y Combinator": "ycombinator", "Priyanka Vergadia": "pvergadia",
+    "DeepLearning.AI": "Deeplearningai",
+}
+RADAR_YOUTUBE_CHANNELS = list(RADAR_YOUTUBE_HANDLES)
+# A channel with a million views a video would otherwise crowd out a smaller
+# one the author follows for a reason; each channel gets this many at most.
+RADAR_YOUTUBE_PER_CHANNEL = 4
+# With an API key, these searches also find the most-viewed AI videos from
+# channels the list does not follow. Each search costs 100 of the 10,000
+# daily quota units; everything else the radar asks for costs 1.
+RADAR_YOUTUBE_QUERIES = ["AI", "LLM", "AI agents", "Claude OR GPT OR Gemini"]
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "").strip()
 RADAR_VOICES = [
     "Simon Willison", "Andrej Karpathy", "Ethan Mollick", "swyx", "Hamel Husain",
     "Jeremy Howard", "Nathan Lambert", "Sebastian Raschka", "Andrew Ng's The Batch",
@@ -2008,6 +2026,191 @@ def _reddit_top(days: int, limit: int = 40) -> list[dict]:
     return out[:limit]
 
 
+_YT_BROWSER_UA = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+YOUTUBE_API = "https://www.googleapis.com/youtube/v3"
+
+
+def _yt_count(text: str) -> int:
+    """'1.4M', '1.4 million views', '12,345 views', '980K' -> an int."""
+    t = (text or "").lower().replace(",", "")
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(k|m|b|thousand|million|billion)?", t)
+    if not m:
+        return 0
+    n = float(m.group(1))
+    mult = {"k": 1e3, "thousand": 1e3, "m": 1e6, "million": 1e6, "b": 1e9, "billion": 1e9}
+    return int(n * mult.get(m.group(2) or "", 1))
+
+
+def _yt_age_days(text: str) -> float | None:
+    """'1d ago', '3 days ago', '5 hours ago', '2 weeks ago' -> days, or None."""
+    t = (text or "").lower()
+    m = re.search(r"(\d+)\s*(seconds?|minutes?|hours?|days?|weeks?|months?|years?|mo|s|m|h|d|w|y)\b", t)
+    if not m:
+        return None
+    unit = m.group(2)
+    if len(unit) > 2:
+        unit = unit.rstrip("s")
+    per_day = {"second": 1 / 86400, "s": 1 / 86400, "minute": 1 / 1440, "m": 1 / 1440,
+               "hour": 1 / 24, "h": 1 / 24, "day": 1, "d": 1, "week": 7, "w": 7,
+               "month": 30, "mo": 30, "year": 365, "y": 365}
+    return int(m.group(1)) * per_day[unit]
+
+
+def _yt_item(channel: str, video_id: str, title: str, views: int, date: str,
+             comments: int = 0, gist: str = "") -> dict:
+    return {
+        "source": channel[:60], "kind": "youtube", "title": title[:160],
+        "url": f"https://www.youtube.com/watch?v={video_id}", "discussion": "",
+        "signal": f"{views:,} views", "views": views, "comments": comments,
+        "date": date[:10], "gist": gist[:240],
+    }
+
+
+def _youtube_api_top(days: int, key: str, limit: int = 50) -> list[dict]:
+    """The tracked channels' recent uploads plus the most-viewed AI videos of
+    the window, from the YouTube Data API, with exact view and comment counts."""
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    since_iso = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+    ids: dict[str, str] = {}                      # video id -> channel name
+
+    def get(path: str, **params):
+        r = requests.get(f"{YOUTUBE_API}/{path}", params={**params, "key": key}, timeout=20)
+        if r.status_code != 200:
+            reason = ""
+            try:
+                reason = r.json()["error"]["message"]
+            except Exception:
+                pass
+            raise ClaudeError(f"YouTube API {path}: HTTP {r.status_code} {reason}"[:200])
+        return r.json()
+
+    for name, handle in RADAR_YOUTUBE_HANDLES.items():
+        try:
+            ch = get("channels", part="contentDetails", forHandle=f"@{handle}")
+            uploads = ch["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
+            pl = get("playlistItems", part="contentDetails", playlistId=uploads, maxResults=10)
+        except (ClaudeError, KeyError, IndexError) as e:
+            print(f"  YouTube @{handle}: {str(e)[:80]}")
+            continue
+        for it in pl.get("items", []):
+            cd = it.get("contentDetails", {})
+            if cd.get("videoPublishedAt", "") >= since_iso and cd.get("videoId"):
+                ids.setdefault(cd["videoId"], name)
+    for q in RADAR_YOUTUBE_QUERIES:
+        try:
+            res = get("search", part="snippet", q=q, type="video", order="viewCount",
+                      publishedAfter=since_iso, maxResults=15, relevanceLanguage="en")
+        except ClaudeError as e:
+            print(f"  YouTube search '{q}': {str(e)[:80]}")
+            continue
+        for it in res.get("items", []):
+            vid = it.get("id", {}).get("videoId")
+            if vid:
+                ids.setdefault(vid, it.get("snippet", {}).get("channelTitle", "YouTube"))
+    out = []
+    id_list = list(ids)
+    for i in range(0, len(id_list), 50):
+        res = get("videos", part="snippet,statistics", id=",".join(id_list[i:i + 50]))
+        for v in res.get("items", []):
+            sn, st = v.get("snippet", {}), v.get("statistics", {})
+            out.append(_yt_item(
+                sn.get("channelTitle") or ids.get(v["id"], "YouTube"), v["id"], sn.get("title", ""),
+                int(st.get("viewCount") or 0), sn.get("publishedAt", ""),
+                int(st.get("commentCount") or 0),
+                " ".join((sn.get("description") or "").split())[:240]))
+    out.sort(key=lambda x: x["views"], reverse=True)
+    per: dict[str, int] = {}
+    capped = []
+    for v in out:
+        per[v["source"]] = per.get(v["source"], 0) + 1
+        if per[v["source"]] <= RADAR_YOUTUBE_PER_CHANNEL:
+            capped.append(v)
+    return capped[:limit]
+
+
+def _yt_initial_data(html: str) -> dict:
+    m = re.search(r"var ytInitialData\s*=\s*(\{.*?\});\s*</script>", html, re.S)
+    return json.loads(m.group(1)) if m else {}
+
+
+def _yt_lockups(node) -> list[dict]:
+    """Every video tile on a channel page. YouTube has two tile shapes in
+    circulation; both are read."""
+    found = []
+    stack = [node]
+    while stack:
+        o = stack.pop()
+        if isinstance(o, dict):
+            if "lockupViewModel" in o:
+                lv = o["lockupViewModel"]
+                meta = (lv.get("metadata") or {}).get("lockupMetadataViewModel") or {}
+                parts = []
+                for row in (((meta.get("metadata") or {}).get("contentMetadataViewModel") or {})
+                            .get("metadataRows") or []):
+                    for p in row.get("metadataParts") or []:
+                        parts.append(p.get("accessibilityLabel") or (p.get("text") or {}).get("content", ""))
+                found.append({"id": lv.get("contentId", ""),
+                              "title": (meta.get("title") or {}).get("content", ""),
+                              "views": next((p for p in parts if "view" in p.lower()), ""),
+                              "age": next((p for p in parts if "ago" in p.lower()), "")})
+                continue
+            if "videoRenderer" in o:
+                v = o["videoRenderer"]
+                found.append({"id": v.get("videoId", ""),
+                              "title": "".join(r.get("text", "") for r in (v.get("title") or {}).get("runs", [])),
+                              "views": (v.get("viewCountText") or {}).get("simpleText", ""),
+                              "age": (v.get("publishedTimeText") or {}).get("simpleText", "")})
+                continue
+            stack.extend(o.values())
+        elif isinstance(o, list):
+            stack.extend(o)
+    return found
+
+
+def _youtube_page_top(days: int, limit: int = 50) -> list[dict]:
+    """Without an API key: each tracked channel's Videos tab, as a browser sees
+    it. View counts there are rounded ('1.4M'); dates are relative."""
+    out = []
+    for name, handle in RADAR_YOUTUBE_HANDLES.items():
+        try:
+            r = requests.get(f"https://www.youtube.com/@{handle}/videos", headers=_YT_BROWSER_UA,
+                             cookies={"CONSENT": "YES+1"}, timeout=20)
+            if r.status_code != 200:
+                print(f"  YouTube @{handle}: HTTP {r.status_code}, skipped")
+                continue
+            tiles = _yt_lockups(_yt_initial_data(r.text))
+        except Exception as e:
+            print(f"  YouTube @{handle} failed ({str(e)[:60]})")
+            continue
+        mine = []
+        for t in tiles:
+            age = _yt_age_days(t["age"])
+            if not t["id"] or not t["title"] or age is None or age > days:
+                continue
+            date = (TODAY - timedelta(days=int(age))).strftime("%Y-%m-%d")
+            mine.append(_yt_item(name, t["id"], t["title"], _yt_count(t["views"]), date))
+        mine.sort(key=lambda x: x["views"], reverse=True)
+        out.extend(mine[:RADAR_YOUTUBE_PER_CHANNEL])
+    out.sort(key=lambda x: x["views"], reverse=True)
+    return out[:limit]
+
+
+def _youtube_top(days: int) -> list[dict]:
+    """Recent AI videos with their view counts, read by code rather than
+    searched for: the Data API when there is a key, the channel pages when
+    there is not or the API refuses."""
+    if YOUTUBE_API_KEY:
+        try:
+            return _youtube_api_top(days, YOUTUBE_API_KEY)
+        except Exception as e:
+            print(f"  YouTube API failed ({str(e)[:100]}); reading the channel pages instead")
+    return _youtube_page_top(days)
+
+
 RADAR_SCAN_SCHEMA = """{
   "items": [
     {
@@ -2023,16 +2226,23 @@ RADAR_SCAN_SCHEMA = """{
 }"""
 
 
-def _radar_web_scan(days: int) -> list[dict]:
-    """YouTube, podcasts and newsletters, via Claude's own search and fetch."""
+def _radar_web_scan(days: int, have_channels: bool = False) -> list[dict]:
+    """Podcasts, newsletters, LinkedIn, and videos beyond the tracked channels,
+    via Claude's own search and fetch."""
+    if have_channels:
+        videos = (f"1. The most-watched YouTube videos about AI from the last {days} days that are\n"
+                  f"   NOT from these channels, which are already read directly: "
+                  f"{', '.join(RADAR_YOUTUBE_CHANNELS)}.\n   Record the view count the page shows.")
+    else:
+        videos = (f"1. The most-watched YouTube videos about AI from the last {days} days. Search for\n"
+                  f"   the week's most viewed AI videos and for these channels: "
+                  f"{', '.join(RADAR_YOUTUBE_CHANNELS)}.\n   Record the view count the page shows.")
     prompt = f"""You are scanning what the AI industry has talked about in the last {days} days,
 for an author who writes for {RADAR_LENS}.
 {date_context()}
 
 Find, by searching and opening pages:
-1. The most-watched YouTube videos about AI from the last {days} days. Search for
-   the week's most viewed AI videos and for these channels: {", ".join(RADAR_YOUTUBE_CHANNELS)}.
-   Record the view count the page shows.
+{videos}
 2. New episodes of these podcasts and what each discussed: {", ".join(RADAR_PODCASTS)}.
 3. What widely followed AI voices published or argued this fortnight, in newsletters
    and posts: {", ".join(RADAR_VOICES)}.
@@ -2322,21 +2532,28 @@ def run_radar(output_dir: Path, days: int = RADAR_DAYS):
     print(f"Output  : {output_dir}")
     print(f"{'='*60}")
 
-    log("RADAR 1", "Forums: Hacker News and Reddit")
+    log("RADAR 1", "Forums and YouTube: Hacker News, Reddit, the tracked channels")
     hn = _hn_top(days)
     print(f"  Hacker News: {len(hn)} stories")
     reddit = _reddit_top(days)
     print(f"  Reddit: {len(reddit)} posts")
+    youtube = _youtube_top(days)
+    via = "Data API" if YOUTUBE_API_KEY else "channel pages"
+    print(f"  YouTube: {len(youtube)} videos ({via})")
 
-    log("RADAR 2", "YouTube, podcasts and newsletters (Claude web search)")
+    log("RADAR 2", "Podcasts, newsletters, LinkedIn and other videos (Claude web search)")
     try:
-        web = _radar_web_scan(days)
+        web = _radar_web_scan(days, have_channels=bool(youtube))
     except ClaudeError as e:
-        print(f"  Web scan failed ({str(e)[:120]}); continuing with the forums only.")
+        print(f"  Web scan failed ({str(e)[:120]}); continuing with the forums and YouTube.")
         web = []
     print(f"  Web scan: {len(web)} items")
 
-    signals = web + hn + reddit
+    # The same video can arrive from the channel read and the web scan; keep
+    # the one with the real view count.
+    seen_urls = {v["url"] for v in youtube}
+    web = [w for w in web if w["url"] not in seen_urls]
+    signals = youtube + web + hn + reddit
     if not signals:
         raise ClaudeError("The radar found no signals at all. Check the network and the API key.")
 
