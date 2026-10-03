@@ -20,6 +20,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # App source
 COPY seo_writer.py app.py ./
 COPY templates ./templates
+COPY static ./static
 # The writer's style exemplars and the source of the voice profile. Without
 # this the deployed app wrote in nobody's voice; .dockerignore alone did not
 # put the folder in the image.

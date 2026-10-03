@@ -141,7 +141,7 @@ app.config.update(
 
 # Public because a browser must reach them before it can authenticate, and
 # because a health check should not need a credential.
-_OPEN_PATHS = {"/healthz", "/login", "/feed.json", "/feed.xml", "/embed.js"}
+_OPEN_PATHS = {"/healthz", "/login", "/feed.json", "/feed.xml", "/embed.js", "/pipeline"}
 
 # A login form on a public URL is a brute-force target. This is deliberately
 # small: a per-IP counter, not a rate-limiting library.
@@ -202,6 +202,9 @@ def require_password():
     # Signed download links carry their own credential (an expiring HMAC), so
     # an automation platform can fetch one finished file without the password.
     if request.path.startswith("/dl/"):
+        return None
+    # The /pipeline showcase is public, and so are the diagrams it shows.
+    if request.path.startswith("/static/pipeline/"):
         return None
     if _logged_in() or _basic_auth_ok():
         return None
@@ -362,6 +365,12 @@ def index():
     articles = list_articles()
     return render_template("index.html", articles=articles[:RECENT_ON_HOME],
                            total_articles=len(articles))
+
+
+@app.route("/pipeline")
+def pipeline():
+    """The public showcase: how an article is made, stage by stage."""
+    return render_template("pipeline.html")
 
 
 @app.route("/library")

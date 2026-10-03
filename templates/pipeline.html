@@ -1,0 +1,606 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="How Humanly writes an article: research, a fact pack pinned to sources, a draft in your voice, and a three-model review before anything is published.">
+<title>The Humanly Pipeline</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..500;1,9..144,300..500&family=Instrument+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+html { -webkit-text-size-adjust: 100%; }
+/* Layout: an editorial manuscript. Stage numbers sit in a left margin, the stage reads as prose,
+   and the editor's notes (what it guarantees) sit in a right margin. One column under 820px. */
+:root {
+  --bg: #FBF9F5; --surface: #FFFFFF; --surface-2: #FDFBF8; --sunken: #F4F0E9;
+  --ink: #26231F; --ink-2: #57524A; --muted: #8A8276; --faint: #C2BBAF;
+  --line: #EEE9E0; --line-2: #E2DBCF;
+  --accent: #D2553A; --link: #2F5288; --ok: #4E7A45;
+  --serif: "Fraunces", "Iowan Old Style", Georgia, serif;
+  --sans: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #171512; --surface: #201D19; --surface-2: #25221D; --sunken: #2B2722;
+    --ink: #ECE6DA; --ink-2: #C9C1B3; --muted: #948B7D; --faint: #6A6358;
+    --line: #332E28; --line-2: #3F3931;
+    --accent: #E06A4E; --link: #9DB6DA; --ok: #8DBA7F;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #171512; --surface: #201D19; --surface-2: #25221D; --sunken: #2B2722;
+  --ink: #ECE6DA; --ink-2: #C9C1B3; --muted: #948B7D; --faint: #6A6358;
+  --line: #332E28; --line-2: #3F3931;
+  --accent: #E06A4E; --link: #9DB6DA; --ok: #8DBA7F;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink);
+  font: 400 15px/1.6 var(--sans);
+  padding-inline: 28px; padding-block: 0 64px;
+}
+.wrap { max-width: 1080px; margin: 0 auto; }
+a { color: var(--link); text-underline-offset: 3px; }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+
+/* masthead */
+.mast { display: flex; justify-content: space-between; align-items: baseline; gap: 16px;
+  padding-block: 24px 14px; border-bottom: 2px solid var(--ink); }
+.word { font: 400 26px/1 var(--serif); letter-spacing: -.01em; }
+.word i { color: var(--accent); }
+.mast .meta { font: 400 12px/1.4 var(--mono); color: var(--muted); }
+
+/* hero */
+.hero { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 48px;
+  padding-block: 56px 48px; border-bottom: 1px solid var(--line); align-items: end; }
+.kicker, .label { font: 600 11px/1.3 var(--sans); text-transform: uppercase; letter-spacing: .14em; color: var(--muted); }
+.label .rn { font: italic 400 15px/1 var(--serif); color: var(--accent); text-transform: none; letter-spacing: 0; margin-right: 6px; }
+h1 { font: 350 clamp(36px, 5.4vw, 56px)/1.05 var(--serif); font-variation-settings: "opsz" 144;
+  letter-spacing: -.02em; margin: 14px 0 18px; text-wrap: balance; }
+h1 em { font-style: italic; color: var(--accent); }
+.lede { font-size: 17px; color: var(--ink-2); max-width: 60ch; margin: 0; }
+.ledger { border-top: 1px solid var(--line-2); }
+.ledger div { display: flex; justify-content: space-between; gap: 12px; padding-block: 10px;
+  border-bottom: 1px solid var(--line); font-size: 13.5px; color: var(--ink-2); }
+.ledger b { font: 500 13px/1.4 var(--mono); color: var(--ink); font-variant-numeric: tabular-nums; text-align: right; }
+
+/* section heads */
+section { padding-block: 56px 8px; }
+.sh { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 32px; align-items: end;
+  padding-bottom: 14px; border-bottom: 2px solid var(--ink); margin-bottom: 4px; }
+h2 { font: 400 clamp(26px, 3.2vw, 34px)/1.15 var(--serif); letter-spacing: -.01em; margin: 10px 0 0; text-wrap: balance; }
+.sh p { margin: 0; color: var(--ink-2); max-width: 62ch; }
+
+/* phase strip */
+.phases { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 0; margin: 28px 0 8px;
+  border: 1px solid var(--line-2); border-radius: 10px; overflow: hidden; background: var(--surface); }
+.phases a { display: block; padding: 14px 14px 16px; text-decoration: none; color: var(--ink);
+  border-right: 1px solid var(--line); transition: background .2s ease-out; }
+.phases a:last-child { border-right: 0; }
+.phases a:hover { background: var(--surface-2); }
+.phases .n { font: 400 11.5px/1 var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.phases .t { font: 400 18px/1.2 var(--serif); margin-top: 8px; }
+.phases .d { font-size: 12.5px; color: var(--muted); margin-top: 4px; line-height: 1.4; }
+.phases a.hot .t { color: var(--accent); }
+
+/* stage list */
+.phase { padding-top: 36px; scroll-margin-top: 16px; }
+.phase-name { font: italic 400 20px/1.2 var(--serif); color: var(--ink-2); margin: 0 0 6px; }
+.phase-name span { font: 600 11px/1 var(--sans); font-style: normal; text-transform: uppercase; letter-spacing: .14em; color: var(--muted); margin-left: 10px; }
+ol.stages { list-style: none; margin: 0; padding: 0; }
+.stage { display: grid; grid-template-columns: 72px minmax(0, 1fr) minmax(0, .8fr); gap: 28px;
+  padding-block: 22px; border-top: 1px solid var(--line); }
+.stage .no { font: 500 14px/1.6 var(--mono); color: var(--faint); font-variant-numeric: tabular-nums; padding-top: 3px; }
+.stage h3 { font: 400 21px/1.25 var(--serif); margin: 0 0 6px; letter-spacing: -.005em; }
+.stage p { margin: 0; color: var(--ink-2); max-width: 62ch; }
+.stage ul { margin: 10px 0 0; padding-left: 18px; color: var(--ink-2); }
+.stage li { margin: 4px 0; }
+.note { font-size: 13.5px; color: var(--ink-2); border-left: 1.5px solid var(--line-2); padding-left: 14px; align-self: start; }
+.note .k { display: block; font: 600 10.5px/1.3 var(--sans); text-transform: uppercase; letter-spacing: .14em; color: var(--muted); margin-bottom: 4px; }
+.stage.key .no { color: var(--accent); }
+.stage.key .note { border-left-color: var(--accent); }
+.tag { display: inline-block; font: 500 10.5px/1 var(--mono); text-transform: uppercase; letter-spacing: .06em;
+  border: 1.5px solid currentColor; border-radius: 4px; padding: 3px 5px 2px; margin-left: 8px; vertical-align: 3px; color: var(--muted); }
+.tag.new { color: var(--link); }
+
+/* verify: the argument */
+.argue { margin-top: 18px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; position: relative; }
+.step { background: var(--surface); border: 1px solid var(--line-2); border-radius: 6px; padding: 12px 12px 14px; }
+.step .who { font: 500 11px/1 var(--mono); text-transform: uppercase; letter-spacing: .08em; }
+.step .what { font-size: 13px; color: var(--ink-2); margin-top: 6px; line-height: 1.45; }
+.step.a .who { color: var(--accent); } .step.w .who { color: var(--link); } .step.j .who { color: var(--ink); } .step.f .who { color: var(--ok); }
+.loop { grid-column: 1 / -1; font: 400 12px/1.4 var(--mono); color: var(--muted); display: flex; align-items: center; gap: 10px; }
+.loop::before { content: ""; flex: 0 0 auto; width: 28px; height: 12px; border: 1.5px solid var(--faint); border-top: 0; border-radius: 0 0 6px 6px; }
+
+/* margin-note specimen */
+.specimen { margin-top: 28px; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; overflow: hidden; }
+.specimen .bar { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 16px;
+  background: var(--surface-2); border-bottom: 1px solid var(--line); }
+.specimen .bar span { font: 400 12px/1.4 var(--mono); color: var(--muted); }
+.specimen .body { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); }
+.quote { padding: 20px; font: 400 17px/1.55 var(--serif); border-right: 1px solid var(--line); }
+.quote s { text-decoration-color: var(--accent); text-decoration-thickness: 2px; color: var(--muted); }
+.quote ins { text-decoration: none; background: color-mix(in srgb, var(--ok) 14%, transparent); padding: 0 2px; border-radius: 2px; }
+.voices { padding: 16px 20px; display: grid; gap: 12px; }
+.voice { font-size: 13.5px; line-height: 1.5; padding-left: 12px; border-left: 2px solid; }
+.voice b { font: 500 11px/1 var(--mono); text-transform: uppercase; letter-spacing: .08em; display: block; margin-bottom: 4px; }
+.voice.a { border-color: var(--accent); } .voice.a b { color: var(--accent); }
+.voice.w { border-color: var(--link); } .voice.w b { color: var(--link); }
+.voice.j { border-color: var(--ink); } .voice.j b { color: var(--ink); }
+.stamp { display: inline-block; font: 500 11px/1 var(--mono); text-transform: uppercase; letter-spacing: .1em;
+  color: var(--ok); border: 1.5px solid var(--ok); border-radius: 4px; padding: 5px 7px 4px; transform: rotate(-3deg); justify-self: start; }
+
+/* deliverables */
+.files { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; margin-top: 8px; }
+.file { padding: 20px 20px 22px 0; border-bottom: 1px solid var(--line); }
+.file:nth-child(3n+2), .file:nth-child(3n+3) { padding-left: 20px; border-left: 1px solid var(--line); }
+.file code { font: 500 13px/1.3 var(--mono); color: var(--ink); }
+.file p { margin: 6px 0 0; font-size: 13.5px; color: var(--ink-2); }
+
+/* rules */
+.rules { counter-reset: r; list-style: none; padding: 0; margin: 8px 0 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 40px; }
+.rules li { counter-increment: r; display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 8px; padding-block: 16px; border-bottom: 1px solid var(--line); }
+.rules li::before { content: counter(r, lower-roman) "."; font: italic 400 17px/1.4 var(--serif); color: var(--accent); }
+.rules b { font-weight: 600; }
+.rules span { color: var(--ink-2); }
+
+/* nine-step loop */
+.loop9 { list-style: none; padding: 0; margin: 28px 0 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.cell { position: relative; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; padding: 16px 16px 40px; }
+.cell.hum { background: var(--sunken); border-color: var(--sunken); }
+.cell.new { border-color: var(--link); }
+.cell.chk { border-color: var(--accent); }
+.cell .cn { font: italic 400 26px/1 var(--serif); color: var(--faint); }
+.cell.chk .cn { color: var(--accent); }
+.cell h3 { font: 400 19px/1.25 var(--serif); margin: 8px 0 6px; }
+.cell p { margin: 0; font-size: 13.5px; color: var(--ink-2); line-height: 1.5; }
+.cell code, .tree code, .col-k code, .ex-foot code { font: 400 12.5px/1.4 var(--mono); }
+.who-tag { position: absolute; left: 16px; bottom: 14px; font: 500 10.5px/1 var(--mono); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.cell.hum .who-tag { color: var(--ink); }
+.cell.chk .who-tag { color: var(--accent); }
+.loopback { margin: 14px 0 0; font: 400 12.5px/1.4 var(--mono); color: var(--muted); }
+.loopback::before { content: "↺ "; color: var(--accent); }
+
+/* worked example */
+.example { margin-top: 40px; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; overflow: hidden; }
+.ex-head { padding: 22px 24px 18px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+.ex-head h3 { font: 400 23px/1.25 var(--serif); margin: 8px 0 6px; text-wrap: balance; }
+.ex-head p { margin: 0; color: var(--ink-2); max-width: 70ch; }
+.ex-grid { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1.25fr); gap: 20px; padding: 22px 24px; align-items: start; }
+.col-k { font: 600 11px/1.3 var(--sans); text-transform: uppercase; letter-spacing: .14em; color: var(--muted); padding-bottom: 10px; border-bottom: 2px solid var(--ink); margin-bottom: 4px; }
+.col-k code { text-transform: none; letter-spacing: 0; color: var(--ink); }
+.tree, .tree ul { list-style: none; margin: 0; padding: 0; }
+.tree > li { padding-block: 12px; border-bottom: 1px solid var(--line); }
+.tree > li:last-child { border-bottom: 0; }
+.tree li > code { color: var(--ink); overflow-wrap: anywhere; }
+.tree li > span { display: block; font-size: 13.5px; color: var(--ink-2); margin-top: 4px; }
+.tree ul { margin-top: 8px; padding-left: 14px; border-left: 1px solid var(--line-2); }
+.tree ul li { padding-block: 3px; }
+.tree ul li code { color: var(--ink-2); overflow-wrap: anywhere; }
+.tree .arts { border-left-color: var(--accent); }
+.tree .arts li { font: 400 15px/1.35 var(--serif); color: var(--ink); padding-block: 5px; }
+.arrow { display: flex; flex-direction: column; align-items: center; gap: 6px; padding-top: 40px; color: var(--accent); }
+.arrow .cmd { font: 400 11.5px/1 var(--mono); color: var(--muted); white-space: nowrap; }
+.ex-foot { padding: 14px 24px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); }
+.ex-foot code { color: var(--ink-2); }
+
+/* plates */
+.plates { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px 24px; margin-top: 28px; align-items: start; }
+.plate { margin: 0; }
+.plate.wide { grid-column: 1 / -1; }
+.plate a { display: block; background: #FFFFFF; border: 1px solid var(--line-2); border-radius: 10px; padding: 12px; transition: border-color .2s ease-out; }
+.plate a:hover { border-color: var(--ink-2); }
+.plate img { display: block; width: 100%; height: auto; border-radius: 4px; }
+.plate figcaption { margin-top: 10px; font-size: 13.5px; color: var(--ink-2); max-width: 70ch; }
+.plate .pn { font: italic 400 15px/1 var(--serif); color: var(--accent); margin-right: 8px; }
+.plate b { font-weight: 600; color: var(--ink); }
+
+footer { margin-top: 64px; padding-top: 18px; border-top: 2px solid var(--ink); display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+footer p { margin: 0; color: var(--ink-2); max-width: 60ch; }
+footer .word { font-size: 20px; }
+
+@media (max-width: 920px) {
+  .phases { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .phases a:nth-child(3) { border-right: 0; }
+  .phases a:nth-child(-n+3) { border-bottom: 1px solid var(--line); }
+}
+@media (max-width: 820px) {
+  body { padding-inline: 16px; }
+  .hero, .sh { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+  .hero { padding-block: 36px 32px; }
+  .stage { grid-template-columns: 52px minmax(0, 1fr); gap: 12px 16px; }
+  .stage .note { grid-column: 2; }
+  .argue { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .specimen .body { grid-template-columns: minmax(0, 1fr); }
+  .quote { border-right: 0; border-bottom: 1px solid var(--line); }
+  .files { grid-template-columns: minmax(0, 1fr); }
+  .file, .file:nth-child(3n+2), .file:nth-child(3n+3) { padding-left: 0; border-left: 0; }
+  .rules { grid-template-columns: minmax(0, 1fr); }
+  .loop9 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .plates { grid-template-columns: minmax(0, 1fr); }
+  .ex-grid { grid-template-columns: minmax(0, 1fr); padding: 18px 16px; }
+  .ex-head, .ex-foot { padding-inline: 16px; }
+  .arrow { flex-direction: row; padding-top: 0; justify-content: flex-start; }
+  .arrow svg { transform: rotate(90deg); width: 24px; height: 24px; }
+}
+@media (max-width: 520px) {
+  .loop9 { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 520px) {
+  .phases { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .phases a { border-bottom: 1px solid var(--line); }
+  .phases a:nth-child(3) { border-right: 1px solid var(--line); }
+  .phases a:nth-child(2n) { border-right: 0; }
+  .phases a:nth-last-child(-n+2) { border-bottom: 0; }
+  .mast .meta { display: none; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .stamp { animation: land .5s ease-out .3s both; }
+  @keyframes land { from { transform: rotate(-9deg) scale(1.25); opacity: .4; } to { transform: rotate(-3deg) scale(1); opacity: 1; } }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="mast">
+    <div class="word">Human<i>ly</i></div>
+    <div class="meta">The pipeline, stage by stage</div>
+  </header>
+
+  <div class="hero">
+    <div>
+      <div class="kicker">How an article gets made</div>
+      <h1>Written by a human, <em>checked by an editor.</em></h1>
+      <p class="lede">You bring the topic, the angle and your own take. Humanly does the reading, pins every figure to the page it came from, writes the draft in your voice, and then makes a second model argue with it. Only what survives the argument reaches the finished file.</p>
+    </div>
+    <div class="ledger" aria-label="The pipeline at a glance">
+      <div>Stages in every run <b>14</b></div>
+      <div>Optional extras <b>post · video · card</b></div>
+      <div>Humanizing passes <b>3</b></div>
+      <div>Models in the argument <b>3</b></div>
+      <div>Audit rounds, at most <b>2</b></div>
+      <div>Figures stated without a source <b>0</b></div>
+    </div>
+  </div>
+
+  <section id="pipeline">
+    <div class="sh">
+      <div>
+        <div class="label"><span class="rn">i.</span>The pipeline</div>
+        <h2>Facts are pinned before the draft exists, and argued over after it</h2>
+      </div>
+      <p>Six phases, run in order, all automated. The numbers are the pipeline's own stage numbers; the half steps are checks added between the original ten.</p>
+    </div>
+
+    <nav class="phases" aria-label="Phases">
+      <a href="#gather"><div class="n">1 · 1.4 · 1.5</div><div class="t">Gather</div><div class="d">Research and the fact pack</div></a>
+      <a href="#plan"><div class="n">2 – 4</div><div class="t">Plan</div><div class="d">Title, takeaways, outline</div></a>
+      <a href="#write"><div class="n">5</div><div class="t">Write</div><div class="d">The draft, in your voice</div></a>
+      <a href="#edit"><div class="n">6 · 6.2 · 6.4</div><div class="t">Edit</div><div class="d">Strip the AI tells</div></a>
+      <a href="#verify" class="hot"><div class="n">6.5</div><div class="t">Verify</div><div class="d">The argument</div></a>
+      <a href="#ship"><div class="n">7 – 8.5</div><div class="t">Ship</div><div class="d">Meta, images, diagram</div></a>
+    </nav>
+
+    <div class="phase" id="gather">
+      <p class="phase-name">Gather <span>Before a word is written</span></p>
+      <ol class="stages">
+        <li class="stage">
+          <div class="no">0</div>
+          <div>
+            <h3>Your brief</h3>
+            <p>A topic, the angle you want, and three to five first-person lines: what you have seen, built or believe. The take is written into the article in your words, and the audit later checks it survived. It is the single biggest reason an article stops reading as generic.</p>
+          </div>
+          <div class="note"><span class="k">You provide</span>Topic, intent, your take. Optionally your own research notes, and whether you want a LinkedIn post, video script or share card.</div>
+        </li>
+        <li class="stage">
+          <div class="no">1</div>
+          <div>
+            <h3>Search research</h3>
+            <p>Your intent becomes search keywords, and the top live Google results are read for what is ranking, who it is written for, the subtopics they cover and the questions they leave open.</p>
+            <ul>
+              <li>A voice profile is built from your sample articles, and every step that touches prose is held to it.</li>
+            </ul>
+          </div>
+          <div class="note"><span class="k">Why it matters</span>The article is built around the gaps in what already ranks, not around a summary of it.</div>
+        </li>
+        <li class="stage">
+          <div class="no">1.4</div>
+          <div>
+            <h3>Your research notes <span class="tag new">New</span></h3>
+            <p>If you have already done the reading, hand it over. Your notes become the first fact pack, built from the notes alone, with nothing added from the model's memory. Each figure keeps the URL your notes give it and the sentence they use.</p>
+            <ul>
+              <li>Anything your notes mark as unverified, secondhand or "to verify" is not treated as a fact. It goes to a list of gaps the writer must check, not state.</li>
+              <li>Your notes' angle becomes the article's angle.</li>
+            </ul>
+          </div>
+          <div class="note"><span class="k">Why it matters</span>Your own research is used as evidence, with its caveats kept intact.</div>
+        </li>
+        <li class="stage key">
+          <div class="no">1.5</div>
+          <div>
+            <h3>The fact pack</h3>
+            <p>The pipeline opens the primary pages itself (vendor pricing, documentation, exam guides, first-party reports) and pins every specific figure to a URL and a verbatim quote. These facts are merged in after yours.</p>
+            <ul>
+              <li>The writer may state no price, date, version or statistic that is not in the pack.</li>
+              <li>A pack value can never be widened into a range.</li>
+              <li>If nothing could be verified, the article states no figures at all and says plainly where a number would go.</li>
+            </ul>
+          </div>
+          <div class="note"><span class="k">The rule</span>Every number in the article can be traced to the page it came from. The pack is saved alongside the article.</div>
+        </li>
+      </ol>
+    </div>
+
+    <div class="phase" id="plan">
+      <p class="phase-name">Plan <span>Shape before prose</span></p>
+      <ol class="stages">
+        <li class="stage">
+          <div class="no">2</div>
+          <div><h3>Title</h3><p>Picks the strongest angle and the keyword it should rank for.</p></div>
+          <div class="note"><span class="k">Output</span>A refined title and a target keyword.</div>
+        </li>
+        <li class="stage">
+          <div class="no">3</div>
+          <div><h3>Key takeaways</h3><p>Works out what the article has to cover to beat what currently ranks.</p></div>
+          <div class="note"><span class="k">Output</span>The must-cover list.</div>
+        </li>
+        <li class="stage">
+          <div class="no">4</div>
+          <div>
+            <h3>Outline, in three levels</h3>
+            <p>Every article teaches in layers so a newcomer and an expert both get something:</p>
+            <ul>
+              <li><b>The simple version</b>, with an analogy, an example, terms defined and a diagram.</li>
+              <li><b>How it actually works.</b></li>
+              <li><b>Where it gets hard.</b></li>
+            </ul>
+          </div>
+          <div class="note"><span class="k">Why it matters</span>This outline is the contract. The auditor later holds the draft to it.</div>
+        </li>
+      </ol>
+    </div>
+
+    <div class="phase" id="write">
+      <p class="phase-name">Write <span>One draft, grounded</span></p>
+      <ol class="stages">
+        <li class="stage">
+          <div class="no">5</div>
+          <div>
+            <h3>The draft</h3>
+            <p>A full article written from the fact pack, your sample articles, your voice profile and your take. Every figure is cited inline to its source.</p>
+          </div>
+          <div class="note"><span class="k">Length</span>Long-form by default, 2,500 to 3,500 words; shorter 1,000 and 2,000-word versions are available.</div>
+        </li>
+      </ol>
+    </div>
+
+    <div class="phase" id="edit">
+      <p class="phase-name">Edit <span>Measured, not guessed</span></p>
+      <ol class="stages">
+        <li class="stage">
+          <div class="no">6</div>
+          <div>
+            <h3>Humanize, in three passes</h3>
+            <ul>
+              <li><b>Pass 1</b> removes AI patterns against a 24-item checklist.</li>
+              <li><b>Pass 2</b> the model audits its own draft.</li>
+              <li><b>Pass 3</b> a scanner counts the tells that actually survived (stock vocabulary, title-cased headings, em dashes, sentences of uniform length) and the model repairs only the phrases it names. If the count goes up, pass 2 is kept.</li>
+            </ul>
+          </div>
+          <div class="note"><span class="k">Why it matters</span>The last pass is checked by counting, so it cannot quietly make things worse.</div>
+        </li>
+        <li class="stage">
+          <div class="no">6.2</div>
+          <div><h3>Plain-language check</h3><p>Measures the simple version's sentences: an average of 17 words or fewer, none over 30. If the section is too dense, only that section is rewritten.</p></div>
+          <div class="note"><span class="k">Why it matters</span>The opening stays readable for someone new to the subject.</div>
+        </li>
+        <li class="stage">
+          <div class="no">6.4</div>
+          <div><h3>The answer block</h3><p>A 40 to 60 word answer placed under the headline, written to make sense when quoted on its own.</p></div>
+          <div class="note"><span class="k">Why it matters</span>It is the part search and AI answer engines lift and quote.</div>
+        </li>
+      </ol>
+    </div>
+
+    <div class="phase" id="verify">
+      <p class="phase-name">Verify <span>The argument</span></p>
+      <ol class="stages">
+        <li class="stage key">
+          <div class="no">6.5</div>
+          <div>
+            <h3>A second model audits, the writer argues back</h3>
+            <p>The finished draft goes to a model from a different vendor, whose only job is to find what is wrong with it. It checks the draft against the brief for factual support, fidelity to the outline, voice and coverage, and every finding is anchored to a quoted passage.</p>
+            <div class="argue" aria-label="The verify loop">
+              <div class="step a"><div class="who">Audit</div><div class="what">A second vendor scores the draft and returns findings tied to quotes.</div></div>
+              <div class="step w"><div class="who">Rebut</div><div class="what">The writer accepts or disputes each one. Silence counts as accepting.</div></div>
+              <div class="step j"><div class="who">Judge</div><div class="what">A third model rules on whatever is still contested.</div></div>
+              <div class="step f"><div class="who">Fix</div><div class="what">Only accepted or upheld findings are applied.</div></div>
+              <div class="loop">Then a fresh audit, for up to two rounds.</div>
+            </div>
+          </div>
+          <div class="note"><span class="k">Why three models</span>A blind spot shared by the writer and the auditor would never be raised, so the auditor runs on a different vendor first, and the judge on a third where possible. A review report is saved with every article.</div>
+        </li>
+      </ol>
+
+      <figure class="specimen" aria-label="Illustration of a review finding">
+        <div class="bar"><span>Review · finding 2 of 4</span><span>Illustration of the format, not a real run</span></div>
+        <div class="body">
+          <div class="quote">
+            Most teams <s>cut their cloud bill by 40%</s> <ins>report lower inference costs</ins> after adding a cache in front of the model.
+          </div>
+          <div class="voices">
+            <div class="voice a"><b>Auditor</b>"40%" is not in the fact pack and no source is cited. Factual support fails.</div>
+            <div class="voice w"><b>Writer</b>Accepted. The figure came from nowhere; I will drop the number and keep the claim general.</div>
+            <div class="voice j"><b>Judge</b>Not contested. No ruling needed.</div>
+            <span class="stamp">Applied</span>
+          </div>
+        </div>
+      </figure>
+    </div>
+
+    <div class="phase" id="ship">
+      <p class="phase-name">Ship <span>Ready to publish</span></p>
+      <ol class="stages">
+        <li class="stage">
+          <div class="no">7</div>
+          <div><h3>Search metadata</h3><p>SEO title, meta description and URL slug, plus a full HTML head: canonical link, Open Graph and Twitter cards, and Article and FAQ structured data built from the article's own FAQ.</p></div>
+          <div class="note"><span class="k">Why it matters</span>Search engines and answer engines get the article's structure, not just its text.</div>
+        </li>
+        <li class="stage">
+          <div class="no">8</div>
+          <div><h3>Images</h3><p>Real images found through Google Images or Unsplash and embedded in the Word file. No placeholders.</p></div>
+          <div class="note"><span class="k">Output</span>Images embedded in the DOCX.</div>
+        </li>
+        <li class="stage">
+          <div class="no">8.5</div>
+          <div><h3>The diagram</h3><p>The diagram planned in the outline is drawn by the pipeline itself, as a flow, cycle, layers or comparison, not searched for online.</p></div>
+          <div class="note"><span class="k">Output</span>SVG inside the web version, PNG in Markdown and Word.</div>
+        </li>
+        <li class="stage">
+          <div class="no">+</div>
+          <div><h3>Optional extras</h3><p>From the finished, verified article: a LinkedIn post, a video script, a share card, and an MP4 with a voiceover.</p></div>
+          <div class="note"><span class="k">Why it matters</span>One piece of research, several formats, all from the same checked facts.</div>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <section id="flow">
+    <div class="sh">
+      <div>
+        <div class="label"><span class="rn">ii.</span>Research to publish</div>
+        <h2>Search before you write, check at the source, search again after</h2>
+      </div>
+      <p>The pipeline is one part of a nine-step loop. Humanly runs steps 4 to 6 in a single command. The steps around them stay with the author, and two of them are search checkpoints.</p>
+    </div>
+
+    <ol class="loop9" aria-label="The nine-step workflow">
+      <li class="cell"><div class="cn">1</div><h3>Pick the topic</h3><p>From the topic radar or a research report: a gap nobody covers well, with a dated trigger.</p><span class="who-tag">By hand</span></li>
+      <li class="cell chk"><div class="cn">2</div><h3>Search check</h3><p>Search volume, what ranks and the AI Overview. The headline becomes the exact query people type.</p><span class="who-tag">Checkpoint</span></li>
+      <li class="cell"><div class="cn">3</div><h3>Research notes</h3><p>A URL and a date on every claim, and a <code>[VERIFY]</code> marker on the shaky ones.</p><span class="who-tag">By hand</span></li>
+      <li class="cell hum new"><div class="cn">4</div><h3>Fact packs</h3><p>One from your notes, one from the web, merged. Flagged claims go to the gaps.</p><span class="who-tag">Humanly</span></li>
+      <li class="cell hum"><div class="cn">5</div><h3>Write and verify</h3><p>Outline, draft, three humanizing passes, then audit, rebut, judge and fix, for up to two rounds.</p><span class="who-tag">Humanly</span></li>
+      <li class="cell hum"><div class="cn">6</div><h3>Package</h3><p>Article, metadata, FAQ, diagram, LinkedIn post, video script and share card. Carousels are made by hand.</p><span class="who-tag">Humanly</span></li>
+      <li class="cell"><div class="cn">7</div><h3>Hand check</h3><p>Every number and quote re-read at its source. If it fails, confirm it or cut it.</p><span class="who-tag">By hand</span></li>
+      <li class="cell"><div class="cn">8</div><h3>Publish in order</h3><p>YouTube, then the article, then the post with the link in the first comment, then the newsletter and your own domain.</p><span class="who-tag">By hand</span></li>
+      <li class="cell chk"><div class="cn">9</div><h3>Measure</h3><p>Search Console, LinkedIn and AI citations at day 7 and day 30. The results pick the next topic.</p><span class="who-tag">Checkpoint</span></li>
+    </ol>
+    <p class="loopback">Step 9 feeds step 1. Each round of publishing informs the next topic.</p>
+
+    <div class="example">
+      <div class="ex-head">
+        <div class="label">A worked example</div>
+        <h3>AI networking for LinkedIn, from notes to three articles</h3>
+        <p>One real run of the loop, as it sits in the project folder. The research went in on the left; what the pipeline and the author produced from it came out on the right.</p>
+      </div>
+      <div class="ex-grid">
+        <div class="col">
+          <div class="col-k">In · <code>research/</code></div>
+          <ul class="tree">
+            <li><code>ai-networking-linkedin-topics.md</code><span>The ranked report: ten topics, scored on timing, search demand, citation potential and how thin existing coverage is.</span></li>
+            <li class="dir"><code>notes/</code><span>Four dated research notes, with a URL on every claim and the shaky ones marked to verify.</span>
+              <ul>
+                <li><code>ai_hpc_networking_trends.md</code></li>
+                <li><code>agentic_networking_intersection.md</code></li>
+                <li><code>youtube_influencer_coverage.md</code></li>
+                <li><code>linkedin_seo_geo_demand.md</code></li>
+              </ul>
+            </li>
+          </ul>
+        </div>
+        <div class="arrow" aria-hidden="true">
+          <span class="cmd">--notes research/notes</span>
+          <svg viewBox="0 0 120 24" width="120" height="24"><path d="M2 12 H112" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M104 5 L114 12 L104 19" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+        </div>
+        <div class="col">
+          <div class="col-k">Out · <code>articles/</code></div>
+          <ul class="tree">
+            <li><code>ai-networking-linkedin-articles.md</code><span>The publishing plan, the workflow, the pipeline in detail, sources to watch, and three articles:</span>
+              <ul class="arts">
+                <li>Scale-up vs scale-out vs scale-across vs scale-in: AI networking explained</li>
+                <li>KV cache offload explained: your AI agent's memory now lives one network hop away</li>
+                <li>MCP stateless: why the Model Context Protocol dropped sessions</li>
+              </ul>
+              <span>Each article comes with a kit: a feed post, a video script, an eight-slide carousel and an SEO and GEO package. A verification table lists what still has to be checked at its source.</span>
+            </li>
+            <li class="dir"><code>/static/pipeline/</code><span>Three diagrams: the nine-step workflow, the pipeline in detail, and a map of the nine source zones the research draws on.</span></li>
+          </ul>
+        </div>
+      </div>
+      <div class="ex-foot"><code>test_notes.py</code> checks the research-notes step on its own: how notes are loaded, that flagged claims go to the gaps, that your facts come first, and which folders the app will read.</div>
+    </div>
+  </section>
+
+  <section id="diagrams">
+    <div class="sh">
+      <div>
+        <div class="label"><span class="rn">iii.</span>The diagrams</div>
+        <h2>The whole system on three sheets</h2>
+      </div>
+      <p>The same diagrams that go into the articles and carousels, at full resolution. Select one to open it at full size.</p>
+    </div>
+    <div class="plates">
+      <figure class="plate wide">
+        <a href="/static/pipeline/workflow-research-to-publish.png" target="_blank" rel="noopener"><img src="/static/pipeline/workflow-research-to-publish.png" width="1344" height="918" alt="The nine-step workflow: pick the topic, search check, research notes, fact packs, write and verify, package, hand check, publish in order, measure, then back to the next topic." loading="lazy"></a>
+        <figcaption><span class="pn">Plate 1</span><b>Research to publish.</b> The nine-step loop. Grey is Humanly in one command, blue is new in this version, red marks the search checkpoints.</figcaption>
+      </figure>
+      <figure class="plate tall">
+        <a href="/static/pipeline/pipeline-in-detail.png" target="_blank" rel="noopener"><img src="/static/pipeline/pipeline-in-detail.png" width="1344" height="2312" alt="The pipeline inside the command, from inputs through SERP research, the notes pack, the web fact pack, title to outline, write, humanize, level 1 check and answer block, the verify loop, meta, images and diagram, to the output files." loading="lazy"></a>
+        <figcaption><span class="pn">Plate 2</span><b>Inside the command.</b> The pipeline from your brief to the output files, with the notes pack (1.4) highlighted as new.</figcaption>
+      </figure>
+      <figure class="plate tall">
+        <a href="/static/pipeline/source-map.png" target="_blank" rel="noopener"><img src="/static/pipeline/source-map.png" width="1344" height="1258" alt="The nine source zones the research reads: courses and labs, standards bodies and specs, trade press, analysts, vendor engineering and earnings calls, conferences and talks, forums and communities, YouTube podcasts and newsletters, and search and demand." loading="lazy"></a>
+        <figcaption><span class="pn">Plate 3</span><b>Where the research reads.</b> Nine source zones. The two shaded zones are read by the topic radar every week; the rest are read on demand.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section id="deliver">
+    <div class="sh">
+      <div>
+        <div class="label"><span class="rn">iv.</span>What you receive</div>
+        <h2>One folder per article, ready to publish</h2>
+      </div>
+      <p>Every file the run produced is kept, including the evidence behind the article, so any claim can be checked later.</p>
+    </div>
+    <div class="files">
+      <div class="file"><code>article.html</code><p>The web version, with its search metadata, structured data and inline diagram.</p></div>
+      <div class="file"><code>article.docx</code><p>A Word file with images and the diagram embedded, for editors who work in Word.</p></div>
+      <div class="file"><code>article.md</code><p>Markdown for any CMS or static site.</p></div>
+      <div class="file"><code>_facts.json</code><p>The fact pack: every figure with its source URL and the quote it came from.</p></div>
+      <div class="file"><code>_meta.json</code><p>Title, description, slug and keyword.</p></div>
+      <div class="file"><code>review report</code><p>The audit's findings, the writer's replies and the judge's rulings.</p></div>
+    </div>
+  </section>
+
+  <section id="rules">
+    <div class="sh">
+      <div>
+        <div class="label"><span class="rn">v.</span>The house rules</div>
+        <h2>What the pipeline will not do</h2>
+      </div>
+      <p>These are enforced in the pipeline, not left to the model's judgement.</p>
+    </div>
+    <ol class="rules">
+      <li><span><b>State a figure it cannot source.</b> No price, date, version or statistic outside the fact pack.</span></li>
+      <li><span><b>Treat a flagged claim as fact.</b> Anything marked unverified is sent back to be checked.</span></li>
+      <li><span><b>Fill gaps from memory.</b> Where a number is missing, the article says so.</span></li>
+      <li><span><b>Mark its own homework.</b> The audit runs on a different model from the one that wrote the draft.</span></li>
+      <li><span><b>Apply a finding nobody agreed on.</b> Only accepted or upheld findings change the text.</span></li>
+      <li><span><b>Drop your voice.</b> Your take is written in first person, and the audit checks it is still there.</span></li>
+    </ol>
+  </section>
+
+  <footer>
+    <div class="word">Human<i>ly</i></div>
+    <p>An article you would put your name to: researched before it is written, argued over before it is finished.</p>
+  </footer>
+</div>
+
+</body>
+</html>
