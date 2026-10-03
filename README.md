@@ -48,6 +48,10 @@ Topic + Intent
 1. SERP Research      — pulls live Google results via SerpAPI, reads what's ranking
       │
       ▼
+1.4 Research notes    — optional (--notes): your own notes become the first fact
+      │                 pack, built from the notes alone; anything they flag as
+      │                 unverified goes to the gaps, not the facts
+      ▼
 1.5 Fact pack         — opens the primary pages (vendor pricing, docs, exam guides,
       │                 first-party reports) with Claude's web search + fetch tools,
       │                 and pins every specific to a URL and a verbatim quote. The
@@ -191,6 +195,7 @@ python seo_writer.py "Semantic Caching for LLMs" --output-dir ./articles --editi
 | `--no-verify` | Skip the step 6.5 audit — faster and cheaper, but nothing checks the article's claims or structure before it hits disk |
 | `--verify-rounds` | Maximum audit/fix rounds before accepting the article (default: `2`) |
 | `--take` | Your own positions and experiences, one per line (or a path to a text file). Each is written into the article in first person and the auditor checks it survived. The run warns loudly when this is missing, because it is the single biggest reason an article reads as generic |
+| `--notes` | Your own research notes: markdown files, or a folder of them. They become the first fact pack, built from the notes alone, and the Step 1.5 web pass is merged in after. See *Write from your own research notes* below |
 | `--no-facts` | Skip the Step 1.5 fact pack. The writer is then forbidden from stating any price, date, version or statistic |
 | `--radar` | Don't write; find out what to write. See *Topic radar* below |
 | `--radar-days` | How far back the radar looks (default `14`) |
@@ -232,6 +237,34 @@ prompt (it was built and never sent), and the sample articles in
 they were; the code did not do it).
 
 ---
+
+## Write from your own research notes
+
+The fact pack opens the web for you. When you have already done the reading,
+a report, a folder of dated notes with a URL on every claim, a competitor
+teardown, hand it over and the pipeline writes from that instead of from
+scratch:
+
+```bash
+python seo_writer.py "KV cache offload explained" \
+  --intent "the agent's working memory is now a network hop; explain the tiers" \
+  --notes research/notes \
+  --take "I looked for an independent benchmark of any offload product and found none."
+```
+
+`--notes` takes files or a folder (every `.md` in it). Step 1.4 builds a fact
+pack from the notes alone: every figure with the URL the notes give for it and
+the sentence they use, nothing from memory. A claim the notes mark `[VERIFY]`,
+"secondary source", "secondhand" or "unverified" is routed to the gaps, so the
+writer is told to check it rather than state it. The Step 1.5 web pass still
+runs and is merged in after the notes' facts; add `--no-facts` to write from
+the notes only. The first part of each note also sits above the pack as a
+digest, so the outline follows the notes' angle, not the web's.
+
+From the API, a run request may carry `"notes": ["notes", "my-report.md"]`,
+names resolved under `research/` (or the output folder); anything outside
+those is dropped. `research/` is where the notes live in this repo, with the
+finished pieces under `articles/`.
 
 ## Topic radar: what should I write?
 

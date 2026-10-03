@@ -1770,6 +1770,149 @@ def _clean_fact_pack(pack: dict) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Step 1.4: Research notes - the author's own sourced notes as a fact pack
+# ---------------------------------------------------------------------------
+#
+# A radar brief is one page the app wrote itself. Research notes are the
+# author's own: a ranked report, a set of dated notes with a URL on every
+# claim, a competitor teardown. They go in as a second fact pack, built from
+# the notes alone (nothing from memory), so the writer may use their figures
+# under the same citation rules. A claim the notes flag as unverified or
+# secondhand goes to "gaps", not "facts": the writer is then told to check it,
+# not to state it.
+
+NOTES_MAX_CHARS = 180_000   # about 45K tokens of notes in one call
+NOTES_FLAGS = re.compile(
+    r"\[VERIFY[^\]]*\]|\bsecondary source\b|\bsecondhand\b|\bunverified\b"
+    r"|\bnot (?:yet )?(?:confirmed|verified)\b",
+    re.I,
+)
+
+
+def load_research_notes(paths) -> dict:
+    """Read the notes files, or every .md in a folder. Each file is headed with
+    its name so a fact can say which note it came from, and the first part of
+    each file is kept as a digest the outliner sees above the pack."""
+    files = []
+    for p in paths or []:
+        p = Path(p)
+        if p.is_dir():
+            files += sorted(q for q in p.rglob("*.md") if q.is_file())
+        elif p.is_file():
+            files.append(p)
+        else:
+            print(f"  WARNING: research notes not found: {p}")
+    chunks, digest, total = [], [], 0
+    for f in files:
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            print(f"  WARNING: could not read {f}: {e}")
+            continue
+        head = f"\n\n===== NOTES FILE: {f.name} =====\n"
+        room = NOTES_MAX_CHARS - total - len(head)
+        if room <= 0:
+            print(f"  NOTE: research notes capped at {NOTES_MAX_CHARS:,} characters; {f.name} left out.")
+            break
+        if len(text) > room:
+            print(f"  NOTE: research notes capped at {NOTES_MAX_CHARS:,} characters; {f.name} truncated.")
+            text = text[:room]
+        chunks.append(head + text)
+        total += len(head) + len(text)
+        body = re.sub(r"\s+", " ", text).strip()
+        digest.append(f"- {f.name}: {body[:1200]}")
+    text = "".join(chunks)
+    return {
+        "files": [str(f) for f in files],
+        "text": text,
+        "digest": "\n".join(digest),
+        "flagged": len(NOTES_FLAGS.findall(text)),
+    }
+
+
+def research_notes_text(research: dict) -> str:
+    """The notes' digest as the writer, outliner and auditor see it, above the pack."""
+    notes = research.get("notes") or {}
+    if not notes.get("digest"):
+        return ""
+    return (f"\nRESEARCH NOTES (the author's own, {len(notes.get('files') or [])} file(s). "
+            f"The facts below marked 'from the author's notes' were taken from them, "
+            f"and their angle is the article's angle.)\n{notes['digest']}\n")
+
+
+def _fact_pack_via_notes(brief: str, notes: dict) -> dict:
+    """One Claude call, no tools: the pack is built from the notes alone."""
+    prompt = f"""You are a research assistant building the evidence pack for an article
+from the author's own research notes.
+
+{brief}
+
+THE NOTES
+{notes.get('text', '')}
+
+Do this:
+1. Read the notes. They were compiled from pages a researcher opened, and most
+   claims carry the URL they came from and a date.
+2. Extract every specific figure, date, version, named product, standard or
+   quotation a reader of this article would want, with the URL the notes give
+   for it and the sentence the notes use, verbatim.
+3. Anything the notes mark [VERIFY], "secondary source", "secondhand",
+   "unverified", "not confirmed" or "single source" is NOT a fact. Put it in
+   "gaps" as: "<the claim> - flagged in the notes; confirm at <url> before use".
+   A vendor's own figure with a primary URL may be a fact if its "claim" says
+   it is a vendor claim.
+4. Prefer the newest dated item when two conflict, and say so in "claim".
+
+Rules:
+- Only what the notes state. Nothing from memory, and nothing about the topic
+  that the notes do not cover.
+- A fact with no URL in the notes goes to "gaps", not "facts".
+- Exact values as the notes give them.
+- Up to {FACT_PACK_MAX_FACTS} facts; pick the ones closest to the topic and intent.
+
+Return ONLY valid JSON in exactly this shape:
+{FACT_PACK_SCHEMA}"""
+    pack = extract_json(call_claude(prompt, max_tokens=12000))
+    pack["method"] = "research-notes"
+    return pack
+
+
+def build_notes_pack(title: str, keywords: str, intent: str, research: dict):
+    """The notes as a fact pack, or None if the call failed (the run goes on)."""
+    notes = research.get("notes") or {}
+    log("STEP 1.4", f"Fact pack from your research notes ({len(notes.get('files') or [])} file(s), "
+        f"{len(notes.get('text') or ''):,} characters, {notes.get('flagged', 0)} flagged claim(s))")
+    brief = _fact_pack_brief(title, keywords, intent, research)
+    try:
+        pack = _fact_pack_via_notes(brief, notes)
+    except Exception as e:
+        print(f"  Could not build a pack from the notes ({str(e)[:120]}); continuing without it.")
+        return None
+    pack = _clean_fact_pack(pack)
+    for f in pack["facts"]:
+        f["origin"] = "research-notes"
+    print(f"  Notes pack: {len(pack['facts'])} fact(s) from {len(pack['primary_sources'])} URL(s); "
+          f"{len(pack['gaps'])} flagged or unsourced claim(s) routed to gaps.")
+    for f in pack["facts"][:8]:
+        print(f"    {f['id']} {f.get('kind','?'):9} {f['value'][:28]:28} {f.get('claim','')[:60]}")
+    return pack
+
+
+def merge_fact_packs(first: dict, second: dict) -> dict:
+    """Two packs as one. `first` wins on duplicates (same value and URL) and on
+    the cap, which is why the author's notes go first."""
+    methods = [m for m in (first.get("method"), second.get("method")) if m and m != "skipped"]
+    merged = {
+        "facts": list(first.get("facts") or []) + list(second.get("facts") or []),
+        "primary_sources": list(dict.fromkeys(
+            list(first.get("primary_sources") or []) + list(second.get("primary_sources") or []))),
+        "gaps": list(dict.fromkeys(list(first.get("gaps") or []) + list(second.get("gaps") or []))),
+        "method": "+".join(methods) or "none",
+    }
+    return _clean_fact_pack(merged)
+
+
 def build_fact_pack(title: str, keywords: str, intent: str, research: dict) -> dict:
     log("STEP 1.5", "Building the fact pack (opening primary sources)")
     brief = _fact_pack_brief(title, keywords, intent, research)
@@ -1797,8 +1940,9 @@ def fact_pack_text(research: dict) -> str:
     """The pack as the writer, outliner and auditor see it."""
     pack = research.get("fact_pack") or {}
     facts = pack.get("facts") or []
+    notes_text = research_notes_text(research)
     if not facts:
-        return """
+        return notes_text + """
 FACT PACK
 No verified facts were collected for this article. Therefore: state no price,
 date, version, count or statistic as fact. Where a figure is needed, say plainly
@@ -1808,13 +1952,14 @@ out. Do not fill the gap from memory.
     lines = []
     for f in facts:
         as_of = f.get("as_of") or "undated"
+        origin = " | from the author's notes" if f.get("origin") == "research-notes" else ""
         lines.append(f"[{f['id']}] {f.get('claim','')} | value: {f['value']} | "
-                     f"as of {as_of} | {f['source_url']}\n"
+                     f"as of {as_of} | {f['source_url']}{origin}\n"
                      f"     quote: \"{str(f.get('quote',''))[:200]}\"")
     gaps = pack.get("gaps") or []
     gap_text = ("\nKNOWN GAPS (no opened source states these - do not invent them):\n"
                 + "\n".join(f"- {g}" for g in gaps)) if gaps else ""
-    return f"""
+    return notes_text + f"""
 FACT PACK (the only permitted source of specifics)
 {chr(10).join(lines)}
 {gap_text}
@@ -1854,6 +1999,7 @@ RADAR_PODCASTS = [
     "Latent Space", "Lex Fridman Podcast", "No Priors", "The a16z Podcast",
     "Practical AI", "Dwarkesh Podcast", "The Cognitive Revolution", "AI Engineer",
     "How I AI", "Training Data (Sequoia)",
+    "Packet Pushers Heavy Networking",  # AI networking pillar
 ]
 # Channel name -> YouTube handle. The radar reads these channels' recent
 # uploads directly; the names also steer the web scan.
@@ -1866,6 +2012,12 @@ RADAR_YOUTUBE_HANDLES = {
     "Ed Donner": "Edward.Donner", "Aishwarya Srinivasan": "aishwaryasrinivasan",
     "Y Combinator": "ycombinator", "Priyanka Vergadia": "pvergadia",
     "DeepLearning.AI": "Deeplearningai",
+    # AI networking pillar (added 3 Oct 2026): the handles were checked to
+    # resolve; drop any that crowd out the agent-builder channels.
+    "Stanford Online": "stanfordonline", "Claude": "claude",
+    "IBM Technology": "IBMTechnology", "NVIDIA Developer": "NVIDIADeveloper",
+    "Open Compute Project": "opencompute", "David Bombal": "davidbombal",
+    "NetworkChuck": "NetworkChuck",
 }
 RADAR_YOUTUBE_CHANNELS = list(RADAR_YOUTUBE_HANDLES)
 # A channel with a million views a video would otherwise crowd out a smaller
@@ -1880,9 +2032,13 @@ RADAR_VOICES = [
     "Simon Willison", "Andrej Karpathy", "Ethan Mollick", "swyx", "Hamel Husain",
     "Jeremy Howard", "Nathan Lambert", "Sebastian Raschka", "Andrew Ng's The Batch",
     "Ben's Bites", "The Rundown AI", "Import AI",
+    # AI networking pillar
+    "The Next Platform", "HPCwire", "SemiAnalysis", "Dell'Oro Group",
 ]
-RADAR_SUBREDDITS = ["LocalLLaMA", "MachineLearning", "artificial", "ClaudeAI", "LangChain"]
-RADAR_HN_QUERIES = ["AI", "LLM", "agents", "GPT", "Claude", "RAG", "open source model"]
+RADAR_SUBREDDITS = ["LocalLLaMA", "MachineLearning", "artificial", "ClaudeAI", "LangChain",
+                    "networking", "HPC"]  # the last two: AI networking pillar
+RADAR_HN_QUERIES = ["AI", "LLM", "agents", "GPT", "Claude", "RAG", "open source model",
+                    "InfiniBand", "Ultra Ethernet", "NVLink", "MCP", "data center networking"]
 REDDIT_PAUSE_SECS = 6.0
 _RADAR_UA = {"User-Agent": "humanly-radar/1.0 (topic research; +https://imrantauqir.com)"}
 
@@ -5665,7 +5821,8 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
         verify: bool = True, verify_rounds: int = 2, words: str = "default",
         linkedin: bool = False, video: bool = False, thumbnail: bool = False,
         take: str = "", facts: bool = True, diagram: bool = True,
-        voiceover: bool = False, mp4: bool = False, from_theme: str = ""):
+        voiceover: bool = False, mp4: bool = False, from_theme: str = "",
+        notes=None):
     profile = length_profile(words)
     take = (take or "").strip()
     if not take:
@@ -5700,12 +5857,23 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
     research["voice_profile"] = build_voice_profile(research["style_samples"])
     research["internal_links"] = library_links(output_dir, exclude_title=title)
 
+    # Step 1.4: the author's own research notes, if any, become the first fact pack.
+    notes_pack = None
+    if notes:
+        research["notes"] = load_research_notes(notes)
+        if research["notes"]["text"].strip():
+            notes_pack = build_notes_pack(title, keywords, intent, research)
+
     # Step 1.5: Fact pack - open the primary pages and pin every specific to a URL.
     if facts:
         research["fact_pack"] = build_fact_pack(title, keywords, intent, research)
     else:
         log("STEP 1.5", "Fact pack skipped (--no-facts)")
         research["fact_pack"] = {"facts": [], "primary_sources": [], "gaps": [], "method": "skipped"}
+    if notes_pack:
+        research["fact_pack"] = merge_fact_packs(notes_pack, research["fact_pack"])
+        print(f"  Fact pack after merge: {len(research['fact_pack']['facts'])} fact(s), "
+              f"{len(research['fact_pack']['gaps'])} gap(s); the notes' facts come first.")
 
     # Step 2: Refine Title
     refined_title = refine_title(title, keywords, research, intent=intent)
@@ -5982,6 +6150,20 @@ def main():
         ),
     )
     parser.add_argument(
+        "--notes",
+        nargs="+",
+        metavar="FILE",
+        default=None,
+        help=(
+            "Your own research notes: markdown files, or a folder of them. They become "
+            "the first fact pack, built from the notes alone, with every figure pinned to "
+            "the URL the notes give and anything flagged [VERIFY] or secondhand routed to "
+            "the gaps, so the writer checks it rather than states it. The Step 1.5 web "
+            "pass still runs and is merged in after; add --no-facts to write from the "
+            "notes only."
+        ),
+    )
+    parser.add_argument(
         "--no-facts",
         action="store_true",
         help=(
@@ -6177,6 +6359,7 @@ def main():
             facts=not args.no_facts,
             diagram=not args.no_diagram,
             from_theme=args.from_theme,
+            notes=args.notes,
         )
     except ClaudeError as e:
         # Flattened to one line so the web UI, which reads the log line by line,

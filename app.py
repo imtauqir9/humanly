@@ -35,6 +35,30 @@ from flask import (Flask, Response, jsonify, redirect, render_template, request,
 app = Flask(__name__)
 BASE_DIR = Path(__file__).parent
 OUTPUT_DIR = BASE_DIR / "output"
+RESEARCH_DIR = BASE_DIR / "research"
+
+
+def _notes_paths(raw) -> list:
+    """`notes` in a run request: file or folder names under research/ or the
+    output folder, passed to the pipeline as --notes. Anything that resolves
+    outside those two folders, or does not exist, is dropped."""
+    if isinstance(raw, str):
+        raw = [raw]
+    found = []
+    for item in raw or []:
+        name = str(item).strip()
+        if not name:
+            continue
+        for base in (RESEARCH_DIR, OUTPUT_DIR):
+            candidate = (base / name).resolve()
+            try:
+                candidate.relative_to(base.resolve())
+            except ValueError:
+                continue
+            if candidate.exists():
+                found.append(str(candidate))
+                break
+    return found[:12]
 
 
 # ---------------------------------------------------------------------------
@@ -871,6 +895,7 @@ def api_start():
     topic = (data.get("topic") or "").strip()
     intent = (data.get("intent") or "").strip()
     take = (data.get("take") or "").strip()[:4000]
+    notes = _notes_paths(data.get("notes"))
     from_theme = (data.get("from_theme") or "").strip()[:140]
     callback_url = (data.get("callback_url") or "").strip()
     external_id = str(data.get("external_id") or "")[:200]
@@ -903,6 +928,8 @@ def api_start():
         cmd += ["--intent", intent]
     if take:
         cmd += ["--take", take]
+    if notes:
+        cmd += ["--notes", *notes]
     if from_theme:
         cmd += ["--from-theme", from_theme]
     if linkedin:
