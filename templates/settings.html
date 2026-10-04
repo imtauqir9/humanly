@@ -16,6 +16,12 @@
   .snippet { font-family: var(--mono); font-size: 12px; background: var(--sunken); border-radius: var(--radius-sm); padding: 10px 12px; color: var(--ink-2);
              overflow-x: auto; white-space: pre; }
   .sub-links { display: flex; gap: 18px; margin-top: 4px; }
+  .site-facts { display: grid; grid-template-columns: repeat(4, 1fr); border-bottom: 1px solid var(--line); margin-bottom: 14px; }
+  .site-facts div { padding: 2px 0 14px; }
+  .site-facts .n { display: block; font-family: var(--serif); font-size: 32px; font-weight: 350; letter-spacing: -.02em; line-height: 1.1;
+                   font-variant-numeric: lining-nums tabular-nums; font-variation-settings: "opsz" 144; }
+  .site-facts .l { font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+  @media (max-width: 640px) { .site-facts { grid-template-columns: repeat(2, 1fr); } }
   @media (max-width: 640px) { main { padding: 24px 14px 48px; } .sheet { padding: 18px 16px 4px; } }
 </style>
 </head>
@@ -106,7 +112,30 @@
     <div class="actions"><button type="submit" class="btn btn-primary">Save settings</button></div>
   </form>
 
-  <div class="section-label"><span class="roman">iv.</span><h2>People</h2><span class="sub">{{ members|length }} in this workspace</span></div>
+  <div class="section-label"><span class="roman">iv.</span><h2>Their website</h2><span class="sub">read before writing for them</span></div>
+  <div class="sheet card">
+    {% if site.pages %}
+      <div class="site-facts">
+        <div><span class="n">{{ '{:,}'.format(site.pages) }}</span><span class="l">pages</span></div>
+        <div><span class="n">{{ site.article }}</span><span class="l">articles</span></div>
+        <div><span class="n">{{ site.samples_files|length }}</span><span class="l">voice samples</span></div>
+        <div><span class="n">{{ site.notes_files|length }}</span><span class="l">product notes</span></div>
+      </div>
+      <p class="hint" style="margin-bottom:14px">Read {{ site.at[:10] }} from the {{ site.source }} of <span class="mono">{{ site.root }}</span>.
+        Their articles teach the writer their voice, their product pages become the facts it may state, and every page is a candidate internal link.
+        {% if site.has_report %}<a href="/output/intake_report.md">What was found</a>.{% endif %}</p>
+    {% else %}
+      <p class="hint" style="margin-bottom:14px">Not read yet. Reading the site takes their voice from their own articles, their product facts from their own pages,
+        and lists every page for internal links and for spotting topics they already cover.</p>
+    {% endif %}
+    <form class="inline-form" method="post" action="/settings" style="padding-bottom:18px">
+      <input type="hidden" name="action" value="intake">
+      <input type="text" name="url" value="{{ ws.settings.site_url or '' }}" placeholder="https://www.example.com" style="flex:1;min-width:220px" aria-label="Website to read">
+      <button type="submit" class="btn btn-dark">{% if site.pages %}Read it again{% else %}Read their site{% endif %}</button>
+    </form>
+  </div>
+
+  <div class="section-label"><span class="roman">v.</span><h2>People</h2><span class="sub">{{ members|length }} in this workspace</span></div>
   <div class="table-wrap">
     <table>
       <thead><tr><th>Person</th><th>Role</th><th></th></tr></thead>
@@ -159,7 +188,34 @@
       <b>Writer</b> writes and sends for review. <b>Client reviewer</b> reads, comments, approves or sends back; never spends credits.</div>
   </form>
 
-  <div class="section-label"><span class="roman">v.</span><h2>Feed and records</h2></div>
+  <div class="section-label"><span class="roman">vi.</span><h2>Recent jobs</h2><span class="sub">queued work survives a restart</span></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>What</th><th>Who</th><th>Started</th><th class="num">Took</th><th>State</th><th></th></tr></thead>
+      <tbody>
+      {% for j in jobs %}
+        <tr>
+          <td>{{ j.label }}{% if j.error %}<div class="hint" style="color:var(--bad)">{{ j.error[:160] }}</div>{% endif %}</td>
+          <td class="mono" style="font-size:12px;color:var(--muted)">{{ j.created_by }}</td>
+          <td class="mono" style="font-size:12px;color:var(--muted);white-space:nowrap">{{ (j.started_at or j.created_at)[:16].replace('T', ' ') }}</td>
+          <td class="num">{% if j.started_at and j.finished_at %}{{ j.minutes }}{% else %}—{% endif %}</td>
+          <td><span class="status-stamp {% if j.status == 'done' %}s-approved{% elif j.status in ('failed', 'interrupted') %}s-changes{% elif j.status == 'running' %}s-in_review{% endif %}">{{ j.status }}{% if j.status == 'queued' and j.ahead %} · {{ j.ahead }} ahead{% endif %}</span></td>
+          <td style="text-align:right">{% if j.status in ('failed', 'interrupted') %}<button type="button" class="btn btn-quiet sm" onclick="retryJob('{{ j.id }}', this)">Retry</button>{% endif %}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="6" class="muted">No jobs yet.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <script>
+    function retryJob(id, btn) {
+      btn.disabled = true;
+      fetch('/api/jobs/' + id + '/retry', {method: 'POST'}).then(function () { location.reload(); });
+    }
+  </script>
+
+  <div class="section-label"><span class="roman">vii.</span><h2>Feed and records</h2></div>
   <div class="sheet card">
     <div class="field">
       <label>Public feed</label>

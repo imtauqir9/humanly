@@ -539,8 +539,12 @@ RECENT_ON_HOME = 5
 @app.route("/")
 def index():
     articles = list_articles()
+    has_site_notes = g.ws["slug"] != st.DEFAULT_WORKSPACE and notes_dir().exists() \
+        and any(notes_dir().glob("*.md"))
     return render_template("index.html", articles=articles[:RECENT_ON_HOME],
-                           total_articles=len(articles))
+                           total_articles=len(articles), has_site_notes=has_site_notes,
+                           has_site_pages=(ws_dir() / "site_pages.json").exists(),
+                           estimates=job_estimates(g.ws["id"]))
 
 
 @app.route("/pipeline")
@@ -680,6 +684,20 @@ def settings_page():
                 s.update_workspace(g.ws["slug"], name=name or None, settings=settings)
                 audit("settings.updated", target=g.ws["name"], detail={"fields": sorted(settings)})
                 return _back("settings_page", msg="Settings saved.")
+            if action == "intake":
+                url = (request.form.get("url") or g.ws["settings"].get("site_url") or "").strip()
+                if not url:
+                    raise ValueError("Enter the client's website first.")
+                if not re.match(r"^https?://", url):
+                    url = "https://" + url
+                if not g.ws["settings"].get("site_url"):
+                    s.update_workspace(g.ws["slug"], settings={"site_url": url.rstrip("/")})
+                cmd = [sys.executable, str(BASE_DIR / "site_intake.py"), url,
+                       "--out", str(ws_dir())]
+                job_id = _spawn(cmd, kind="intake", label=f"Read {url}")
+                audit("intake.started", target=url, detail={"job_id": job_id})
+                return _back("settings_page", msg="Reading their site. It takes a few minutes; "
+                                                  "the jobs list below shows when it is done.")
             if action == "add_member":
                 username = (request.form.get("username") or "").strip()
                 role = request.form.get("role") or "writer"
@@ -714,7 +732,67 @@ def settings_page():
     return render_template("settings.html", ws=g.ws, members=s.members(g.ws["id"]),
                            roles=st.ROLES, msg=request.args.get("msg"),
                            err=request.args.get("err"),
-                           ident=ws_identity(g.ws), feed_query=_ws_query(g.ws))
+                           ident=ws_identity(g.ws), feed_query=_ws_query(g.ws),
+                           site=site_summary(g.ws), jobs=[_job_view(j) for j in s.jobs(g.ws["id"], limit=12)])
+
+
+def site_summary(ws: dict) -> dict:
+    """What site intake found for this workspace, read back from its files."""
+    out = ws_dir(ws)
+    try:
+        summary = json.loads((out / "intake.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        summary = {}
+    summary["samples_files"] = sorted(p.name for p in (out / "samples").glob("*.md")) \
+        if (out / "samples").exists() else []
+    summary["notes_files"] = sorted(p.name for p in (out / "notes").glob("*.md")) \
+        if (out / "notes").exists() else []
+    summary["has_report"] = (out / "intake_report.md").exists()
+    return summary
+
+
+def _site_pages(ws: dict) -> list[dict]:
+    try:
+        pages = json.loads((ws_dir(ws) / "site_pages.json").read_text(encoding="utf-8"))
+        return pages if isinstance(pages, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+_OVERLAP_STOP = {"the", "a", "an", "and", "or", "of", "to", "for", "in", "on", "with", "how", "what",
+                 "why", "is", "are", "your", "you", "vs", "guide", "best", "from", "by", "it", "its"}
+
+
+def _topic_words(text: str) -> set:
+    return {w for w in re.findall(r"[a-z0-9]+", (text or "").lower())
+            if len(w) > 2 and w not in _OVERLAP_STOP}
+
+
+def topic_overlap(ws: dict, topic: str, limit: int = 3) -> list[dict]:
+    """Pages on the client's site, or articles already written here, that cover
+    much the same ground. A second page on one topic competes with the first."""
+    want = _topic_words(topic)
+    if len(want) < 2:
+        return []
+    candidates = [{"title": p.get("title") or "", "url": p.get("url") or "", "where": "their site"}
+                  for p in _site_pages(ws) if p.get("kind") in ("article", "product", None)]
+    candidates += [{"title": a["title"], "url": f"/output/{a['html_file']}" if a.get("html_file") else "",
+                    "where": "written here"} for a in list_articles(ws_dir(ws))]
+    scored = []
+    for c in candidates:
+        have = _topic_words(c["title"])
+        if not have:
+            continue
+        score = len(want & have) / len(want | have)
+        if score >= 0.4:
+            scored.append({**c, "score": round(score, 2)})
+    scored.sort(key=lambda c: -c["score"])
+    return scored[:limit]
+
+
+@app.route("/api/site/overlap")
+def api_site_overlap():
+    return jsonify({"matches": topic_overlap(g.ws, request.args.get("topic", ""))})
 
 
 @app.route("/settings/audit")
@@ -1312,6 +1390,9 @@ def api_start():
     intent = (data.get("intent") or "").strip()
     take = (data.get("take") or "").strip()[:4000]
     notes = _notes_paths(data.get("notes"))
+    if not notes and data.get("use_site_notes", True) and g.ws["slug"] != st.DEFAULT_WORKSPACE \
+            and any(notes_dir().glob("*.md")):
+        notes = [str(notes_dir())]
     resolve_gaps = bool(data.get("resolve_gaps"))
     from_theme = (data.get("from_theme") or "").strip()[:140]
     callback_url = (data.get("callback_url") or "").strip()
@@ -1617,6 +1698,12 @@ def _job_view(j: dict) -> dict:
                                   "started_at", "finished_at", "error", "result")}
     if j["status"] == "queued":
         view["ahead"] = store().queue_position(j["id"])
+    try:
+        secs = (datetime.fromisoformat(j["finished_at"])
+                - datetime.fromisoformat(j["started_at"])).total_seconds()
+        view["minutes"] = f"{secs / 60:.1f} min"
+    except (TypeError, ValueError):
+        view["minutes"] = None
     return view
 
 

@@ -40,6 +40,10 @@
   .counter.warn { color: var(--warn); }
   .row-2 { display: grid; grid-template-columns: 1fr 96px; gap: 12px; }
   .row-3 { display: grid; grid-template-columns: 1.25fr 1fr 84px; gap: 12px; }
+  .overlap { display: none; gap: 8px; margin-top: 8px; font-size: 13px; line-height: 1.5; color: var(--warn); background: var(--warn-soft);
+             border: 1px solid color-mix(in srgb, var(--warn) 28%, transparent); border-radius: var(--radius-sm); padding: 9px 12px; }
+  .overlap.show { display: flex; }
+  .overlap a { color: inherit; text-decoration: underline; background: none; }
   .from-theme { display: none; align-items: baseline; gap: 6px; font-size: 13px; color: var(--accent); min-width: 0; }
   .from-theme::before { content: "¶"; font-family: var(--serif); font-size: 15px; }
   .from-theme.visible { display: flex; }
@@ -239,6 +243,7 @@
             <div>
               <label for="topic">Article topic</label>
               <input type="text" id="topic" name="topic" placeholder="e.g. ReAct agents explained" required>
+              <div class="overlap" id="overlapNote" role="status"></div>
             </div>
             <div>
               <label for="intent">Intent <span class="opt-note">— what the reader should walk away with, and who they are</span></label>
@@ -284,13 +289,14 @@
               <label class="opt"><input type="checkbox" id="voiceover"><span>Voiceover in my voice<small>ElevenLabs clone, mp3</small></span></label>
               <label class="opt"><input type="checkbox" id="mp4"><span>Finished video<small>slides + your voice + captions · 16:9 and 9:16</small></span></label>
               <label class="opt"><input type="checkbox" id="thumbnail"><span>LinkedIn share card<small>1200×627, save as PNG</small></span></label>
+              {% if has_site_notes %}<label class="opt"><input type="checkbox" id="siteNotes" checked><span>Facts from their site<small>their product pages, as research notes</small></span></label>{% endif %}
             </div>
             <p class="hint">Every article also gets the fact pack, the layered structure, a diagram the app draws, and the three-agent audit.</p>
           </div>
 
           <div class="step submit-row">
             <button type="submit" id="submitBtn" class="btn btn-primary block">Generate article</button>
-            <p class="hint">or press <kbd>Ctrl</kbd> + <kbd>Enter</kbd> anywhere in the form</p>
+            <p class="hint">or press <kbd>Ctrl</kbd> + <kbd>Enter</kbd> anywhere in the form{% if estimates.article %} · a run here usually takes about {{ estimates.article.median_minutes|round|int }} min{% endif %}</p>
           </div>
         </form>
       </div>
@@ -554,6 +560,33 @@ document.getElementById('copyLog').addEventListener('click', async (ev) => {
   catch { btn.textContent = 'Copy failed'; }
   setTimeout(() => { btn.textContent = 'Copy'; }, 1400);
 });
+
+/* ---- has this been written already? ------------------------------------ */
+(function () {
+  const topicEl = document.getElementById('topic');
+  const note = document.getElementById('overlapNote');
+  if (!topicEl || !note) return;
+  let timer = null, last = '';
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+  topicEl.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      const topic = topicEl.value.trim();
+      if (topic === last) return;
+      last = topic;
+      if (topic.split(/\s+/).length < 3) { note.classList.remove('show'); return; }
+      try {
+        const r = await fetch('/api/site/overlap?topic=' + encodeURIComponent(topic));
+        const d = await r.json();
+        const m = (d.matches || [])[0];
+        if (!m) { note.classList.remove('show'); return; }
+        const link = m.url ? `<a href="${esc(m.url)}" target="_blank" rel="noopener">${esc(m.title)}</a>` : esc(m.title);
+        note.innerHTML = `<span>⚠</span><span>Close to ${link} (${esc(m.where)}). A second page on the same topic competes with the first; consider a different angle or a refresh.</span>`;
+        note.classList.add('show');
+      } catch (e) { note.classList.remove('show'); }
+    }, 600);
+  });
+})();
 
 /* ---- topic radar ------------------------------------------------------ */
 const radarBtn = document.getElementById('radarBtn');
@@ -835,6 +868,8 @@ form.addEventListener('submit', async (e) => {
   const video    = document.getElementById('video').checked || document.getElementById('voiceover').checked || mp4;
   const voiceover = document.getElementById('voiceover').checked || mp4;
   const thumbnail = document.getElementById('thumbnail').checked;
+  const siteNotesBox = document.getElementById('siteNotes');
+  const use_site_notes = siteNotesBox ? siteNotesBox.checked : true;
 
   if (!topic) return;
 
@@ -858,7 +893,7 @@ form.addEventListener('submit', async (e) => {
     const startResp = await fetch('/api/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ topic, intent: intent || keywords, take, edition, words, linkedin, video, voiceover, mp4, thumbnail, from_theme }),
+      body: JSON.stringify({ topic, intent: intent || keywords, take, edition, words, linkedin, video, voiceover, mp4, thumbnail, from_theme, use_site_notes }),
     });
     const startData = await startResp.json();
     if (startData.error) throw new Error(startData.error);
