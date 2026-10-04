@@ -916,7 +916,12 @@ def _security_headers(resp):
     if os.environ.get("FLY_APP_NAME"):
         resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
     resp.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-    if request.path.startswith(("/output/", "/dl/")):
+    # Only for what can carry script (HTML, SVG, XML). A sandboxed document has no
+    # origin, so a video or image opened under it would be fetched without the
+    # session cookie and come back empty.
+    active = resp.mimetype in ("text/html", "image/svg+xml", "application/xhtml+xml",
+                               "text/xml", "application/xml")
+    if request.path.startswith(("/output/", "/dl/")) and active:
         resp.headers["Content-Security-Policy"] = (
             "sandbox; default-src 'none'; img-src * data: blob:; media-src * data: blob:; "
             "style-src 'unsafe-inline' *; font-src * data:")

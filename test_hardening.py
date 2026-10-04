@@ -46,6 +46,11 @@ def test_generated_files_are_served_in_a_sandbox():
             csp = c.get(f"/output/{name}").headers.get("Content-Security-Policy", "")
             assert csp.startswith("sandbox") and "default-src 'none'" in csp, (name, csp)
         assert "sandbox" not in c.get("/library").headers.get("Content-Security-Policy", "")
+        # A video or image must play: a sandboxed page would fetch it without the login.
+        (Path(d) / "post_avatar.mp4").write_bytes(b"\x00\x00\x00 ftypisom")
+        (Path(d) / "post_diagram_1.png").write_bytes(b"\x89PNG")
+        for name in ("post_avatar.mp4", "post_diagram_1.png"):
+            assert "Content-Security-Policy" not in c.get(f"/output/{name}").headers, name
 
 
 def test_a_callback_to_a_private_address_is_never_sent(monkeypatch):
