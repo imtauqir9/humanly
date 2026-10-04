@@ -18,7 +18,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # App source
-COPY seo_writer.py app.py ./
+COPY seo_writer.py app.py store.py ./
 COPY templates ./templates
 COPY static ./static
 # The writer's style exemplars and the source of the voice profile. Without
@@ -31,8 +31,8 @@ RUN mkdir -p /app/output
 
 EXPOSE 8080
 
-# 1 worker only: the job store is in-process memory, so a request that starts a
-# job and the later SSE stream request must hit the same worker.
-# gthread + timeout 0 keeps long Server-Sent Events streams alive during generation.
-CMD ["gunicorn", "--workers", "1", "--threads", "8", "--worker-class", "gthread", \
+# 1 worker only: the job runner threads live in this process, and SQLite on one
+# volume is the record. gthread + timeout 0 keeps long Server-Sent Events streams
+# alive during generation; each open stream holds a thread, hence 16.
+CMD ["gunicorn", "--workers", "1", "--threads", "16", "--worker-class", "gthread", \
      "--timeout", "0", "--bind", "0.0.0.0:8080", "app:app"]

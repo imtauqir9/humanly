@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+{% include "_head.html" %}
+<title>Audit log — Humanly</title>
+<style>
+{% include "_theme.css" %}
+  main { max-width: 1100px; margin: 0 auto; padding: 44px 28px 72px; }
+  td.when, td.who, td.ip { font-family: var(--mono); font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+  td.action { font-family: var(--mono); font-size: 12.5px; color: var(--ink); white-space: nowrap; }
+  td.detail { font-size: 13px; color: var(--ink-2); }
+  td.detail .kv { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+  @media (max-width: 640px) { main { padding: 24px 14px 48px; } td.ip { display: none; } }
+</style>
+</head>
+<body>
+{% set active = 'settings' %}
+{% include "_header.html" %}
+<main>
+  <div class="page-title">
+    <h1>Audit log</h1>
+    <span class="sub">{% if everything %}Every workspace{% else %}{{ current_ws.name }}{% endif %}, newest first · {{ rows|length }} entries</span>
+  </div>
+  {% if not rows %}
+    <div class="empty-state"><span class="empty-icon">§</span>Nothing recorded yet.</div>
+  {% else %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>When (UTC)</th><th>Who</th><th>What</th><th>Detail</th>{% if everything %}<th>Workspace</th>{% endif %}<th>IP</th></tr></thead>
+      <tbody>
+      {% for r in rows %}
+        <tr>
+          <td class="when">{{ r.at[:16].replace('T', ' ') }}</td>
+          <td class="who">{{ r.username or '—' }}</td>
+          <td class="action">{{ r.action }}</td>
+          <td class="detail">{{ r.target }}{% for k, v in r.detail.items() %} <span class="kv">{{ k }}={{ v }}</span>{% endfor %}</td>
+          {% if everything %}<td class="who">{{ r.workspace or '—' }}</td>{% endif %}
+          <td class="ip">{{ r.ip or '' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</main>
+</body>
+</html>

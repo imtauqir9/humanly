@@ -167,7 +167,9 @@ def test_app_radar_routes(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(a, "OUTPUT_DIR", tmp_path)
     c = a.app.test_client()
     assert c.get("/api/radar/latest").get_json() == {"themes": [], "generated_at": None}
-    (tmp_path / "radar_latest.json").write_text('{"themes": [{"title": "T"}], "generated_at": "2026-09-13T00:00:00Z"}', encoding="utf-8")
+    # Stamped now, not on a fixed date: the staleness check below is relative to today.
+    stamp = a.datetime.now(a.timezone.utc).isoformat()
+    (tmp_path / "radar_latest.json").write_text(json.dumps({"themes": [{"title": "T"}], "generated_at": stamp}), encoding="utf-8")
     assert c.get("/api/radar/latest").get_json()["themes"][0]["title"] == "T"
 
     spawned = {}

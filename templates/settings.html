@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+{% include "_head.html" %}
+<title>Settings — {{ ws.name }} — Humanly</title>
+<style>
+{% include "_theme.css" %}
+  main { max-width: 980px; margin: 0 auto; padding: 44px 28px 72px; }
+  .sheet { padding: 24px 26px 8px; }
+  .actions { display: flex; gap: 10px; align-items: center; padding: 6px 0 18px; }
+  textarea { min-height: 96px; font-size: 14px; }
+  textarea.tall { min-height: 160px; }
+  td .inline-form select { padding: 6px 8px; font-size: 13px; }
+  .role-note { font-size: 12.5px; color: var(--muted); margin-top: 12px; line-height: 1.6; }
+  .role-note b { color: var(--ink-2); font-weight: 600; }
+  .snippet { font-family: var(--mono); font-size: 12px; background: var(--sunken); border-radius: var(--radius-sm); padding: 10px 12px; color: var(--ink-2);
+             overflow-x: auto; white-space: pre; }
+  .sub-links { display: flex; gap: 18px; margin-top: 4px; }
+  @media (max-width: 640px) { main { padding: 24px 14px 48px; } .sheet { padding: 18px 16px 4px; } }
+</style>
+</head>
+<body>
+{% set active = 'settings' %}
+{% include "_header.html" %}
+
+<main>
+  <div class="page-title">
+    <h1>{{ ws.name }}</h1>
+    <span class="sub">Who this workspace writes as, and who may do what</span>
+  </div>
+
+  {% if msg %}<div class="notice ok" role="status"><span>✓</span><span>{{ msg }}</span></div>{% endif %}
+  {% if err %}<div class="notice bad" role="alert"><span>✕</span><span>{{ err }}</span></div>{% endif %}
+
+  <form method="post" action="/settings">
+    <input type="hidden" name="action" value="workspace">
+
+    <div class="section-label"><span class="roman">i.</span><h2>Identity</h2><span class="sub">byline, links, canonical URLs</span></div>
+    <div class="sheet card">
+      <div class="field">
+        <label for="name">Workspace name</label>
+        <input type="text" id="name" name="name" value="{{ ws.name }}" maxlength="120" required>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="site_url">Website</label>
+          <input type="text" id="site_url" name="site_url" value="{{ ws.settings.site_url or '' }}" placeholder="https://www.example.com">
+          <div class="hint">Used for canonical links, internal links and the feed. Leave empty until the client has a site.</div>
+        </div>
+        <div class="field">
+          <label for="url_pattern">Article URL pattern</label>
+          <input type="text" id="url_pattern" name="url_pattern" value="{{ ws.settings.url_pattern or '' }}" placeholder="{site}/blog/{slug}">
+          <div class="hint">How their blog addresses a post. <code>{site}</code> and <code>{slug}</code> are filled in.</div>
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="author_name">Byline</label>
+          <input type="text" id="author_name" name="author_name" value="{{ ws.settings.author_name or '' }}" placeholder="{{ ident.author_name }}">
+          <div class="hint">The author on the article and in its schema. A person or the company.</div>
+        </div>
+        <div class="field">
+          <label for="author_url">Byline link</label>
+          <input type="text" id="author_url" name="author_url" value="{{ ws.settings.author_url or '' }}" placeholder="https://www.example.com/about">
+        </div>
+      </div>
+      <div class="field">
+        <label for="author_bio">Who is speaking</label>
+        <textarea id="author_bio" name="author_bio" placeholder="Acme's platform team: engineers who run Kubernetes for 400 customers. They write as practitioners, never as a vendor pitching.">{{ ws.settings.author_bio or '' }}</textarea>
+        <div class="hint">One or two sentences the LinkedIn post and video script are written from.</div>
+      </div>
+    </div>
+
+    <div class="section-label"><span class="roman">ii.</span><h2>Brand</h2><span class="sub">what every article must respect</span></div>
+    <div class="sheet card">
+      <div class="field">
+        <label for="brand_guide">Brand guide</label>
+        <textarea class="tall" id="brand_guide" name="brand_guide" placeholder="Tone: plain, confident, no hype.&#10;Always write &quot;Acme Cloud&quot;, never &quot;AcmeCloud&quot;.&#10;Never promise uptime figures or name competitors.&#10;Spell in US English.">{{ ws.settings.brand_guide or '' }}</textarea>
+        <div class="hint">The writer follows it and the auditor flags anything that breaks it. Voice comes from the sample articles; rules go here.</div>
+      </div>
+      <div class="field">
+        <label for="brand_cta">Closing call to action</label>
+        <textarea id="brand_cta" name="brand_cta" placeholder="Want to see this on your own cluster? [Book a demo](https://www.example.com/demo).">{{ ws.settings.brand_cta or '' }}</textarea>
+        <div class="hint">Markdown added after every article. Leave empty for none.</div>
+      </div>
+      <div class="field">
+        <label for="radar_lens">Audience for the radar</label>
+        <input type="text" id="radar_lens" name="radar_lens" value="{{ ws.settings.radar_lens or '' }}" placeholder="platform engineers choosing a Kubernetes cost tool">
+        <div class="hint">Who the topic radar reads the industry for.</div>
+      </div>
+    </div>
+
+    <div class="section-label"><span class="roman">iii.</span><h2>Workflow</h2><span class="sub">sign-off and data</span></div>
+    <div class="sheet card">
+      <div class="field">
+        <label class="check"><input type="checkbox" name="require_approval" value="1"{% if ws.settings.require_approval %} checked{% endif %}>
+          <span>Require approval before publishing<br><span class="hint" style="display:block;font-weight:400">An editor or client reviewer must approve an article before it can go to WordPress or the feed.</span></span></label>
+      </div>
+      <div class="field" style="max-width: 260px">
+        <label for="retention_days">Keep finished work for (days)</label>
+        <input type="number" id="retention_days" name="retention_days" min="0" value="{{ ws.settings.retention_days or '' }}" placeholder="Forever">
+        <div class="hint">Older articles, logs and uploads are deleted. Empty keeps everything.</div>
+      </div>
+    </div>
+
+    <div class="actions"><button type="submit" class="btn btn-primary">Save settings</button></div>
+  </form>
+
+  <div class="section-label"><span class="roman">iv.</span><h2>People</h2><span class="sub">{{ members|length }} in this workspace</span></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Person</th><th>Role</th><th></th></tr></thead>
+      <tbody>
+      {% for m in members %}
+        <tr>
+          <td><span class="mono">{{ m.username }}</span>{% if m.name and m.name != m.username %} <span class="muted">· {{ m.name }}</span>{% endif %}
+              {% if m.disabled %} <span class="status-stamp">Disabled</span>{% endif %}</td>
+          <td>
+            <form class="inline-form" method="post" action="/settings">
+              <input type="hidden" name="action" value="set_role"><input type="hidden" name="user_id" value="{{ m.id }}">
+              <select name="role" onchange="this.form.submit()" aria-label="Role for {{ m.username }}">
+                {% for r in roles %}<option value="{{ r }}"{% if r == m.role %} selected{% endif %}>{{ role_labels[r] }}</option>{% endfor %}
+              </select>
+            </form>
+          </td>
+          <td style="text-align:right">
+            {% if m.id != me.id %}
+            <form class="inline-form" method="post" action="/settings" style="justify-content:flex-end">
+              <input type="hidden" name="action" value="set_role"><input type="hidden" name="user_id" value="{{ m.id }}"><input type="hidden" name="role" value="">
+              <button class="btn btn-quiet sm" type="submit">Remove</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="3" class="muted">Nobody yet. Administrators can always see every workspace.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <form class="sheet card" method="post" action="/settings" style="margin-top:16px">
+    <input type="hidden" name="action" value="add_member">
+    <div class="field-row">
+      <div class="field">
+        <label for="m_user">Username or email</label>
+        <input type="text" id="m_user" name="username" required placeholder="jane@client.com">
+        <div class="hint">New people get an account and a one-time password to pass on.</div>
+      </div>
+      <div class="field">
+        <label for="m_role">Role</label>
+        <select id="m_role" name="role">
+          {% for r in roles %}<option value="{{ r }}"{% if r == 'reviewer' %} selected{% endif %}>{{ role_labels[r] }}</option>{% endfor %}
+        </select>
+      </div>
+    </div>
+    <div class="actions"><button type="submit" class="btn btn-dark">Add person</button></div>
+    <div class="role-note"><b>Owner</b> everything, including these settings. <b>Editor</b> writes, approves and publishes.
+      <b>Writer</b> writes and sends for review. <b>Client reviewer</b> reads, comments, approves or sends back; never spends credits.</div>
+  </form>
+
+  <div class="section-label"><span class="roman">v.</span><h2>Feed and records</h2></div>
+  <div class="sheet card">
+    <div class="field">
+      <label>Public feed</label>
+      <div class="snippet">/feed.json{{ feed_query }}   /feed.xml{{ feed_query }}</div>
+      <div class="hint">{% if ws.slug == 'default' %}Every article in this workspace.{% else %}Only articles the client approved or published.{% endif %}</div>
+    </div>
+    <div class="sub-links" style="padding-bottom:18px">
+      <a href="/settings/audit">Audit log</a>
+      {% if me.is_admin %}<a href="/settings/audit?all=1">Audit log, all workspaces</a>{% endif %}
+    </div>
+  </div>
+</main>
+</body>
+</html>

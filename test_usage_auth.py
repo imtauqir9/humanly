@@ -555,34 +555,52 @@ def drain(m, job_id, limit=40):
     return "".join(out)
 
 
+def _job(m, job_id, status, lines=(), error=None, result=None, ws_slug="default"):
+    """A job as the worker would have left it: a row and a log on disk."""
+    s = m.store()
+    ws = s.workspace(ws_slug)
+    s.add_job(job_id, ws["id"], "article", "t", ["true"], "tester")
+    if status != "queued":
+        with s._conn() as c:
+            c.execute("UPDATE jobs SET status = ?, started_at = ? WHERE id = ?",
+                      ("running", "2026-10-04T10:00:00+00:00", job_id))
+    if status in ("done", "failed", "interrupted"):
+        s.finish_job(job_id, status, error=error or "", result=result)
+    log = m._job_log(job_id)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+
+
 def test_a_failure_is_sent_as_failed_not_error():
     # "error" is reserved by EventSource for connection trouble; sending
     # pipeline failures under it made a dropped connection look like a crash.
     with tempfile.TemporaryDirectory() as d:
         m = make_app(d)
-        q = m.queue.Queue()
-        with m._jobs_lock:
-            m._jobs["j1"] = q
-            m._job_started["j1"] = m.time.time()
-        q.put(("log", "starting"))
-        q.put(("error", "the model hit its cap"))
+        _job(m, "j1", "failed", lines=["starting"], error="the model hit its cap")
         body = drain(m, "j1")
+    assert "starting" in body, body
     assert "event: failed" in body, body
     assert "event: error" not in body, body
     assert "the model hit its cap" in body
 
 
-def test_a_finished_job_is_forgotten():
+def test_a_finished_job_reports_its_result():
     with tempfile.TemporaryDirectory() as d:
         m = make_app(d)
-        q = m.queue.Queue()
-        with m._jobs_lock:
-            m._jobs["j2"] = q
-            m._job_started["j2"] = m.time.time()
-        q.put(("done", '{"review_slug": "x"}'))
+        _job(m, "j2", "done", lines=["writing", "saved"], result={"review_slug": "x"})
         body = drain(m, "j2")
-        assert "event: done" in body, body
-        assert "j2" not in m._jobs, "a completed job should not be retained"
+    assert "event: done" in body and '"review_slug": "x"' in body, body
+
+
+def test_a_reconnect_resumes_after_the_last_line_it_saw():
+    # EventSource sends Last-Event-ID on reconnect; the stream must not replay
+    # the whole log into the page a second time.
+    with tempfile.TemporaryDirectory() as d:
+        m = make_app(d)
+        _job(m, "j3", "done", lines=["one", "two", "three"])
+        r = m.app.test_client().get("/api/stream/j3", headers={"Last-Event-ID": str(len("one\n"))})
+        body = "".join(c.decode() if isinstance(c, bytes) else c for c in r.response)
+    assert '"one"' not in body and '"two"' in body and '"three"' in body, body
 
 
 def test_an_unknown_job_is_a_404():
@@ -591,17 +609,51 @@ def test_an_unknown_job_is_a_404():
         assert m.app.test_client().get("/api/stream/nope").status_code == 404
 
 
-def test_abandoned_jobs_are_swept_but_recent_ones_are_kept():
+def test_a_job_running_at_shutdown_is_marked_interrupted_not_rerun():
+    # A rerun spends money, so a restart flags the job for a person to retry.
     with tempfile.TemporaryDirectory() as d:
         m = make_app(d)
-        with m._jobs_lock:
-            m._jobs["old"] = m.queue.Queue()
-            m._job_started["old"] = m.time.time() - m.JOB_RETENTION_SECS - 60
-            m._jobs["new"] = m.queue.Queue()
-            m._job_started["new"] = m.time.time()
-        m._reap_jobs()
-        assert "old" not in m._jobs, "an abandoned job should be swept"
-        assert "new" in m._jobs, "a live job must survive the sweep"
+        _job(m, "j4", "running")
+        m._stores.clear()
+        assert m.store().job("j4")["status"] == "interrupted"
+        m._start_workers = lambda: None   # check the queue, not a real run
+        r = m.app.test_client().post("/api/jobs/j4/retry")
+        assert r.status_code == 200, r.data
+        assert m.store().job("j4")["status"] == "queued"
+        m._stores.clear()
+
+
+def test_one_job_runs_per_workspace_and_clients_run_side_by_side():
+    with tempfile.TemporaryDirectory() as d:
+        m = make_app(d)
+        s = m.store()
+        other = s.create_workspace("Acme")
+        default = s.workspace("default")
+        s.add_job("a1", default["id"], "article", "", [], "t")
+        s.add_job("a2", default["id"], "article", "", [], "t")
+        s.add_job("b1", other["id"], "article", "", [], "t")
+        first, second = s.claim_next_job(), s.claim_next_job()
+        assert {first["id"], second["id"]} == {"a1", "b1"}
+        assert s.claim_next_job() is None, "a2 waits for a1"
+        s.finish_job("a1", "done")
+        assert s.claim_next_job()["id"] == "a2"
+
+
+def test_a_queued_job_runs_and_its_log_streams():
+    with tempfile.TemporaryDirectory() as d:
+        m = make_app(d)
+        with m.app.test_request_context("/"):
+            m.g.user, m.g.ws = m._LOCAL_USER, m.store().workspace("default")
+            job_id = m._spawn([sys.executable, "-c", "print('hello from the pipeline')"],
+                              kind="audit", label="smoke")
+        for _ in range(100):
+            if m.store().job(job_id)["status"] in m.TERMINAL:
+                break
+            m.time.sleep(0.1)
+        assert m.store().job(job_id)["status"] == "done", m.store().job(job_id)
+        body = drain(m, job_id)
+        assert "hello from the pipeline" in body and "event: done" in body, body
+        assert m.store().job(job_id)["started_at"], "start time is recorded for estimates"
 
 
 def test_the_client_listens_for_failed_and_handles_a_drop_separately():

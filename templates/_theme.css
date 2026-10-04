@@ -154,6 +154,47 @@ tbody tr:hover td { background: var(--surface-2); }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.num { font-family: var(--mono); font-size: 13px; }
 
+/* ---- workspace switcher: the client you are working for, set in serif ---- */
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.ws-switch { padding-left: 16px; border-left: 1px solid var(--line-2); min-width: 0; }
+.ws-switch select { width: auto; max-width: 240px; font-family: var(--serif); font-style: italic; font-size: 14px; color: var(--ink-2);
+                    background: transparent; border: 1px solid transparent; padding: 5px 26px 5px 8px; cursor: pointer; }
+.ws-switch select:hover { border-color: var(--line-2); }
+.topbar nav a.who { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+
+/* ---- notices: one line, an icon, never the accent ---- */
+.notice { display: flex; gap: 10px; border-radius: var(--radius-sm); padding: 11px 14px; font-size: 13.5px; line-height: 1.55; margin-bottom: 20px; }
+.notice.ok { background: var(--ok-soft); color: var(--ok); border: 1px solid color-mix(in srgb, var(--ok) 28%, transparent); }
+.notice.bad { background: var(--bad-soft); color: var(--bad); border: 1px solid color-mix(in srgb, var(--bad) 28%, transparent); }
+.notice.warn { background: var(--warn-soft); color: var(--warn); border: 1px solid color-mix(in srgb, var(--warn) 28%, transparent); }
+.notice code { background: transparent; padding: 0; color: inherit; font-weight: 500; user-select: all; }
+
+/* ---- settings forms: label above, hint below, hairlines between groups ---- */
+.field { margin-bottom: 18px; }
+.field .hint { font-size: 12.5px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
+.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; }
+.check { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; font-weight: 500; color: var(--ink); }
+.check input { margin-top: 4px; accent-color: var(--accent); }
+.section-label { display: flex; align-items: baseline; gap: 8px; margin: 34px 0 14px; padding-bottom: 8px; border-bottom: 2px solid var(--ink); }
+.section-label h2 { font-family: var(--serif); font-size: 24px; font-weight: 400; letter-spacing: -.015em; font-variation-settings: "opsz" 72; }
+.section-label .sub { font-family: var(--serif); font-style: italic; color: var(--muted); font-size: 14.5px; margin-left: auto; }
+.inline-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.inline-form select, .inline-form input { width: auto; }
+
+/* ---- article status: a stamp in the status's own ink ---- */
+.status-stamp { font-family: var(--mono); font-size: 10.5px; font-weight: 500; letter-spacing: .12em; text-transform: uppercase;
+                border: 1.5px solid currentColor; border-radius: var(--radius-xs); padding: 1px 7px; white-space: nowrap; color: var(--muted); }
+.status-stamp.s-in_review { color: var(--link); }
+.status-stamp.s-changes { color: var(--warn); }
+.status-stamp.s-approved { color: var(--ok); }
+.status-stamp.s-published { color: var(--accent); }
+
+@media (max-width: 640px) {
+  .ws-switch { display: none; }
+  .field-row { grid-template-columns: 1fr; }
+  .topbar nav a.who { display: none; }
+}
+
 @media (max-width: 640px) {
   .topbar-in { padding: 0 14px; gap: 10px; }
   .topbar .crumb { display: none; }

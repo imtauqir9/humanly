@@ -150,6 +150,26 @@
 
 {% endif %}
 
+{% if per_workspace and per_workspace|length > 1 %}
+  <h2>By client</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Workspace</th><th class="num">Runs</th><th class="num">Tokens</th><th class="num">Cost</th><th class="num">Per run</th></tr></thead>
+    <tbody>
+    {% for w in per_workspace %}
+      <tr>
+        <td><a href="/workspace/{{ w.ws.slug }}?next=/usage">{{ w.ws.name }}</a></td>
+        <td class="num">{{ '{:,}'.format(w.runs) }}</td>
+        <td class="num">{{ '{:,}'.format(w.total_tokens) }}</td>
+        <td class="num">${{ '%.2f'|format(w.cost_usd) }}{% if not w.fully_priced %}<span class="muted">+</span>{% endif %}</td>
+        <td class="num">${{ '%.2f'|format(w.avg_cost_per_run) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+{% endif %}
+
 </main>
 </body>
 </html>

@@ -29,8 +29,10 @@ from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import (Flask, Response, jsonify, redirect, render_template, request,
-                   send_from_directory, session, url_for)
+from flask import (Flask, Response, abort, g, has_app_context, jsonify, redirect,
+                   render_template, request, send_from_directory, session, url_for)
+
+import store as st
 
 app = Flask(__name__)
 BASE_DIR = Path(__file__).parent
@@ -39,9 +41,10 @@ RESEARCH_DIR = BASE_DIR / "research"
 
 
 def _notes_paths(raw) -> list:
-    """`notes` in a run request: file or folder names under research/ or the
-    output folder, passed to the pipeline as --notes. Anything that resolves
-    outside those two folders, or does not exist, is dropped."""
+    """`notes` in a run request: file or folder names under the workspace's
+    research folder or its output folder, passed to the pipeline as --notes.
+    Anything that resolves outside those two folders, or does not exist, is
+    dropped."""
     if isinstance(raw, str):
         raw = [raw]
     found = []
@@ -49,7 +52,7 @@ def _notes_paths(raw) -> list:
         name = str(item).strip()
         if not name:
             continue
-        for base in (RESEARCH_DIR, OUTPUT_DIR):
+        for base in (notes_dir(), ws_dir()):
             candidate = (base / name).resolve()
             try:
                 candidate.relative_to(base.resolve())
@@ -89,23 +92,93 @@ _load_dotenv()
 HEARTBEAT_SECS = 15
 SILENCE_LIMIT_SECS = 900
 
-# In-memory job store: job_id → queue.Queue
-_jobs: dict[str, queue.Queue] = {}
-_job_started: dict[str, float] = {}
-_jobs_lock = threading.Lock()
-
-# A job now outlives a dropped connection so the browser can reconnect to it.
-# Without a sweep, one abandoned tab would leak its queue for the life of the
-# process, and the pipeline keeps writing into it.
-JOB_RETENTION_SECS = 4 * 3600
+# Jobs live in the database and their logs on the volume, so a deploy or a
+# crash no longer loses track of them. Each pipeline is a separate process; on
+# a 1 GB machine two at once is the safe ceiling (video rendering is the heavy
+# one), and the rest wait their turn in order.
+MAX_CONCURRENT_JOBS = max(1, int(os.environ.get("MAX_CONCURRENT_JOBS", "2") or 2))
+JOB_POLL_SECS = 1.0
 
 
-def _reap_jobs():
-    cutoff = time.time() - JOB_RETENTION_SECS
-    with _jobs_lock:
-        for jid in [j for j, started in _job_started.items() if started < cutoff]:
-            _jobs.pop(jid, None)
-            _job_started.pop(jid, None)
+# ---------------------------------------------------------------------------
+# Records: the store, workspaces and their folders
+# ---------------------------------------------------------------------------
+#
+# Each client is a workspace with its own folder, voice, settings and people.
+# The default workspace keeps using output/ itself, so everything written
+# before workspaces existed is still where it was.
+
+_stores: dict[str, st.Store] = {}
+_stores_lock = threading.Lock()
+_bootstrapped: set = set()
+_resumed: set = set()
+
+
+def system_dir() -> Path:
+    return OUTPUT_DIR / "_system"
+
+
+def _secrets_key() -> str:
+    """The key that encrypts stored client credentials. Kept apart from the
+    session key, which follows APP_PASSWORD and would orphan them on rotation."""
+    configured = os.environ.get("SECRETS_KEY", "")
+    if configured:
+        return configured
+    path = system_dir() / "secrets.key"
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(st.new_token(32), encoding="utf-8")
+    return path.read_text(encoding="utf-8").strip()
+
+
+def store() -> st.Store:
+    path = str(system_dir() / "humanly.db")
+    with _stores_lock:
+        s = _stores.get(path)
+        if s is None:
+            s = _stores[path] = st.Store(Path(path), secret_key=_secrets_key())
+            interrupted = s.interrupt_running_jobs()
+            if interrupted:
+                print(f"[jobs] {interrupted} job(s) were running at the last stop; "
+                      f"marked interrupted", flush=True)
+        key = (path, APP_USERNAME, APP_PASSWORD)
+        if APP_PASSWORD and key not in _bootstrapped:
+            s.ensure_bootstrap_admin(APP_USERNAME, APP_PASSWORD)
+            _bootstrapped.add(key)
+        fresh = path not in _resumed
+        _resumed.add(path)
+    # Jobs queued before a restart still deserve to run.
+    if fresh and s.jobs(limit=1, statuses=("queued",)):
+        _start_workers()
+    return s
+
+
+def _current_ws() -> dict | None:
+    return getattr(g, "ws", None) if has_app_context() else None
+
+
+def ws_dir(ws: dict | None = None) -> Path:
+    """A workspace's folder. Outside a request (scripts, tests) that is the
+    default workspace's, which is output/ itself."""
+    ws = ws or _current_ws()
+    if ws is None or ws["slug"] == st.DEFAULT_WORKSPACE:
+        return OUTPUT_DIR
+    return OUTPUT_DIR / "workspaces" / ws["slug"]
+
+
+def notes_dir(ws: dict | None = None) -> Path:
+    ws = ws or _current_ws()
+    if ws is None or ws["slug"] == st.DEFAULT_WORKSPACE:
+        return RESEARCH_DIR
+    return ws_dir(ws) / "notes"
+
+
+def samples_dir(ws: dict) -> Path:
+    return ws_dir(ws) / "samples"
+
+
+def _ws_by_id(ws_id: int) -> dict:
+    return store().workspace_by_id(ws_id) or store().workspace(st.DEFAULT_WORKSPACE)
 
 
 # ---------------------------------------------------------------------------
@@ -177,27 +250,57 @@ def _clear_failures(ip: str):
         _login_failures.pop(ip, None)
 
 
-def _password_ok(candidate: str) -> bool:
-    return hmac.compare_digest(candidate or "", APP_PASSWORD)
+# Without APP_PASSWORD the app is a private local tool: no sign-in, and
+# whoever is at the keyboard acts as the administrator.
+_LOCAL_USER = {"id": 0, "username": "local", "name": "Local", "is_admin": 1,
+               "bootstrap": 0, "disabled": 0}
 
 
-def _basic_auth_ok() -> bool:
+def _session_mark(user: dict) -> str:
+    """Ties a session to the password it was signed in with, so changing a
+    password (or disabling the account) signs that person out everywhere."""
+    return hashlib.sha256((user["pw_hash"] + str(user["disabled"])).encode()).hexdigest()[:16]
+
+
+def _basic_auth_user() -> dict | None:
     auth = request.authorization
     if not auth or auth.type != "basic":
-        return False
-    # compare_digest on both halves, so neither the username nor the password
-    # leaks its length through response timing.
-    return (hmac.compare_digest(auth.username or "", APP_USERNAME)
-            and _password_ok(auth.password or ""))
+        return None
+    return store().check_login(auth.username or "", auth.password or "")
 
 
-def _logged_in() -> bool:
-    return session.get("auth") is True
+def _session_user() -> dict | None:
+    uid = session.get("uid")
+    if not uid:
+        return None
+    user = store().user_by_id(uid)
+    if not user or user["disabled"] or session.get("mark") != _session_mark(user):
+        return None
+    return user
+
+
+def _pick_workspace(user: dict) -> tuple[dict | None, str | None]:
+    """The workspace this request acts in, and the person's role there."""
+    s = store()
+    wanted = request.args.get("ws") if request.path.startswith("/api/") else None
+    wanted = wanted or session.get("ws")
+    for slug in (wanted, st.DEFAULT_WORKSPACE):
+        if slug:
+            ws = s.workspace(slug)
+            role = s.role_in(user, ws) if ws else None
+            if role:
+                return ws, role
+    for ws in s.workspaces_for(user):
+        role = s.role_in(user, ws)
+        if role:
+            return ws, role
+    return None, None
 
 
 @app.before_request
 def require_password():
-    if not APP_PASSWORD or request.path in _OPEN_PATHS:
+    g.user, g.ws, g.role = None, None, None
+    if request.path in _OPEN_PATHS:
         return None
     # Signed download links carry their own credential (an expiring HMAC), so
     # an automation platform can fetch one finished file without the password.
@@ -206,22 +309,74 @@ def require_password():
     # The /pipeline showcase is public, and so are the diagrams it shows.
     if request.path.startswith("/static/pipeline/"):
         return None
-    if _logged_in() or _basic_auth_ok():
-        return None
-    # An API caller wants a 401 it can handle, not an HTML login page.
-    if request.path.startswith("/api/"):
-        return Response(
-            "Authentication required.\n", 401,
-            {"WWW-Authenticate": 'Basic realm="Humanly", charset="UTF-8"'},
-        )
-    return redirect(url_for("login", next=request.full_path.rstrip("?")))
+
+    # A form or fetch from another site must not act with this browser's
+    # session. Browsers send Origin on cross-site POSTs; scripts send none.
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        origin = request.headers.get("Origin", "")
+        if origin and origin.split("://", 1)[-1].rstrip("/") != request.host:
+            return Response("Cross-site request refused.\n", 403)
+
+    user = _LOCAL_USER if not APP_PASSWORD else (_session_user() or _basic_auth_user())
+    if user is None:
+        # An API caller wants a 401 it can handle, not an HTML login page.
+        if request.path.startswith("/api/"):
+            return Response(
+                "Authentication required.\n", 401,
+                {"WWW-Authenticate": 'Basic realm="Humanly", charset="UTF-8"'},
+            )
+        return redirect(url_for("login", next=request.full_path.rstrip("?")))
+
+    g.user = user
+    g.ws, g.role = _pick_workspace(user)
+    if g.ws is None and request.path not in ("/logout", "/account"):
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "You are not a member of any workspace yet."}), 403
+        return render_template("no_access.html", user=user), 403
+    return None
+
+
+def can(capability: str) -> bool:
+    return g.role in st.CAPABILITIES.get(capability, set())
+
+
+def needs(capability: str):
+    """Refuse the request unless the person's role in this workspace allows it."""
+    if not can(capability):
+        if request.path.startswith("/api/"):
+            abort(Response(json.dumps({"error": "Your role in this workspace does not allow that."}),
+                           403, mimetype="application/json"))
+        abort(403)
+
+
+def actor() -> str:
+    return (g.user or {}).get("username", "") if getattr(g, "user", None) else ""
+
+
+def audit(action: str, target: str = "", detail: dict | None = None, ws: dict | None = None):
+    ws = ws or getattr(g, "ws", None)
+    try:
+        store().audit(action, username=actor(), ws_id=ws["id"] if ws else None,
+                      target=target, detail=detail, ip=_client_ip() if request else "")
+    except Exception as e:  # the log must never take a request down with it
+        print(f"[audit] {action} not recorded: {e}", flush=True)
+
+
+@app.context_processor
+def _identity():
+    if not getattr(g, "user", None):
+        return {}
+    workspaces = store().workspaces_for(g.user) if g.user else []
+    return {"me": g.user, "current_ws": g.ws, "my_role": g.role,
+            "my_workspaces": workspaces, "can": can,
+            "role_labels": st.ROLE_LABELS, "auth_on": bool(APP_PASSWORD)}
 
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if not APP_PASSWORD:
         return redirect(url_for("index"))
-    if _logged_in():
+    if _session_user():
         return redirect(url_for("index"))
 
     target = request.args.get("next") or request.form.get("next") or "/"
@@ -230,22 +385,29 @@ def login():
         target = "/"
 
     error = None
+    username = (request.form.get("username") or "").strip() or APP_USERNAME
     if request.method == "POST":
         ip = _client_ip()
         wait = _locked_out(ip)
         if wait:
             error = f"Too many attempts. Try again in {wait} seconds."
-        elif _password_ok(request.form.get("password", "")):
-            _clear_failures(ip)
-            session.clear()
-            session["auth"] = True
-            session.permanent = False
-            return redirect(target)
         else:
+            user = store().check_login(username, request.form.get("password", ""))
+            if user:
+                _clear_failures(ip)
+                session.clear()
+                session["uid"] = user["id"]
+                session["mark"] = _session_mark(user)
+                session.permanent = False
+                g.user = user
+                audit("signed_in", ws={"id": None})
+                return redirect(target)
             _record_failure(ip)
+            store().audit("sign_in_failed", username=username[:80], ip=ip)
             error = "That password is not right."
 
-    return render_template("login.html", error=error, next=target), (
+    return render_template("login.html", error=error, next=target,
+                           username=request.form.get("username", "")), (
         200 if error is None else 401
     )
 
@@ -256,16 +418,29 @@ def logout():
     return redirect(url_for("login"))
 
 
+@app.route("/workspace/<slug>")
+def switch_workspace(slug):
+    ws = store().workspace(slug)
+    if not ws or not store().role_in(g.user, ws):
+        abort(404)
+    session["ws"] = slug
+    target = request.args.get("next") or "/"
+    if not target.startswith("/") or target.startswith("//"):
+        target = "/"
+    return redirect(target)
+
+
 @app.route("/healthz")
 def healthz():
     return jsonify({"ok": True, "protected": bool(APP_PASSWORD)})
 
 
-def list_articles() -> list[dict]:
+def list_articles(out: Path | None = None) -> list[dict]:
     """Return metadata for every generated article, newest first."""
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    out = out or ws_dir()
+    out.mkdir(parents=True, exist_ok=True)
     articles = []
-    for meta_file in sorted(OUTPUT_DIR.glob("*_meta.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+    for meta_file in sorted(out.glob("*_meta.json"), key=lambda p: p.stat().st_mtime, reverse=True):
         slug = meta_file.stem.replace("_meta", "")
         try:
             meta = json.loads(meta_file.read_text())
@@ -273,24 +448,24 @@ def list_articles() -> list[dict]:
             meta = {}
 
         seo = meta.get("seo_meta", {})
-        md_path = OUTPUT_DIR / f"{slug}.md"
+        md_path = out / f"{slug}.md"
 
         # Glob-based matching: find any html/docx starting with this slug
         # (handles old files saved under different names)
-        html_files = sorted(OUTPUT_DIR.glob(f"{slug}*.html"), key=lambda p: p.stat().st_mtime, reverse=True)
-        docx_files = sorted(OUTPUT_DIR.glob(f"{slug}*.docx"), key=lambda p: p.stat().st_mtime, reverse=True)
+        html_files = sorted(out.glob(f"{slug}*.html"), key=lambda p: p.stat().st_mtime, reverse=True)
+        docx_files = sorted(out.glob(f"{slug}*.docx"), key=lambda p: p.stat().st_mtime, reverse=True)
         html_file = html_files[0].name if html_files else None
         docx_file = docx_files[0].name if docx_files else None
-        linkedin_path = OUTPUT_DIR / f"{slug}_linkedin.md"
-        video_path = OUTPUT_DIR / f"{slug}_video.md"
-        voice_path = OUTPUT_DIR / f"{slug}_voiceover.mp3"
-        mp4_wide = OUTPUT_DIR / f"{slug}_video_16x9.mp4"
-        mp4_tall = OUTPUT_DIR / f"{slug}_video_9x16.mp4"
-        video_meta = OUTPUT_DIR / f"{slug}_video_meta.md"
-        diagram_path = OUTPUT_DIR / f"{slug}_diagram_1.png"
-        facts_path = OUTPUT_DIR / f"{slug}_facts.json"
-        thumb_path = OUTPUT_DIR / f"{slug}_thumbnail.html"
-        review_path = OUTPUT_DIR / f"{slug}_review.json"
+        linkedin_path = out / f"{slug}_linkedin.md"
+        video_path = out / f"{slug}_video.md"
+        voice_path = out / f"{slug}_voiceover.mp3"
+        mp4_wide = out / f"{slug}_video_16x9.mp4"
+        mp4_tall = out / f"{slug}_video_9x16.mp4"
+        video_meta = out / f"{slug}_video_meta.md"
+        diagram_path = out / f"{slug}_diagram_1.png"
+        facts_path = out / f"{slug}_facts.json"
+        thumb_path = out / f"{slug}_thumbnail.html"
+        review_path = out / f"{slug}_review.json"
 
         word_count = 0
         if md_path.exists():
@@ -331,10 +506,11 @@ def list_articles() -> list[dict]:
 # Routes
 # ---------------------------------------------------------------------------
 
-def list_radars() -> list[dict]:
+def list_radars(out: Path | None = None) -> list[dict]:
     """Every dated radar run, newest first, with the briefs dug on its themes."""
+    out = out or ws_dir()
     runs = []
-    for path in sorted(OUTPUT_DIR.glob("radar_????-??-??.json"), reverse=True):
+    for path in sorted(out.glob("radar_????-??-??.json"), reverse=True):
         date = path.stem[len("radar_"):]
         try:
             radar = json.loads(path.read_text(encoding="utf-8"))
@@ -342,7 +518,7 @@ def list_radars() -> list[dict]:
             radar = {}
         themes = radar.get("themes") or []
         briefs = []
-        for brief in sorted(OUTPUT_DIR.glob(f"radar_{date}_brief_*.md")):
+        for brief in sorted(out.glob(f"radar_{date}_brief_*.md")):
             try:
                 index = int(brief.stem.rsplit("_", 1)[1])
             except ValueError:
@@ -380,7 +556,11 @@ def library():
 
 @app.route("/output/<path:filename>")
 def serve_output(filename):
-    return send_from_directory(OUTPUT_DIR, filename)
+    # Only the workspace's own top-level files: never another client's folder,
+    # the uploads, or the app's records.
+    if "/" in filename or "\\" in filename or filename.startswith("."):
+        abort(404)
+    return send_from_directory(ws_dir(), filename)
 
 
 @app.route("/api/articles")
@@ -392,9 +572,9 @@ def api_articles():
 # Token usage
 # ---------------------------------------------------------------------------
 
-def read_usage(limit: int = 500) -> list[dict]:
+def read_usage(limit: int = 500, out: Path | None = None) -> list[dict]:
     """Every run the pipeline has logged, newest first."""
-    path = OUTPUT_DIR / "usage.jsonl"
+    path = (out or ws_dir()) / "usage.jsonl"
     if not path.exists():
         return []
     runs = []
@@ -460,7 +640,171 @@ def api_usage():
 def usage_dashboard():
     runs = read_usage()
     roll = usage_rollup(runs)
-    return render_template("usage.html", runs=runs, **roll)
+    # An administrator bills clients, so they also see every workspace side by side.
+    per_workspace = []
+    if g.user.get("is_admin"):
+        for ws in store().all_workspaces():
+            t = usage_rollup(read_usage(out=ws_dir(ws)))["total"]
+            per_workspace.append({"ws": ws, **t})
+    return render_template("usage.html", runs=runs, per_workspace=per_workspace, **roll)
+
+
+# ---------------------------------------------------------------------------
+# Workspace settings, people, the audit log
+# ---------------------------------------------------------------------------
+
+def _back(endpoint: str, msg: str = "", err: str = "", **kw):
+    params = {**kw}
+    if msg:
+        params["msg"] = msg
+    if err:
+        params["err"] = err
+    return redirect(url_for(endpoint, **params))
+
+
+@app.route("/settings", methods=["GET", "POST"])
+def settings_page():
+    needs("manage")
+    s = store()
+    if request.method == "POST":
+        action = request.form.get("action", "")
+        try:
+            if action == "workspace":
+                name = (request.form.get("name") or "").strip()
+                settings = {k: (request.form.get(k) or "").strip()[:20000]
+                            for k in WORKSPACE_FIELDS if k in request.form}
+                if "require_approval" in WORKSPACE_FLAGS:
+                    settings["require_approval"] = bool(request.form.get("require_approval"))
+                if settings.get("retention_days"):
+                    settings["retention_days"] = str(max(0, int(settings["retention_days"])))
+                s.update_workspace(g.ws["slug"], name=name or None, settings=settings)
+                audit("settings.updated", target=g.ws["name"], detail={"fields": sorted(settings)})
+                return _back("settings_page", msg="Settings saved.")
+            if action == "add_member":
+                username = (request.form.get("username") or "").strip()
+                role = request.form.get("role") or "writer"
+                user = s.user_by_name(username)
+                created_pw = ""
+                if not user:
+                    created_pw = st.new_token(12)
+                    user = s.create_user(username, created_pw,
+                                         name=request.form.get("name") or "")
+                    audit("user.created", target=username)
+                s.set_role(user["id"], g.ws["id"], role)
+                audit("member.added", target=username, detail={"role": role})
+                note = f"{username} added as {st.ROLE_LABELS[role]}."
+                if created_pw:
+                    note += f" Temporary password: {created_pw} - share it privately; it is shown once."
+                return _back("settings_page", msg=note)
+            if action == "set_role":
+                user = s.user_by_id(int(request.form.get("user_id") or 0))
+                role = request.form.get("role") or None
+                if not user:
+                    raise ValueError("No such person.")
+                if role is None and user["id"] == g.user.get("id"):
+                    raise ValueError("You cannot remove yourself.")
+                s.set_role(user["id"], g.ws["id"], role)
+                audit("member.removed" if role is None else "member.role_changed",
+                      target=user["username"], detail={"role": role})
+                return _back("settings_page", msg="Saved.")
+        except (ValueError, KeyError) as e:
+            return _back("settings_page", err=str(e) or "That did not work.")
+        abort(400)
+
+    return render_template("settings.html", ws=g.ws, members=s.members(g.ws["id"]),
+                           roles=st.ROLES, msg=request.args.get("msg"),
+                           err=request.args.get("err"),
+                           ident=ws_identity(g.ws), feed_query=_ws_query(g.ws))
+
+
+@app.route("/settings/audit")
+def audit_page():
+    needs("manage")
+    everything = g.user.get("is_admin") and request.args.get("all") == "1"
+    rows = store().audit_log(None if everything else g.ws["id"], limit=500)
+    return render_template("audit.html", rows=rows, everything=everything)
+
+
+@app.route("/admin", methods=["GET", "POST"])
+def admin_page():
+    if not g.user.get("is_admin"):
+        abort(403)
+    s = store()
+    if request.method == "POST":
+        action = request.form.get("action", "")
+        try:
+            if action == "create_workspace":
+                ws = s.create_workspace(request.form.get("name") or "")
+                ws_dir(ws).mkdir(parents=True, exist_ok=True)
+                if g.user.get("id"):
+                    s.set_role(g.user["id"], ws["id"], "owner")
+                audit("workspace.created", target=ws["name"], ws=ws)
+                session["ws"] = ws["slug"]
+                return redirect(url_for("settings_page", msg=f"{ws['name']} is ready. "
+                                        "Fill in who it publishes as, then add its people."))
+            if action == "create_user":
+                pw = st.new_token(12)
+                user = s.create_user(request.form.get("username") or "", pw,
+                                     name=request.form.get("name") or "",
+                                     is_admin=bool(request.form.get("is_admin")))
+                audit("user.created", target=user["username"],
+                      detail={"admin": bool(user["is_admin"])})
+                return _back("admin_page", msg=f"{user['username']} created. Temporary password: "
+                                               f"{pw} - share it privately; it is shown once.")
+            if action in ("disable", "enable"):
+                user = s.user_by_id(int(request.form.get("user_id") or 0))
+                if not user or user["bootstrap"]:
+                    raise ValueError("That account is managed by the APP_PASSWORD secret.")
+                s.set_disabled(user["id"], action == "disable")
+                audit(f"user.{action}d", target=user["username"])
+                return _back("admin_page", msg="Saved.")
+            if action == "reset_password":
+                user = s.user_by_id(int(request.form.get("user_id") or 0))
+                if not user or user["bootstrap"]:
+                    raise ValueError("That account is managed by the APP_PASSWORD secret.")
+                pw = st.new_token(12)
+                s.set_password(user["id"], pw)
+                audit("user.password_reset", target=user["username"])
+                return _back("admin_page", msg=f"New password for {user['username']}: {pw} - "
+                                               f"share it privately; it is shown once.")
+        except (ValueError, KeyError) as e:
+            return _back("admin_page", err=str(e) or "That did not work.")
+        abort(400)
+
+    workspaces = []
+    for ws in s.all_workspaces():
+        workspaces.append({**ws, "articles": len(list(ws_dir(ws).glob("*_meta.json")))
+                           if ws_dir(ws).exists() else 0,
+                           "members": len(s.members(ws["id"]))})
+    with s._conn() as c:
+        users = [dict(r) for r in c.execute(
+            "SELECT id, username, name, is_admin, bootstrap, disabled, created_at FROM users "
+            "ORDER BY username COLLATE NOCASE").fetchall()]
+    return render_template("admin.html", workspaces=workspaces, users=users,
+                           msg=request.args.get("msg"), err=request.args.get("err"))
+
+
+@app.route("/account", methods=["GET", "POST"])
+def account_page():
+    user = g.user
+    msg = err = None
+    if request.method == "POST":
+        if not user.get("id") or user.get("bootstrap"):
+            err = "This account's password is the APP_PASSWORD secret; change it there."
+        elif not store().check_login(user["username"], request.form.get("current", "")):
+            err = "Your current password is not right."
+        elif request.form.get("new") != request.form.get("confirm"):
+            err = "The two new passwords do not match."
+        else:
+            try:
+                store().set_password(user["id"], request.form.get("new", ""))
+                fresh = store().user_by_id(user["id"])
+                session["mark"] = _session_mark(fresh)
+                audit("user.password_changed", target=user["username"])
+                msg = "Password changed. Other sessions are signed out."
+            except ValueError as e:
+                err = str(e)
+    return render_template("account.html", msg=msg, err=err)
 
 
 # ---------------------------------------------------------------------------
@@ -534,31 +878,64 @@ def _rfc822(dt_iso: str) -> str:
     return dt.strftime("%a, %d %b %Y %H:%M:%S %z")
 
 
-def _feed_article_url(slug: str, html_file: str | None, base_url: str) -> str:
-    """SITE_URL/<slug> once the author has a real page there; until then, a
-    signed link straight to the app's own rendered HTML, which works today."""
-    site = sw_decisions.SITE_URL
-    if site:
-        return f"{site}/{slug}"
+def ws_identity(ws: dict) -> dict:
+    """Who a workspace publishes as and where its articles live. The default
+    workspace falls back to the environment (SITE_URL, AUTHOR_NAME, ...) as it
+    always has; a client workspace never inherits the studio owner's name."""
+    s = ws.get("settings") or {}
+    default = ws["slug"] == st.DEFAULT_WORKSPACE
+
+    def pick(key: str, env_value: str) -> str:
+        value = str(s.get(key) or "").strip()
+        return value or (env_value if default else "")
+
+    return {
+        "site_url": pick("site_url", sw_decisions.SITE_URL).rstrip("/"),
+        "author_name": pick("author_name", sw_decisions.AUTHOR_NAME) or ws["name"],
+        "author_url": pick("author_url", sw_decisions.AUTHOR_URL),
+        "url_pattern": str(s.get("url_pattern") or "").strip() or "{site}/{slug}",
+    }
+
+
+def article_public_url(ws: dict, slug: str) -> str:
+    """Where the article will live on the client's own site, or "" when the
+    workspace has no site yet. A wrong URL is worse than none."""
+    ident = ws_identity(ws)
+    if not ident['site_url']:
+        return ""
+    return ident["url_pattern"].replace("{site}", ident['site_url']).replace("{slug}", slug)
+
+
+def _rel(out: Path, name: str) -> str:
+    """A workspace file's path under output/, which is what /dl/ links sign."""
+    return (out / name).relative_to(OUTPUT_DIR).as_posix()
+
+
+def _feed_article_url(ws: dict, slug: str, html_file: str | None, base_url: str, out: Path) -> str:
+    """The article's page on the workspace's own site once it has one; until
+    then, a signed link straight to the app's own rendered HTML, which works today."""
+    public = article_public_url(ws, slug)
+    if public:
+        return public
     if html_file:
-        return signed_download_url(html_file, base_url, ttl=FEED_LINK_TTL_SECS)
+        return signed_download_url(_rel(out, html_file), base_url, ttl=FEED_LINK_TTL_SECS)
     return f"{base_url}/library"
 
 
-def _feed_image_url(meta: dict, slug: str, base_url: str) -> str | None:
+def _feed_image_url(meta: dict, slug: str, base_url: str, out: Path) -> str | None:
     for img in meta.get("images", []) or []:
         url = img.get("url", "")
         if sw_decisions.usable_image_url(url):
             return url
-    diagram = OUTPUT_DIR / f"{slug}_diagram_1.png"
+    diagram = out / f"{slug}_diagram_1.png"
     if diagram.exists():
-        return signed_download_url(diagram.name, base_url, ttl=FEED_LINK_TTL_SECS)
+        return signed_download_url(_rel(out, diagram.name), base_url, ttl=FEED_LINK_TTL_SECS)
     return None
 
 
-def _feed_content_html(slug: str) -> str | None:
+def _feed_content_html(slug: str, out: Path) -> str | None:
     """The article's own rendered body, so an importer needs no second fetch."""
-    html_files = sorted(OUTPUT_DIR.glob(f"{slug}*.html"), key=lambda p: p.stat().st_mtime, reverse=True)
+    html_files = sorted(out.glob(f"{slug}*.html"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not html_files:
         return None
     try:
@@ -569,39 +946,60 @@ def _feed_content_html(slug: str) -> str | None:
     return m.group(1).strip() if m else None
 
 
-def feed_items(base_url: str, limit: int = FEED_DEFAULT_LIMIT, include_content: bool = True) -> list[dict]:
-    OUTPUT_DIR.mkdir(exist_ok=True)
+def _feed_ws() -> dict:
+    ws = store().workspace(request.args.get("ws") or st.DEFAULT_WORKSPACE)
+    if not ws:
+        abort(404)
+    return ws
+
+
+def feed_items(base_url: str, limit: int = FEED_DEFAULT_LIMIT, include_content: bool = True,
+               ws: dict | None = None) -> list[dict]:
+    ws = ws or store().workspace(st.DEFAULT_WORKSPACE)
+    out = ws_dir(ws)
+    out.mkdir(parents=True, exist_ok=True)
+    # A client's feed carries only what the client signed off. The studio's own
+    # feed keeps working as before, approval or not.
+    states = store().article_states(ws["id"])
+    only_cleared = ws["slug"] != st.DEFAULT_WORKSPACE
+    author = ws_identity(ws)["author_name"]
     items = []
-    for meta_file in sorted(OUTPUT_DIR.glob("*_meta.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+    for meta_file in sorted(out.glob("*_meta.json"), key=lambda p: p.stat().st_mtime, reverse=True):
         if len(items) >= limit:
             break
         slug = meta_file.stem[:-len("_meta")]
+        if only_cleared and (states.get(slug) or {}).get("status") not in ("approved", "published"):
+            continue
         try:
             meta = json.loads(meta_file.read_text(encoding="utf-8"))
         except Exception:
             continue
         seo = meta.get("seo_meta") or {}
         title = seo.get("title") or slug.replace("-", " ").title()
-        html_files = sorted(OUTPUT_DIR.glob(f"{slug}*.html"), key=lambda p: p.stat().st_mtime, reverse=True)
+        html_files = sorted(out.glob(f"{slug}*.html"), key=lambda p: p.stat().st_mtime, reverse=True)
         html_file = html_files[0].name if html_files else None
         published = meta.get("generated_at") or datetime.now(timezone.utc).isoformat()
-        md_path = OUTPUT_DIR / f"{slug}.md"
+        md_path = out / f"{slug}.md"
         word_count = len(md_path.read_text(encoding="utf-8").split()) if md_path.exists() else None
         item = {
             "id": slug,
             "slug": slug,
             "title": title,
             "summary": seo.get("description", ""),
-            "url": _feed_article_url(slug, html_file, base_url),
-            "image": _feed_image_url(meta, slug, base_url),
+            "url": _feed_article_url(ws, slug, html_file, base_url, out),
+            "image": _feed_image_url(meta, slug, base_url, out),
             "date_published": published,
-            "author": sw_decisions.AUTHOR_NAME,
+            "author": author,
             "word_count": word_count,
         }
         if include_content:
-            item["content_html"] = _feed_content_html(slug)
+            item["content_html"] = _feed_content_html(slug, out)
         items.append(item)
     return items
+
+
+def _ws_query(ws: dict) -> str:
+    return "" if ws["slug"] == st.DEFAULT_WORKSPACE else f"?ws={ws['slug']}"
 
 
 @app.route("/feed.json")
@@ -612,14 +1010,16 @@ def feed_json():
     except (TypeError, ValueError):
         limit = FEED_DEFAULT_LIMIT
     include_content = request.args.get("content", "1") != "0"
-    items = feed_items(base_url, limit=limit, include_content=include_content)
+    ws = _feed_ws()
+    ident = ws_identity(ws)
+    items = feed_items(base_url, limit=limit, include_content=include_content, ws=ws)
     feed = {
         "version": "https://jsonfeed.org/version/1.1",
-        "title": f"{sw_decisions.AUTHOR_NAME} — Articles",
-        "home_page_url": sw_decisions.AUTHOR_URL or base_url,
-        "feed_url": f"{base_url}/feed.json",
-        "description": f"Articles written by {sw_decisions.AUTHOR_NAME}, published via Humanly.",
-        "author": {"name": sw_decisions.AUTHOR_NAME, "url": sw_decisions.AUTHOR_URL},
+        "title": f"{ident['author_name']} — Articles",
+        "home_page_url": ident['author_url'] or ident['site_url'] or base_url,
+        "feed_url": f"{base_url}/feed.json{_ws_query(ws)}",
+        "description": f"Articles written by {ident['author_name']}, published via Humanly.",
+        "author": {"name": ident['author_name'], "url": ident['author_url']},
         "items": [{
             "id": it["id"], "url": it["url"], "title": it["title"],
             "summary": it["summary"],
@@ -645,17 +1045,19 @@ def feed_rss():
         limit = min(FEED_MAX_LIMIT, max(1, int(request.args.get("limit", FEED_DEFAULT_LIMIT))))
     except (TypeError, ValueError):
         limit = FEED_DEFAULT_LIMIT
-    items = feed_items(base_url, limit=limit, include_content=True)
-    site = sw_decisions.AUTHOR_URL or base_url
+    ws = _feed_ws()
+    ident = ws_identity(ws)
+    items = feed_items(base_url, limit=limit, include_content=True, ws=ws)
+    site = ident['author_url'] or ident['site_url'] or base_url
     parts = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" '
         'xmlns:atom="http://www.w3.org/2005/Atom">',
         "<channel>",
-        f"<title>{sw_decisions._esc(sw_decisions.AUTHOR_NAME)} — Articles</title>",
+        f"<title>{sw_decisions._esc(ident['author_name'])} — Articles</title>",
         f"<link>{sw_decisions._esc(site)}</link>",
-        f'<atom:link href="{sw_decisions._esc(base_url)}/feed.xml" rel="self" type="application/rss+xml"/>',
-        f"<description>Articles written by {sw_decisions._esc(sw_decisions.AUTHOR_NAME)}, published via Humanly.</description>",
+        f'<atom:link href="{sw_decisions._esc(base_url)}/feed.xml{sw_decisions._esc(_ws_query(ws))}" rel="self" type="application/rss+xml"/>',
+        f"<description>Articles written by {sw_decisions._esc(ident['author_name'])}, published via Humanly.</description>",
         "<language>en</language>",
     ]
     for it in items:
@@ -681,13 +1083,15 @@ def feed_rss():
 def embed_js():
     """A dependency-free widget: paste one <div> and this <script src> into any
     HTML page (no build step, no framework) and it renders an article grid
-    from /feed.json. data-limit and data-target on the <script> tag configure it."""
+    from /feed.json. data-limit, data-target and data-workspace on the <script>
+    tag configure it."""
     base_url = _public_base_url()
     js = """(function() {
   var thisScript = document.currentScript;
   var limit = (thisScript && thisScript.getAttribute('data-limit')) || 6;
   var targetSel = (thisScript && thisScript.getAttribute('data-target')) || '#humanly-articles';
-  var feedUrl = '%(base)s/feed.json?limit=' + limit + '&content=0';
+  var ws = thisScript && thisScript.getAttribute('data-workspace');
+  var feedUrl = '%(base)s/feed.json?limit=' + limit + '&content=0' + (ws ? '&ws=' + encodeURIComponent(ws) : '');
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"]/g, function(c) {
@@ -767,7 +1171,9 @@ def _valid_callback_url(url: str) -> bool:
 
 
 def _completion_payload(slug: str | None, external_id: str, status: str,
-                        error: str, base_url: str, echo: dict) -> dict:
+                        error: str, base_url: str, echo: dict,
+                        out: Path | None = None) -> dict:
+    out = out or OUTPUT_DIR
     payload = {
         "external_id": external_id,
         "status": status,
@@ -779,7 +1185,7 @@ def _completion_payload(slug: str | None, external_id: str, status: str,
     if not slug:
         return payload
 
-    meta_path = OUTPUT_DIR / f"{slug}_meta.json"
+    meta_path = out / f"{slug}_meta.json"
     try:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
     except Exception:
@@ -787,7 +1193,7 @@ def _completion_payload(slug: str | None, external_id: str, status: str,
     payload["meta"] = meta.get("seo_meta", {})
     payload["images"] = meta.get("images", [])
 
-    md_path = OUTPUT_DIR / f"{slug}.md"
+    md_path = out / f"{slug}.md"
     if md_path.exists():
         text = md_path.read_text(encoding="utf-8")
         payload["word_count"] = len(text.split())
@@ -815,8 +1221,8 @@ def _completion_payload(slug: str | None, external_id: str, status: str,
         "diagram_svg": f"{slug}_diagram_1.svg",
         "usage": f"{slug}_usage.json",
     }.items():
-        if (OUTPUT_DIR / name).exists():
-            files[key] = signed_download_url(name, base_url)
+        if (out / name).exists():
+            files[key] = signed_download_url(_rel(out, name), base_url)
     payload["files"] = files
 
     # The small extras travel inline too - they are what the downstream media
@@ -824,11 +1230,11 @@ def _completion_payload(slug: str | None, external_id: str, status: str,
     for key, name in {"linkedin_md": f"{slug}_linkedin.md",
                       "video_script_md": f"{slug}_video.md",
                       "video_meta_md": f"{slug}_video_meta.md"}.items():
-        p = OUTPUT_DIR / name
+        p = out / name
         if p.exists():
             payload[key] = p.read_text(encoding="utf-8")
 
-    usage_path = OUTPUT_DIR / f"{slug}_usage.json"
+    usage_path = out / f"{slug}_usage.json"
     try:
         u = json.loads(usage_path.read_text(encoding="utf-8"))
         payload["usage"] = {k: u.get(k) for k in
@@ -865,7 +1271,8 @@ def _radar_payload(callback: dict, status: str, error: str) -> dict:
         "error": error or None,
         "finished_at": datetime.now(timezone.utc).isoformat(),
     }
-    latest = OUTPUT_DIR / "radar_latest.json"
+    out = Path(callback.get("out") or OUTPUT_DIR)
+    latest = out / "radar_latest.json"
     if status == "done" and latest.exists():
         try:
             radar = json.loads(latest.read_text(encoding="utf-8"))
@@ -875,15 +1282,15 @@ def _radar_payload(callback: dict, status: str, error: str) -> dict:
         stamp = str(radar.get("generated_at") or "")[:10]
         files = {}
         for key, name in {"radar_md": f"radar_{stamp}.md", "radar_json": f"radar_{stamp}.json"}.items():
-            if (OUTPUT_DIR / name).exists():
-                files[key] = signed_download_url(name, callback["base_url"])
+            if (out / name).exists():
+                files[key] = signed_download_url(_rel(out, name), callback["base_url"])
         payload["files"] = files
     return payload
 
 
-def _new_slug(baseline: set) -> str | None:
+def _new_slug(baseline: set, out: Path | None = None) -> str | None:
     """The article this job wrote: whichever _meta.json did not exist before it."""
-    fresh = [p for p in OUTPUT_DIR.glob("*_meta.json") if p.name not in baseline]
+    fresh = [p for p in (out or OUTPUT_DIR).glob("*_meta.json") if p.name not in baseline]
     if not fresh:
         return None
     newest = max(fresh, key=lambda p: p.stat().st_mtime)
@@ -926,11 +1333,12 @@ def api_start():
 
     if not topic:
         return jsonify({"error": "topic is required"}), 400
+    needs("run")
 
     cmd = [
         sys.executable, str(BASE_DIR / "seo_writer.py"),
         topic,
-        "--output-dir", str(OUTPUT_DIR),
+        "--output-dir", str(ws_dir()),
         "--edition", str(edition),
         "--words", words,
     ]
@@ -957,112 +1365,242 @@ def api_start():
 
     callback = None
     if callback_url:
-        OUTPUT_DIR.mkdir(exist_ok=True)
         callback = {
             "url": callback_url,
             "external_id": external_id,
             "base_url": _public_base_url(),
-            "article_baseline": {p.name for p in OUTPUT_DIR.glob("*_meta.json")},
             "echo": {"topic": topic, "intent": intent, "take": take, "words": words,
                      "edition": edition, "linkedin": linkedin,
                      "video": video, "voiceover": voiceover, "mp4": mp4, "thumbnail": thumbnail},
         }
 
-    job_id = _spawn(cmd, callback=callback)
+    job_id = _spawn(cmd, callback=callback, kind="article", label=topic)
+    audit("article.started", target=topic, detail={"job_id": job_id, "words": words})
     return jsonify({"job_id": job_id, "external_id": external_id or None})
 
 
+# ---------------------------------------------------------------------------
+# Jobs: a queue in the database, a log on the volume, a few workers
+# ---------------------------------------------------------------------------
+
+_workers_started: set = set()
+_workers_lock = threading.Lock()
+# Workers sleep until a job is queued, with a slow fallback check: an idle app
+# should not be opening its database every second.
+_wake = threading.Event()
+IDLE_CHECK_SECS = 30
+TERMINAL = ("done", "failed", "interrupted")
+
+
+def _job_log(job_id: str) -> Path:
+    return system_dir() / "jobs" / f"{job_id}.log"
+
+
 def _spawn(cmd: list[str], review_baseline: set | None = None,
-           callback: dict | None = None) -> str:
-    """Run seo_writer.py in the background, streaming its output to a job queue.
+           callback: dict | None = None, kind: str = "article", label: str = "",
+           ws: dict | None = None) -> str:
+    """Queue seo_writer.py to run in the background. Returns the job id at once;
+    the browser follows the log over /api/stream/<job_id>.
 
-    Shared by generation and audit: both are the same pipeline script with
-    different flags, and both want the same live log.
+    Shared by generation, audit, the radar and site intake: all are the same
+    kind of script with different flags, and all want the same live log.
 
-    `callback`, when given, is {url, external_id, base_url, article_baseline,
-    echo}: after the process exits, one completion payload is POSTed to url.
+    `callback`, when given, is {url, external_id, base_url, echo} (plus
+    kind="radar" for a radar run): after the process exits, one completion
+    payload is POSTed to url. `review_baseline` is accepted for older callers;
+    the worker now takes its own snapshot when the job actually starts.
     """
-    _reap_jobs()
+    ws = ws or getattr(g, "ws", None) or store().workspace(st.DEFAULT_WORKSPACE)
     job_id = str(uuid.uuid4())
-    q: queue.Queue = queue.Queue()
-    with _jobs_lock:
-        _jobs[job_id] = q
-        _job_started[job_id] = time.time()
+    by = actor() if getattr(g, "user", None) else "scheduler"
+    store().add_job(job_id, ws["id"], kind, label or kind, cmd, by,
+                    extra={"callback": callback})
+    _start_workers()
+    _wake.set()
+    return job_id
+
+
+def _start_workers():
+    key = str(system_dir())
+    with _workers_lock:
+        if key in _workers_started:
+            return
+        _workers_started.add(key)
+    for n in range(MAX_CONCURRENT_JOBS):
+        threading.Thread(target=_worker_loop, args=(key,), name=f"job-worker-{n}",
+                         daemon=True).start()
+
+
+def _worker_loop(key: str):
+    while True:
+        try:
+            if str(system_dir()) != key:   # the output folder moved (tests do this)
+                return
+            job = store().claim_next_job()
+            if job is None:
+                _wake.wait(IDLE_CHECK_SECS)
+                _wake.clear()
+                continue
+            _run_job(job)
+            _wake.set()   # a finished job may unblock another in the same workspace
+        except Exception as e:
+            print(f"[jobs] worker error: {e}", flush=True)
+            time.sleep(JOB_POLL_SECS)
+
+
+# What a workspace can say about itself. Text fields, all optional.
+WORKSPACE_FIELDS = ("site_url", "url_pattern", "author_name", "author_url", "author_bio",
+                    "brand_guide", "brand_cta", "radar_lens", "retention_days")
+WORKSPACE_FLAGS = ("require_approval",)
+
+
+def pipeline_env(ws: dict) -> dict:
+    """Environment overrides that make the pipeline write as this workspace.
+    Filled in by the workspace settings (see the Settings page)."""
+    return {}
+
+
+def _run_job(job: dict):
+    ws = _ws_by_id(job["workspace_id"])
+    out = ws_dir(ws)
+    out.mkdir(parents=True, exist_ok=True)
+    log_path = _job_log(job["id"])
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    callback = (job.get("extra") or {}).get("callback")
+    # Whichever file is new after the run is this job's. Snapshotting when the
+    # job starts (one job per workspace runs at a time) beats predicting the slug.
+    meta_before = {p.name for p in out.glob("*_meta.json")}
+    review_before = {p.name for p in out.glob("*_review.json")}
 
     def notify(status: str, error: str = ""):
         if not callback:
             return
         if callback.get("kind") == "radar":
-            payload = _radar_payload(callback, status, error)
+            payload = _radar_payload({**callback, "out": str(out)}, status, error)
         else:
-            slug = _new_slug(callback["article_baseline"])
-            payload = _completion_payload(slug, callback["external_id"], status,
+            slug = _new_slug(meta_before, out)
+            payload = _completion_payload(slug, callback.get("external_id", ""), status,
                                           error, callback["base_url"],
-                                          callback["echo"])
-        payload["job_id"] = job_id
+                                          callback.get("echo") or {}, out=out)
+        payload["job_id"] = job["id"]
         threading.Thread(target=_post_callback,
                          args=(callback["url"], payload), daemon=True).start()
 
-    def run():
+    with open(log_path, "a", encoding="utf-8") as log:
         try:
             proc = subprocess.Popen(
-                cmd,
+                job["cmd"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
-                env={**os.environ},
+                env={**os.environ, **pipeline_env(ws)},
             )
             last_error = ""
             tail = deque(maxlen=40)
             for line in proc.stdout:
                 line = line.rstrip()
                 # seo_writer.py prefixes fatal, already-human-readable failures
-                # with "ERROR:" — prefer that over a bare exit code.
+                # with "ERROR:" - prefer that over a bare exit code.
                 if line.startswith("ERROR:"):
                     last_error = line[len("ERROR:"):].strip()
                 tail.append(line)
-                q.put(("log", line))
+                log.write(line + "\n")
+                log.flush()
             proc.wait()
             if proc.returncode != 0:
-                # The child's output only ever went to the browser, so a crash
-                # vanished when the tab closed and the server log showed nothing.
-                # Echo the tail so it survives in `flyctl logs`.
-                print(f"[job] pipeline exited {proc.returncode}; last output:",
+                # Echo the tail so a crash survives in `flyctl logs` as well.
+                print(f"[job] {job['kind']} {job['id']} exited {proc.returncode}; last output:",
                       flush=True)
                 for line in tail:
                     print(f"[job]   {line}", flush=True)
                 message = (last_error
                            or f"Pipeline exited with code {proc.returncode}. "
                               f"The server log has the last 40 lines.")
-                q.put(("error", message))
+                store().finish_job(job["id"], "failed", error=message)
+                store().audit("job.failed", username=job["created_by"], ws_id=ws["id"],
+                              target=job["label"], detail={"job_id": job["id"], "kind": job["kind"],
+                                                           "error": message[:300]})
                 notify("error", message)
                 return
 
-            payload = {}
-            if review_baseline is not None:
-                # Whichever report is new is this job's. Identifying it by
-                # difference beats predicting the slug the pipeline will pick.
-                fresh = [p for p in OUTPUT_DIR.glob("*_review.json")
-                         if p.name not in review_baseline]
-                if fresh:
-                    newest = max(fresh, key=lambda p: p.stat().st_mtime)
-                    payload["review_slug"] = newest.stem[:-len("_review")]
-            q.put(("done", json.dumps(payload)))
+            result = {}
+            fresh_reviews = [p for p in out.glob("*_review.json") if p.name not in review_before]
+            if job["kind"] == "audit" and fresh_reviews:
+                newest = max(fresh_reviews, key=lambda p: p.stat().st_mtime)
+                result["review_slug"] = newest.stem[:-len("_review")]
+            if job["kind"] == "article":
+                slug = _new_slug(meta_before, out)
+                if slug:
+                    result["slug"] = slug
+                    state = store().article_state(ws["id"], slug)
+                    if not state.get("updated_at"):
+                        store().set_status(ws["id"], slug, "draft", job["created_by"])
+            store().finish_job(job["id"], "done", result=result)
+            store().audit(f"{job['kind']}.finished", username=job["created_by"], ws_id=ws["id"],
+                          target=result.get("slug") or job["label"],
+                          detail={"job_id": job["id"]})
             notify("done")
         except Exception as e:
-            q.put(("error", str(e)))
+            log.write(f"ERROR: {e}\n")
+            store().finish_job(job["id"], "failed", error=str(e))
             notify("error", str(e))
 
-    threading.Thread(target=run, daemon=True).start()
-    return job_id
+
+def job_estimates(ws_id: int | None = None) -> dict:
+    """Typical minutes per kind of job, from the runs this app has timed."""
+    durations = defaultdict(list)
+    for j in store().jobs(ws_id, limit=200, statuses=("done",)):
+        try:
+            secs = (datetime.fromisoformat(j["finished_at"])
+                    - datetime.fromisoformat(j["started_at"])).total_seconds()
+        except (TypeError, ValueError):
+            continue
+        durations[j["kind"]].append(secs)
+    out = {}
+    for kind, secs in durations.items():
+        secs.sort()
+        out[kind] = {"runs": len(secs), "median_minutes": round(secs[len(secs) // 2] / 60, 1)}
+    return out
+
+
+def _job_view(j: dict) -> dict:
+    view = {k: j.get(k) for k in ("id", "kind", "label", "status", "created_by", "created_at",
+                                  "started_at", "finished_at", "error", "result")}
+    if j["status"] == "queued":
+        view["ahead"] = store().queue_position(j["id"])
+    return view
+
+
+@app.route("/api/jobs")
+def api_jobs():
+    jobs = store().jobs(g.ws["id"], limit=50)
+    return jsonify({"jobs": [_job_view(j) for j in jobs],
+                    "estimates": job_estimates(g.ws["id"])})
+
+
+@app.route("/api/jobs/<job_id>/retry", methods=["POST"])
+def api_job_retry(job_id):
+    needs("run")
+    job = store().job(job_id)
+    if not job or job["workspace_id"] != g.ws["id"]:
+        return jsonify({"error": "job not found"}), 404
+    if job["status"] not in ("interrupted", "failed"):
+        return jsonify({"error": "only a failed or interrupted job can be retried"}), 400
+    _job_log(job_id).unlink(missing_ok=True)
+    store().requeue_job(job_id)
+    audit("job.retried", target=job["label"], detail={"job_id": job_id})
+    _start_workers()
+    _wake.set()
+    return jsonify({"job_id": job_id})
 
 
 # ---------------------------------------------------------------------------
 # Evaluate a draft you already have
 # ---------------------------------------------------------------------------
 
-UPLOAD_DIR = OUTPUT_DIR / "uploads"
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024          # a 2 MB article is already enormous
 ALLOWED_SUFFIXES = {".md", ".markdown", ".txt", ".docx"}
 
@@ -1120,15 +1658,16 @@ def _draft_from_request() -> tuple[str, str]:
 # Topic radar: what to write
 # ---------------------------------------------------------------------------
 
-def _radar_cmd(days: int) -> list[str]:
+def _radar_cmd(days: int, out: Path | None = None) -> list[str]:
     return [sys.executable, str(BASE_DIR / "seo_writer.py"), "--radar",
-            "--radar-days", str(days), "--output-dir", str(OUTPUT_DIR)]
+            "--radar-days", str(days), "--output-dir", str(out or ws_dir())]
 
 
 @app.route("/api/radar", methods=["POST"])
 def api_radar():
     """Start a radar run. Same job stream as an article; the result lands in
     output/radar_latest.json and is read back through /api/radar/latest."""
+    needs("run")
     data = request.get_json(silent=True) or {}
     try:
         days = max(3, min(60, int(data.get("days") or 14)))
@@ -1142,12 +1681,15 @@ def api_radar():
         callback = {"kind": "radar", "url": callback_url,
                     "external_id": str(data.get("external_id") or "")[:200],
                     "base_url": _public_base_url()}
-    return jsonify({"job_id": _spawn(_radar_cmd(days), callback=callback)})
+    audit("radar.started", detail={"days": days})
+    return jsonify({"job_id": _spawn(_radar_cmd(days), callback=callback, kind="radar",
+                                     label=f"Radar, last {days} days")})
 
 
 @app.route("/api/radar/dig", methods=["POST"])
 def api_radar_dig():
     """Deep research on one theme of the latest radar (1-based index)."""
+    needs("run")
     data = request.get_json(silent=True) or {}
     try:
         index = int(data.get("index") or 0)
@@ -1155,24 +1697,25 @@ def api_radar_dig():
         index = 0
     if index < 1:
         return jsonify({"error": "index must be a theme number, starting at 1"}), 400
-    if not (OUTPUT_DIR / "radar_latest.json").exists():
+    if not (ws_dir() / "radar_latest.json").exists():
         return jsonify({"error": "run the radar first"}), 400
     cmd = [sys.executable, str(BASE_DIR / "seo_writer.py"), "--dig", str(index),
-           "--output-dir", str(OUTPUT_DIR)]
-    return jsonify({"job_id": _spawn(cmd)})
+           "--output-dir", str(ws_dir())]
+    audit("dig.started", detail={"theme": index})
+    return jsonify({"job_id": _spawn(cmd, kind="dig", label=f"Dig in on theme {index}")})
 
 
 @app.route("/api/radar/latest")
 def api_radar_latest():
     """The latest radar, each theme annotated with the author's decision."""
-    latest = OUTPUT_DIR / "radar_latest.json"
+    latest = ws_dir() / "radar_latest.json"
     if not latest.exists():
         return jsonify({"themes": [], "generated_at": None})
     try:
         radar = json.loads(latest.read_text(encoding="utf-8"))
     except Exception:
         return jsonify({"themes": [], "generated_at": None})
-    decisions = sw_decisions.load_decisions(OUTPUT_DIR)
+    decisions = sw_decisions.load_decisions(ws_dir())
     for t in radar.get("themes") or []:
         d = sw_decisions.decision_for(t.get("title", ""), decisions)
         t["decision"] = d.get("status") if d else None
@@ -1183,19 +1726,20 @@ def api_radar_latest():
 @app.route("/api/radar/decide", methods=["POST"])
 def api_radar_decide():
     """Approve, skip, or un-decide a theme. The next radar remembers."""
+    needs("run")
     data = request.get_json(silent=True) or {}
     title = (data.get("title") or "").strip()
     status = (data.get("status") or "").strip().lower()
     if not title:
         return jsonify({"error": "title is required"}), 400
     if status == "clear":
-        decisions = sw_decisions.load_decisions(OUTPUT_DIR)
+        decisions = sw_decisions.load_decisions(ws_dir())
         decisions.pop(sw_decisions._decision_key(title), None)
-        (OUTPUT_DIR / "radar_decisions.json").write_text(json.dumps(decisions, indent=2, ensure_ascii=False), encoding="utf-8")
+        (ws_dir() / "radar_decisions.json").write_text(json.dumps(decisions, indent=2, ensure_ascii=False), encoding="utf-8")
         return jsonify({"title": title, "status": None})
     if status not in sw_decisions.DECISION_STATUSES:
         return jsonify({"error": "status must be approved, skipped, written or clear"}), 400
-    rec = sw_decisions.record_decision(OUTPUT_DIR, title, status, note=str(data.get("note") or "")[:300])
+    rec = sw_decisions.record_decision(ws_dir(), title, status, note=str(data.get("note") or "")[:300])
     return jsonify(rec)
 
 
@@ -1228,7 +1772,9 @@ def _weekly_radar_loop():
                 if RADAR_CALLBACK_URL and _valid_callback_url(RADAR_CALLBACK_URL):
                     callback = {"kind": "radar", "url": RADAR_CALLBACK_URL, "external_id": "weekly",
                                 "base_url": os.environ.get("PUBLIC_URL", "").rstrip("/")}
-                _spawn(_radar_cmd(14), callback=callback)
+                ws = store().workspace(st.DEFAULT_WORKSPACE)
+                _spawn(_radar_cmd(14, OUTPUT_DIR), callback=callback, kind="radar",
+                       label="Weekly radar", ws=ws)
         except Exception as e:
             print(f"[radar] weekly check failed: {e}", flush=True)
         time.sleep(3600)
@@ -1246,6 +1792,7 @@ _start_weekly_radar()
 @app.route("/api/audit/start", methods=["POST"])
 def api_audit_start():
     """Run the three agents over a document the user supplied. Returns { job_id }."""
+    needs("run")
     try:
         draft, filename = _draft_from_request()
     except ValueError as e:
@@ -1263,18 +1810,15 @@ def api_audit_start():
         rounds = 2
     apply_fixes = (request.form.get("apply") or "").lower() in {"1", "true", "on", "yes"}
 
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    draft_path = UPLOAD_DIR / f"{uuid.uuid4().hex}.md"
+    upload_dir = system_dir() / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    draft_path = upload_dir / f"{uuid.uuid4().hex}.md"
     draft_path.write_text(draft, encoding="utf-8")
-
-    # Snapshot what already exists so the new report can be identified afterwards,
-    # rather than guessing at the slug the pipeline will choose.
-    before = {p.name for p in OUTPUT_DIR.glob("*_review.json")}
 
     cmd = [
         sys.executable, str(BASE_DIR / "seo_writer.py"),
         "--audit", str(draft_path),
-        "--output-dir", str(OUTPUT_DIR),
+        "--output-dir", str(ws_dir()),
         "--verify-rounds", str(rounds),
     ]
     if topic:
@@ -1284,7 +1828,8 @@ def api_audit_start():
     if apply_fixes:
         cmd.append("--apply")
 
-    return jsonify({"job_id": _spawn(cmd, review_baseline=before)})
+    audit("audit.started", target=topic or "pasted draft", detail={"rounds": rounds})
+    return jsonify({"job_id": _spawn(cmd, kind="audit", label=topic or "Draft evaluation")})
 
 
 @app.route("/api/reviews")
@@ -1294,9 +1839,10 @@ def api_reviews():
 
 def list_reviews() -> list[dict]:
     """Every verification report on disk, newest first."""
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    folder = ws_dir()
+    folder.mkdir(parents=True, exist_ok=True)
     out = []
-    for path in sorted(OUTPUT_DIR.glob("*_review.json"),
+    for path in sorted(folder.glob("*_review.json"),
                        key=lambda p: p.stat().st_mtime, reverse=True):
         slug = path.stem[:-len("_review")]
         try:
@@ -1345,7 +1891,7 @@ def parse_video_script(text: str) -> list[dict]:
 @app.route("/deck/<slug>")
 def deck_page(slug):
     """A presentable visual track built from the article's video script."""
-    path = OUTPUT_DIR / f"{Path(slug).name}_video.md"
+    path = ws_dir() / f"{Path(slug).name}_video.md"
     if not path.exists():
         return render_template("deck.html", beats=None, slug=slug), 404
     beats = parse_video_script(path.read_text(encoding="utf-8"))
@@ -1354,7 +1900,7 @@ def deck_page(slug):
 
 @app.route("/review/<slug>")
 def review_page(slug):
-    path = OUTPUT_DIR / f"{Path(slug).name}_review.json"
+    path = ws_dir() / f"{Path(slug).name}_review.json"
     if not path.exists():
         return render_template("review.html", record=None, slug=slug), 404
     record = json.loads(path.read_text(encoding="utf-8"))
@@ -1372,59 +1918,70 @@ def review_page(slug):
 
 @app.route("/api/stream/<job_id>")
 def api_stream(job_id):
-    """EventSource endpoint — streams log lines then a done/error event."""
-    with _jobs_lock:
-        q = _jobs.get(job_id)
-    if q is None:
+    """EventSource endpoint - streams log lines then a done/failed event.
+
+    The log lives on disk, so a reconnect (EventSource sends Last-Event-ID, the
+    byte offset of the last line it saw) picks up exactly where it left off,
+    even after the server restarted."""
+    job = store().job(job_id)
+    if job is None:
         return jsonify({"error": "job not found"}), 404
+    if not store().role_in(g.user, _ws_by_id(job["workspace_id"])):
+        return jsonify({"error": "job not found"}), 404
+    try:
+        start = max(0, int(request.headers.get("Last-Event-ID") or 0))
+    except ValueError:
+        start = 0
+    log_path = _job_log(job_id)
 
     def stream():
         # "error" is a reserved EventSource event name: the browser fires it on
-        # any connection failure, with no data attached. Sending pipeline
-        # failures under that name made a dropped connection and a real failure
-        # arrive at the same handler, indistinguishable. They are sent as
-        # "failed" instead.
-        silent = 0
-        finished = False
-        try:
-            while True:
-                try:
-                    kind, msg = q.get(timeout=HEARTBEAT_SECS)
-                except queue.Empty:
-                    silent += HEARTBEAT_SECS
-                    if silent >= SILENCE_LIMIT_SECS:
-                        minutes = SILENCE_LIMIT_SECS // 60
-                        finished = True
-                        yield (
-                            "event: failed\ndata: "
-                            + json.dumps({"message": f"The pipeline stopped "
-                                                     f"responding after {minutes} "
-                                                     f"minutes."})
-                            + "\n\n"
-                        )
-                        break
-                    yield ": keepalive\n\n"
-                    continue
+        # any connection failure, with no data attached. Pipeline failures are
+        # sent as "failed" so the two never arrive at the same handler.
+        pos, idle, said_queued = start, 0.0, None
+        while True:
+            chunk = b""
+            if log_path.exists():
+                with open(log_path, "rb") as f:
+                    f.seek(pos)
+                    chunk = f.read(65536)
+            if chunk and b"\n" in chunk:
+                complete = chunk[:chunk.rindex(b"\n") + 1]
+                for raw in complete.splitlines(keepends=True):
+                    pos += len(raw)
+                    line = raw.decode("utf-8", "replace").rstrip("\r\n")
+                    yield f"id: {pos}\nevent: log\ndata: {json.dumps({'line': line})}\n\n"
+                idle = 0.0
+                continue
 
-                silent = 0
-                if kind == "log":
-                    yield f"event: log\ndata: {json.dumps({'line': msg})}\n\n"
-                elif kind == "done":
-                    finished = True
-                    yield f"event: done\ndata: {msg or '{}'}\n\n"
-                    break
-                elif kind == "error":
-                    finished = True
-                    yield f"event: failed\ndata: {json.dumps({'message': msg})}\n\n"
-                    break
-        finally:
-            # Only forget the job once it actually ended. Dropping it on any
-            # disconnect defeated EventSource's own reconnect - the retry hit a
-            # 404 and gave up, while the pipeline carried on unwatched.
-            if finished:
-                with _jobs_lock:
-                    _jobs.pop(job_id, None)
-                    _job_started.pop(job_id, None)
+            current = store().job(job_id) or {}
+            status = current.get("status")
+            if status == "queued":
+                ahead = store().queue_position(job_id)
+                if ahead != said_queued:
+                    said_queued = ahead
+                    note = ("Queued - another job in this workspace is running; this one starts next."
+                            if ahead == 0 else f"Queued behind {ahead} other job(s).")
+                    yield f"event: log\ndata: {json.dumps({'line': note})}\n\n"
+            elif status == "done":
+                yield f"event: done\ndata: {json.dumps(current.get('result') or {})}\n\n"
+                return
+            elif status in ("failed", "interrupted"):
+                message = current.get("error") or "The job did not finish."
+                yield f"event: failed\ndata: {json.dumps({'message': message})}\n\n"
+                return
+
+            time.sleep(0.5)
+            idle += 0.5
+            if status == "running" and idle >= SILENCE_LIMIT_SECS:
+                minutes = SILENCE_LIMIT_SECS // 60
+                yield ("event: failed\ndata: "
+                       + json.dumps({"message": f"The pipeline stopped responding after {minutes} minutes."})
+                       + "\n\n")
+                return
+            if idle % HEARTBEAT_SECS == 0:
+                # Keep the browser and Fly's edge proxy from closing a quiet stream.
+                yield ": keepalive\n\n"
 
     return Response(
         stream(),
