@@ -55,7 +55,7 @@ Optional, to have OpenAI judge disputes in the Step 6.5 audit instead of Claude:
 ```bash
 flyctl secrets set OPENAI_API_KEY=sk-... OPENAI_JUDGE_MODEL=gpt-5
 ```
-Without it the judge stays on `claude-opus-5`. Nothing breaks if it is unset.
+Without it the judge stays on `claude-opus-5-5`. Nothing breaks if it is unset.
 
 ## 6. Deploy
 ```bash

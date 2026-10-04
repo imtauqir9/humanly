@@ -30,6 +30,13 @@ def test_opus_costs_more_than_sonnet_for_the_same_work():
            sw._price("claude-sonnet-5", 100_000, 50_000)
 
 
+def test_the_models_the_pipeline_calls_are_priced():
+    # claude-opus-5-5 is $4 in / $20 out per million.
+    for model in (sw.MODEL, sw.VERIFIER_MODEL, sw.JUDGE_MODEL):
+        assert sw._price(model, 1000, 1000) is not None, model
+    assert abs(sw._price("claude-opus-5-5", 1_000_000, 1_000_000) - 24.0) < 1e-9
+
+
 def test_unknown_model_has_no_price_rather_than_a_wrong_one():
     assert sw._price("some-model-we-never-heard-of", 1000, 1000) is None
 

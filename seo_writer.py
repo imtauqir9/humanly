@@ -60,7 +60,7 @@ _load_dotenv()
 # Configuration
 # ---------------------------------------------------------------------------
 
-MODEL = "claude-sonnet-5"
+MODEL = "claude-sonnet-5-5"
 
 # Three roles argue about the article: the writer produces it, the auditor attacks
 # it, the judge settles what they cannot. The point of the stage is decorrelated
@@ -72,9 +72,9 @@ MODEL = "claude-sonnet-5"
 # auditor means the finding never exists to be argued about. Distinctness is
 # therefore spent on the auditor first.
 
-VERIFIER_MODEL = "claude-opus-5"    # Anthropic-side auditor: not the writer's weights
+VERIFIER_MODEL = "claude-opus-5-5"  # Anthropic-side auditor: not the writer's weights
 VERIFIER_EFFORT = "high"
-JUDGE_MODEL = "claude-opus-5"
+JUDGE_MODEL = "claude-opus-5-5"
 JUDGE_EFFORT = "high"
 
 OPENAI_JUDGE_MODEL = os.getenv("OPENAI_JUDGE_MODEL", "gpt-5.5")
@@ -177,6 +177,9 @@ AUTHOR_URL = os.getenv("AUTHOR_URL", "https://imrantauqir.com/")
 # pricing page before trusting the totals - override with MODEL_PRICES, a JSON
 # object of {"model": [input, output]}.
 MODEL_PRICES = {
+    "claude-opus-5-5": (4.00, 20.00),
+    "claude-sonnet-5-5": (2.00, 10.00),
+    # The previous generation stays priced so older ledger rows still add up.
     "claude-opus-5": (5.00, 25.00),
     "claude-sonnet-5": (2.00, 10.00),
     "claude-haiku-4-5": (1.00, 5.00),
@@ -406,9 +409,8 @@ def call_claude(prompt: str, system: str = "", max_tokens: int = 16000,
         "model": model,
         "max_tokens": max_tokens,
         "messages": messages,
-        # Sonnet 5 runs adaptive thinking when `thinking` is omitted, so state it
-        # explicitly. Low effort keeps the token cost close to the old no-thinking
-        # behaviour while still buying Sonnet 5's better planning.
+        # The 5.5 models always think (a disabled setting is a 400), so effort is
+        # the only dial. State it every time: Opus 5.5 defaults to medium, not high.
         "thinking": {"type": "adaptive"},
         "output_config": {"effort": effort},
     }

@@ -467,7 +467,7 @@ img { max-width: 100%; }
 <span class="d">[STEP 5]</span> Writing article content, target 3000 words
 <span class="d">[STEP 6]</span> Humanizing content (pass 3 - targeted repair)
 <span class="d">[STEP 6.5]</span> Agents
-   writer   claude-sonnet-5   anthropic
+   writer   claude-sonnet-5-5 anthropic
    auditor  gpt-5.5           openai
    judge    gemini-2.5-pro    gemini
 <span class="d">[STEP 6.5]</span> Writer responding to 4 finding(s)</div>
@@ -701,9 +701,9 @@ img { max-width: 100%; }
     <table>
       <thead><tr><th>Keys present</th><th>Writer</th><th>Auditor</th><th>Judge</th></tr></thead>
       <tbody>
-        <tr><td>Anthropic only</td><td class="mono">claude-sonnet-5</td><td class="mono">claude-opus-5</td><td class="mono">claude-opus-5</td></tr>
-        <tr><td>+ OpenAI</td><td class="mono">claude-sonnet-5</td><td class="mono">gpt-5.5</td><td class="mono">claude-opus-5</td></tr>
-        <tr><td>+ OpenAI + Gemini</td><td class="mono">claude-sonnet-5</td><td class="mono">gpt-5.5</td><td class="mono">gemini-2.5-pro</td></tr>
+        <tr><td>Anthropic only</td><td class="mono">claude-sonnet-5-5</td><td class="mono">claude-opus-5-5</td><td class="mono">claude-opus-5-5</td></tr>
+        <tr><td>+ OpenAI</td><td class="mono">claude-sonnet-5-5</td><td class="mono">gpt-5.5</td><td class="mono">claude-opus-5-5</td></tr>
+        <tr><td>+ OpenAI + Gemini</td><td class="mono">claude-sonnet-5-5</td><td class="mono">gpt-5.5</td><td class="mono">gemini-2.5-pro</td></tr>
       </tbody>
     </table>
   </div>
@@ -894,13 +894,13 @@ img { max-width: 100%; }
     <table>
       <thead><tr><th>Model</th><th>Role</th><th class="num">Calls</th><th class="num">Input</th><th class="num">Output</th><th class="num">Cost</th></tr></thead>
       <tbody>
-        <tr><td class="mono">claude-sonnet-5</td><td>writer</td><td class="num">11</td><td class="num">120,400</td><td class="num">19,900</td><td class="num">$0.440</td></tr>
-        <tr><td class="mono">claude-opus-5</td><td>judge</td><td class="num">4</td><td class="num">48,100</td><td class="num">6,200</td><td class="num">$0.396</td></tr>
+        <tr><td class="mono">claude-sonnet-5-5</td><td>writer</td><td class="num">11</td><td class="num">120,400</td><td class="num">19,900</td><td class="num">$0.440</td></tr>
+        <tr><td class="mono">claude-opus-5-5</td><td>judge</td><td class="num">4</td><td class="num">48,100</td><td class="num">6,200</td><td class="num">$0.316</td></tr>
         <tr><td class="mono">gpt-5.5</td><td>auditor</td><td class="num">2</td><td class="num">15,703</td><td class="num">1,310</td><td class="num" style="color:var(--warn)">unpriced</td></tr>
       </tbody>
     </table>
   </div>
-  <p class="note" style="margin-top:18px">One run: <b>211,613 tokens across 17 calls, $0.84 plus unpriced models.</b> Figures from a sample run, shown as an example. Add rates for models the built-in table doesn't cover with <code>MODEL_PRICES</code> and the floor becomes a number.</p>
+  <p class="note" style="margin-top:18px">One run: <b>211,613 tokens across 17 calls, $0.76 plus unpriced models.</b> Figures from a sample run, shown as an example. Add rates for models the built-in table doesn't cover with <code>MODEL_PRICES</code> and the floor becomes a number.</p>
 </section>
 
 <!-- ============================ FAILURE ============================ -->

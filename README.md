@@ -152,9 +152,9 @@ Which roles run where, by the keys you have:
 
 | Keys present | Writer | Auditor | Judge |
 |---|---|---|---|
-| Anthropic only | `claude-sonnet-5` | `claude-opus-5` | `claude-opus-5` |
-| Anthropic + OpenAI | `claude-sonnet-5` | `gpt-5.5` | `claude-opus-5` |
-| Anthropic + OpenAI + Gemini | `claude-sonnet-5` | `gpt-5.5` | `gemini-2.5-pro` |
+| Anthropic only | `claude-sonnet-5-5` | `claude-opus-5-5` | `claude-opus-5-5` |
+| Anthropic + OpenAI | `claude-sonnet-5-5` | `gpt-5.5` | `claude-opus-5-5` |
+| Anthropic + OpenAI + Gemini | `claude-sonnet-5-5` | `gpt-5.5` | `gemini-2.5-pro` |
 
 The writer always stays on Anthropic — the style prompts and sample-article matching were tuned against it, so swapping it changes the product rather than checking it. If a vendor is down mid-run, that role falls back to Claude and says so, because a vendor outage must not destroy an article that already cost a dozen calls.
 
@@ -566,7 +566,7 @@ Token counts come from what each API actually reports — `usage.input_tokens` a
 OpenAI, `usage_metadata` on Gemini. They are counted, never estimated.
 
 Cost is a softer layer. The built-in table carries Anthropic's first-party list
-prices (`claude-sonnet-5` $2/$10 per MTok, `claude-opus-5` $5/$25). **A model
+prices (`claude-sonnet-5-5` $2/$10 per MTok, `claude-opus-5-5` $4/$20). **A model
 with no price on file still has its tokens counted and simply reports no dollar
 figure** rather than a wrong one — the dashboard flags those runs and treats the
 total as a floor. Add your own rates rather than trusting a guess:
@@ -579,10 +579,10 @@ The CLI prints the same summary at the end of every run:
 
 ```
   Tokens: 184,203 in + 27,410 out = 211,613 across 17 calls
-    claude-sonnet-5       11 calls   120,400 in   19,900 out  $0.440
-    claude-opus-5          4 calls    48,100 in    6,200 out  $0.396
+    claude-sonnet-5-5     11 calls   120,400 in   19,900 out  $0.440
+    claude-opus-5-5        4 calls    48,100 in    6,200 out  $0.316
     gpt-5.5                2 calls    15,703 in    1,310 out  unpriced
-  Estimated cost: $0.84 plus unpriced models
+  Estimated cost: $0.76 plus unpriced models
 ```
 
 ---
