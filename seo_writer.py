@@ -4625,6 +4625,94 @@ def narration_text(script: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
+# ---------------------------------------------------------------------------
+# The author's avatar presents the video (Tavus)
+# ---------------------------------------------------------------------------
+#
+# Instead of slides under a cloned voice, the author's own Tavus replica reads
+# the narration on camera. Tavus renders it asynchronously: create the video,
+# poll until it is ready, download the mp4. The replica carries the author's
+# face and voice, so this is only offered in the studio's own workspace.
+
+TAVUS_API = "https://tavusapi.com/v2"
+AVATAR_POLL_SECS = 20
+AVATAR_TIMEOUT_SECS = int(os.getenv("AVATAR_TIMEOUT_SECS", "") or 45 * 60)
+
+
+def generate_avatar_video(script: str, slug: str, output_dir: Path) -> Path | None:
+    log("STEP 10.7", "The avatar records the video")
+    key = os.getenv("TAVUS_API_KEY", "").strip()
+    replica = os.getenv("TAVUS_REPLICA_ID", "").strip()
+    if not key or not replica:
+        print("  Skipped: set TAVUS_API_KEY and TAVUS_REPLICA_ID (your own replica) in .env.")
+        return None
+    text = narration_text(script)
+    if len(text.split()) < 20:
+        print("  Skipped: no narration found in the script.")
+        return None
+    headers = {"x-api-key": key, "Content-Type": "application/json"}
+    try:
+        r = requests.post(f"{TAVUS_API}/videos", headers=headers, timeout=60,
+                          json={"replica_id": replica, "script": text, "video_name": slug[:80]})
+        r.raise_for_status()
+        video_id = r.json().get("video_id")
+    except (requests.RequestException, ValueError) as e:
+        body = getattr(getattr(e, "response", None), "text", "") or ""
+        print(f"  Tavus would not start the video: {str(e)[:120]} {body[:200]}")
+        return None
+    if not video_id:
+        print("  Tavus returned no video id.")
+        return None
+    print(f"  Rendering {len(text.split())} words as video {video_id}. This usually takes several minutes.")
+
+    started, last_status, info, polls = time.time(), "", {}, 0
+    while time.time() - started < AVATAR_TIMEOUT_SECS:
+        time.sleep(AVATAR_POLL_SECS)
+        polls += 1
+        try:
+            info = requests.get(f"{TAVUS_API}/videos/{video_id}", headers=headers, timeout=30).json()
+        except (requests.RequestException, ValueError) as e:
+            print(f"  Status check failed ({str(e)[:80]}); trying again.")
+            continue
+        status = info.get("status", "")
+        # A line on every change and about once a minute, so the live log (and
+        # its silence watchdog) can see the render is still going.
+        if status != last_status or polls % 3 == 0:
+            print(f"  Avatar video: {status or 'unknown'} ({int(time.time() - started) // 60} min)")
+            last_status = status
+        if status == "ready":
+            break
+        if status in ("error", "deleted"):
+            print(f"  Tavus could not render it: {info.get('status_details') or status}")
+            return None
+    else:
+        print(f"  Still not ready after {AVATAR_TIMEOUT_SECS // 60} minutes. It may finish on "
+              f"Tavus's side: video {video_id}.")
+        (output_dir / f"{slug}_avatar.json").write_text(json.dumps({"video_id": video_id, "status": last_status}),
+                                                         encoding="utf-8")
+        return None
+
+    url = info.get("download_url") or info.get("stream_url")
+    path = output_dir / f"{slug}_avatar.mp4"
+    try:
+        with requests.get(url, stream=True, timeout=300) as dl:
+            dl.raise_for_status()
+            with open(path, "wb") as f:
+                for chunk in dl.iter_content(1 << 20):
+                    f.write(chunk)
+    except (requests.RequestException, TypeError) as e:
+        print(f"  The video is ready but the download failed ({str(e)[:100]}). "
+              f"It is on Tavus: {info.get('hosted_url', '')}")
+        path = None
+    (output_dir / f"{slug}_avatar.json").write_text(json.dumps({
+        "video_id": video_id, "hosted_url": info.get("hosted_url", ""),
+        "words": len(text.split()), "rendered_in_minutes": round((time.time() - started) / 60, 1),
+    }, indent=2), encoding="utf-8")
+    if path:
+        print(f"  Avatar video: {path.name} ({path.stat().st_size / 1e6:.1f} MB)")
+    return path
+
+
 def generate_voiceover(script: str, slug: str, output_dir: Path) -> Path | None:
     log("STEP 10.5", "Recording the voiceover")
     key = os.getenv("ELEVENLABS_API_KEY", "").strip()
@@ -6135,7 +6223,7 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
         verify: bool = True, verify_rounds: int = 2, words: str = "default",
         linkedin: bool = False, video: bool = False, thumbnail: bool = False,
         take: str = "", facts: bool = True, diagram: bool = True,
-        voiceover: bool = False, mp4: bool = False, from_theme: str = "",
+        voiceover: bool = False, mp4: bool = False, from_theme: str = "", avatar: bool = False,
         notes=None, resolve_gaps: bool = False):
     profile = length_profile(words)
     take = (take or "").strip()
@@ -6306,6 +6394,8 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
                 (output_dir / f"{slug}_video_meta.md").write_text(meta_text, encoding="utf-8")
         if voiceover and not voice_path:
             voice_path = generate_voiceover(script, slug, output_dir)
+        if avatar:
+            generate_avatar_video(script, slug, output_dir)
 
     thumb_path = None
     if thumbnail:
@@ -6578,6 +6668,12 @@ def main():
         help="The radar theme this article answers; it is marked written when the run ends",
     )
     parser.add_argument(
+        "--avatar",
+        action="store_true",
+        help=("Have your Tavus avatar present the video script on camera, saved as "
+              "<slug>_avatar.mp4. Needs TAVUS_API_KEY and TAVUS_REPLICA_ID."),
+    )
+    parser.add_argument(
         "--mp4",
         action="store_true",
         help=("Also render the finished video: one slide per beat under your cloned "
@@ -6690,7 +6786,8 @@ def main():
             verify_rounds=args.verify_rounds,
             words=args.words,
             linkedin=args.linkedin,
-            video=args.video or args.voiceover or args.mp4,
+            video=args.video or args.voiceover or args.mp4 or args.avatar,
+            avatar=args.avatar,
             thumbnail=args.thumbnail,
             voiceover=args.voiceover or args.mp4,
             mp4=args.mp4,

@@ -110,6 +110,7 @@
         {% if a.linkedin_file %}<a class="btn-link btn-li" href="/output/{{ a.linkedin_file }}" target="_blank">LinkedIn</a>{% endif %}
         {% if a.video_file %}
         <a class="btn-link btn-vid" href="/output/{{ a.video_file }}" target="_blank">Video script</a>
+        {% if a.avatar_file %}<a class="btn-link" href="/output/{{ a.avatar_file }}" target="_blank">Avatar video</a>{% endif %}
         <a class="btn-link btn-deck" href="/deck/{{ a.slug }}" target="_blank">Visual track</a>
         {% endif %}
         {% if a.voice_file %}<a class="btn-link btn-vid" href="/output/{{ a.voice_file }}" target="_blank">Voiceover (mp3)</a>{% endif %}

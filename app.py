@@ -464,6 +464,7 @@ def list_articles(out: Path | None = None) -> list[dict]:
         voice_path = out / f"{slug}_voiceover.mp3"
         mp4_wide = out / f"{slug}_video_16x9.mp4"
         mp4_tall = out / f"{slug}_video_9x16.mp4"
+        avatar_mp4 = out / f"{slug}_avatar.mp4"
         video_meta = out / f"{slug}_video_meta.md"
         diagram_path = out / f"{slug}_diagram_1.png"
         facts_path = out / f"{slug}_facts.json"
@@ -499,6 +500,7 @@ def list_articles(out: Path | None = None) -> list[dict]:
             "voice_file": voice_path.name if voice_path.exists() else None,
             "mp4_wide": mp4_wide.name if mp4_wide.exists() else None,
             "mp4_tall": mp4_tall.name if mp4_tall.exists() else None,
+            "avatar_file": avatar_mp4.name if avatar_mp4.exists() else None,
             "video_meta": video_meta.name if video_meta.exists() else None,
             "diagram_file": diagram_path.name if diagram_path.exists() else None,
             "facts_file": facts_path.name if facts_path.exists() else None,
@@ -550,7 +552,8 @@ def index():
     return render_template("index.html", articles=articles[:RECENT_ON_HOME],
                            total_articles=len(articles), has_site_notes=has_site_notes,
                            has_site_pages=(ws_dir() / "site_pages.json").exists(),
-                           estimates=job_estimates(g.ws["id"]))
+                           estimates=job_estimates(g.ws["id"]),
+                           avatar_video=avatar_video_available())
 
 
 @app.route("/pipeline")
@@ -727,7 +730,8 @@ def article_page(slug):
     artifacts = [(label, name) for label, name in (
         ("Markdown", f"{slug}.md"), ("Word", f"{slug}.docx"), ("Review", f"{slug}_review.md"),
         ("Facts", f"{slug}_facts.json"), ("LinkedIn", f"{slug}_linkedin.md"),
-        ("Video script", f"{slug}_video.md")) if (out / name).exists()]
+        ("Video script", f"{slug}_video.md"), ("Avatar video", f"{slug}_avatar.mp4"))
+        if (out / name).exists()]
     return render_template(
         "article.html", slug=slug, title=(meta.get("seo_meta") or {}).get("title") or slug,
         description=(meta.get("seo_meta") or {}).get("description") or "",
@@ -738,7 +742,8 @@ def article_page(slug):
         has_review=(out / f"{slug}_review.json").exists(),
         approval_required=needs_approval(g.ws), public_url=article_public_url(g.ws, slug),
         wp=wordpress_status(g.ws),
-        msg=request.args.get("msg"), err=request.args.get("err"))
+        msg=request.args.get("msg"), err=request.args.get("err"),
+        avatar_talk=avatar_talk_available())
 
 
 @app.route("/a/<slug>/status", methods=["POST"])
@@ -999,6 +1004,72 @@ def trust_page():
     region = os.environ.get("FLY_REGION") or ""
     return render_template("trust.html", processors=active, region=region,
                            hosted=bool(os.environ.get("FLY_APP_NAME")))
+
+
+# ---------------------------------------------------------------------------
+# The author's avatar (Tavus): a recorded video, or a live conversation
+# ---------------------------------------------------------------------------
+#
+# Both carry the studio owner's face and voice, so they belong to the default
+# workspace only; a client's article is never presented by someone else's face.
+
+AVATAR_URL = os.environ.get("AVATAR_URL", "").strip().rstrip("/")
+BRIEF_TTL_SECS = 7 * 24 * 3600
+BRIEF_MAX_CHARS = 9000
+
+
+def avatar_video_available() -> bool:
+    return (_current_ws() or {}).get("slug", st.DEFAULT_WORKSPACE) == st.DEFAULT_WORKSPACE and \
+        bool(os.environ.get("TAVUS_API_KEY") and os.environ.get("TAVUS_REPLICA_ID"))
+
+
+def avatar_talk_available() -> bool:
+    return (_current_ws() or {}).get("slug", st.DEFAULT_WORKSPACE) == st.DEFAULT_WORKSPACE and bool(AVATAR_URL)
+
+
+def talk_brief(slug: str, out: Path) -> str:
+    """What the avatar knows about one article when someone asks about it: the
+    title, what it argues, the author's own positions, and the article itself,
+    cut to fit. Built from the files, no model call."""
+    md = (out / f"{slug}.md").read_text(encoding="utf-8")
+    try:
+        meta = json.loads((out / f"{slug}_meta.json").read_text(encoding="utf-8")).get("seo_meta") or {}
+    except (OSError, ValueError):
+        meta = {}
+    try:
+        take = json.loads((out / f"{slug}_facts.json").read_text(encoding="utf-8")).get("take") or ""
+    except (OSError, ValueError):
+        take = ""
+    title = meta.get("title") or slug.replace("-", " ")
+    # The newsletter greeting and the sign-off are not the article.
+    body = re.sub(r"^.*?(?=^# )", "", md, count=1, flags=re.S | re.M) or md
+    body = body.split("\n---\n\nThat's a wrap")[0]
+    head = [f"ARTICLE YOU WROTE: {title}"]
+    if meta.get("description"):
+        head.append(f"IN ONE LINE: {meta['description']}")
+    if take:
+        head.append("YOUR OWN POSITIONS IN IT (say these as yours):\n" + take.strip())
+    head.append("HOW TO TALK ABOUT IT: The person you are talking to has read, or is about to read, "
+                "this article. Answer their questions about it in your own voice, briefly, as you "
+                "would on a call. Stick to what the article says; if they ask beyond it, say so "
+                "plainly rather than inventing figures.")
+    text = "\n\n".join(head) + "\n\nTHE ARTICLE:\n" + body.strip()
+    return text[:BRIEF_MAX_CHARS]
+
+
+@app.route("/a/<slug>/talk")
+def article_talk(slug):
+    """Open the avatar, briefed on this article. The avatar's server fetches the
+    briefing from a signed link here; it accepts briefings from this app only."""
+    if not avatar_talk_available():
+        abort(404)
+    slug, _ = _article_or_404(slug)
+    out = ws_dir()
+    (out / f"{slug}_talk.md").write_text(talk_brief(slug, out), encoding="utf-8")
+    link = signed_download_url(_rel(out, f"{slug}_talk.md"), _public_base_url(), ttl=BRIEF_TTL_SECS)
+    audit("avatar.talk", target=slug)
+    from urllib.parse import quote
+    return redirect(f"{AVATAR_URL}/?brief={quote(link, safe='')}")
 
 
 # ---------------------------------------------------------------------------
@@ -1659,6 +1730,7 @@ def _completion_payload(slug: str | None, external_id: str, status: str,
         "voiceover": f"{slug}_voiceover.mp3",
         "video_16x9": f"{slug}_video_16x9.mp4",
         "video_9x16": f"{slug}_video_9x16.mp4",
+        "avatar_mp4": f"{slug}_avatar.mp4",
         "captions": f"{slug}_captions.srt",
         "video_meta": f"{slug}_video_meta.md",
         "thumbnail": f"{slug}_thumbnail.html",
@@ -1781,6 +1853,7 @@ def api_start():
     voiceover = bool(data.get("voiceover"))
     mp4 = bool(data.get("mp4"))
     thumbnail = bool(data.get("thumbnail"))
+    avatar = bool(data.get("avatar")) and avatar_video_available()
 
     if not topic:
         return jsonify({"error": "topic is required"}), 400
@@ -1813,6 +1886,8 @@ def api_start():
         cmd.append("--mp4")
     if thumbnail:
         cmd.append("--thumbnail")
+    if avatar:
+        cmd.append("--avatar")
 
     callback = None
     if callback_url:
@@ -1822,7 +1897,8 @@ def api_start():
             "base_url": _public_base_url(),
             "echo": {"topic": topic, "intent": intent, "take": take, "words": words,
                      "edition": edition, "linkedin": linkedin,
-                     "video": video, "voiceover": voiceover, "mp4": mp4, "thumbnail": thumbnail},
+                     "video": video, "voiceover": voiceover, "mp4": mp4, "thumbnail": thumbnail,
+                     "avatar": avatar},
         }
 
     job_id = _spawn(cmd, callback=callback, kind="article", label=topic)

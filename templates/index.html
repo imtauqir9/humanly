@@ -289,6 +289,7 @@
               <label class="opt"><input type="checkbox" id="voiceover"><span>Voiceover in my voice<small>ElevenLabs clone, mp3</small></span></label>
               <label class="opt"><input type="checkbox" id="mp4"><span>Finished video<small>slides + your voice + captions · 16:9 and 9:16</small></span></label>
               <label class="opt"><input type="checkbox" id="thumbnail"><span>LinkedIn share card<small>1200×627, save as PNG</small></span></label>
+              {% if avatar_video %}<label class="opt"><input type="checkbox" id="avatar"><span>My avatar presents it<small>Tavus renders you reading the script · several minutes</small></span></label>{% endif %}
               {% if has_site_notes %}<label class="opt"><input type="checkbox" id="siteNotes" checked><span>Facts from their site<small>their product pages, as research notes</small></span></label>{% endif %}
             </div>
             <p class="hint">Every article also gets the fact pack, the layered structure, a diagram the app draws, and the three-agent audit.</p>
@@ -868,6 +869,8 @@ form.addEventListener('submit', async (e) => {
   const video    = document.getElementById('video').checked || document.getElementById('voiceover').checked || mp4;
   const voiceover = document.getElementById('voiceover').checked || mp4;
   const thumbnail = document.getElementById('thumbnail').checked;
+  const avatarBox = document.getElementById('avatar');
+  const avatar = avatarBox ? avatarBox.checked : false;
   const siteNotesBox = document.getElementById('siteNotes');
   const use_site_notes = siteNotesBox ? siteNotesBox.checked : true;
 
@@ -882,6 +885,7 @@ form.addEventListener('submit', async (e) => {
     ...(voiceover ? ['Extra  : voiceover in your voice'] : []),
     ...(mp4 ? ['Extra  : finished video, 16:9 and 9:16, captions burned in'] : []),
     ...(thumbnail ? ['Extra  : share card'] : []),
+    ...(avatar ? ['Extra  : your avatar presents the video'] : []),
     ...(intent ? [`Intent : ${intent}`] : []),
     ...(take ? [`Take   : ${take.split('\n').length} point(s)`] : ['Take   : none — the article will have no first-person view']),
     'Starting pipeline…\n',
@@ -893,7 +897,7 @@ form.addEventListener('submit', async (e) => {
     const startResp = await fetch('/api/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ topic, intent: intent || keywords, take, edition, words, linkedin, video, voiceover, mp4, thumbnail, from_theme, use_site_notes }),
+      body: JSON.stringify({ topic, intent: intent || keywords, take, edition, words, linkedin, video, voiceover, mp4, thumbnail, from_theme, use_site_notes, avatar }),
     });
     const startData = await startResp.json();
     if (startData.error) throw new Error(startData.error);

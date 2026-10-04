@@ -68,6 +68,7 @@
         <span class="smallcaps">The article</span>
         <span class="grow"></span>
         {% if can('submit') %}<button type="button" class="btn btn-ghost sm" id="editBtn">Edit text</button>{% endif %}
+        {% if avatar_talk %}<a class="btn btn-dark sm" href="/a/{{ slug }}/talk" target="_blank" rel="noopener" title="Opens your avatar, briefed on this article">Ask Imran about this</a>{% endif %}
         {% if html_file %}<a class="btn-link" href="/output/{{ html_file }}" target="_blank" rel="noopener">Open full page</a>{% endif %}
       </div>
       {% if html_file %}
