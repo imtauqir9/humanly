@@ -905,6 +905,7 @@ def api_start():
     intent = (data.get("intent") or "").strip()
     take = (data.get("take") or "").strip()[:4000]
     notes = _notes_paths(data.get("notes"))
+    resolve_gaps = bool(data.get("resolve_gaps"))
     from_theme = (data.get("from_theme") or "").strip()[:140]
     callback_url = (data.get("callback_url") or "").strip()
     external_id = str(data.get("external_id") or "")[:200]
@@ -939,6 +940,8 @@ def api_start():
         cmd += ["--take", take]
     if notes:
         cmd += ["--notes", *notes]
+    if resolve_gaps:
+        cmd.append("--resolve-gaps")
     if from_theme:
         cmd += ["--from-theme", from_theme]
     if linkedin:

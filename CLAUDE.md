@@ -15,4 +15,6 @@ every claim. Finished pieces written from them live in `articles/`.
   or leave it out.
 - To run the pipeline on the notes:
   `python seo_writer.py "<title>" --intent "<angle>" --notes research/notes`
-  (add `--no-facts` to skip the web pass and use the notes alone).
+  (add `--no-facts` to skip the web pass and use the notes alone, and
+  `--resolve-gaps` to have an agent open the page behind every flagged claim
+  and settle it before the draft is written).

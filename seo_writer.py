@@ -1913,6 +1913,151 @@ def merge_fact_packs(first: dict, second: dict) -> dict:
     return _clean_fact_pack(merged)
 
 
+# ---------------------------------------------------------------------------
+# Step 1.6: Gap resolver - an agent opens the page behind every flagged or
+# missing specific and settles it
+# ---------------------------------------------------------------------------
+#
+# The pack's gaps are the claims the writer may not use: figures the notes
+# flagged [VERIFY], figures no opened page stated. Until now a person settled
+# them by hand before publishing. This step hands them to one tool-using call:
+# it opens the URL a gap names (or searches when it names none) and returns a
+# verdict per gap. Confirmed gaps join the pack as facts with the quote that
+# confirms them; contradicted and unverifiable ones stay gaps, now carrying
+# the reason, so the writer still cannot state them.
+
+GAP_RESOLVE_MAX = 8          # gaps settled per run; the rest stay gaps
+GAP_RESOLVE_SEARCHES = 4
+GAP_RESOLVE_FETCHES = 10
+GAP_RESOLVE_SCHEMA = """{
+  "resolutions": [
+    {
+      "gap": "<the gap exactly as given>",
+      "verdict": "confirmed | contradicted | unverifiable",
+      "claim": "<what the page establishes, one sentence>",
+      "value": "<the exact figure, name, date or version the page states, or empty>",
+      "source_url": "<the page you read it on, or empty>",
+      "source_title": "<page title, or empty>",
+      "quote": "<the sentence on the page, verbatim, under 40 words, or empty>",
+      "as_of": "<date the page states or was published, YYYY-MM-DD or YYYY-MM, or 'undated'>",
+      "kind": "price | date | version | spec | statistic | quote | policy | name",
+      "reason": "<one sentence: why this verdict>"
+    }
+  ]
+}"""
+
+
+def _gap_url(gap: str) -> str:
+    m = re.search(r"https?://[^\s)\]>\"']+", gap or "")
+    return m.group(0).rstrip(".,;") if m else ""
+
+
+def resolve_fact_gaps(title: str, keywords: str, intent: str, research: dict) -> dict:
+    """Settle the pack's gaps with one tool-using call. Returns the pack with
+    confirmed gaps promoted to facts and the rest annotated; never raises."""
+    pack = research.get("fact_pack") or {}
+    gaps = [str(g) for g in (pack.get("gaps") or []) if str(g).strip()]
+    if not gaps:
+        log("STEP 1.6", "Gap resolver: no gaps to settle")
+        return pack
+    todo = gaps[:GAP_RESOLVE_MAX]
+    log("STEP 1.6", f"Gap resolver: settling {len(todo)} of {len(gaps)} gap(s) by opening the pages")
+    lines = "\n".join(
+        f"{i + 1}. {g}" + (f"\n   URL named: {_gap_url(g)}" if _gap_url(g) else "")
+        for i, g in enumerate(todo))
+    prompt = f"""You are a fact checker. Each gap below is a specific the writer wants
+to state but may not, because no opened page has confirmed it yet.
+
+TOPIC: {title}
+PRIMARY KEYWORD: {keywords}
+WRITER'S INTENT: {intent or '(none given)'}
+{date_context()}
+
+GAPS
+{lines}
+
+For each gap, in order:
+1. If it names a URL, open that page first. If the page does not state the
+   figure, or no URL is named, search for the primary source (the vendor's own
+   page, the standards body, the analyst's release, the filing) and open it.
+2. Verdict "confirmed" only when a page you opened states the specific; copy
+   the exact value and the sentence that states it, verbatim.
+3. Verdict "contradicted" when a page you opened states something else; give
+   that value and sentence instead.
+4. Verdict "unverifiable" when no opened page settles it. Never confirm from
+   memory, and never widen a value into a range.
+
+Return ONLY valid JSON in exactly this shape, one entry per gap, in the same
+order, with "gap" copied exactly as given:
+{GAP_RESOLVE_SCHEMA}"""
+    try:
+        out = _claude_web_call(prompt, max_tokens=8000, searches=GAP_RESOLVE_SEARCHES,
+                               fetches=GAP_RESOLVE_FETCHES, label="gap-resolve",
+                               schema=GAP_RESOLVE_SCHEMA)
+    except Exception as e:
+        print(f"  Gap resolver unavailable ({str(e)[:120]}); the gaps stay as they are.")
+        return pack
+    answers = {}
+    for r in out.get("resolutions") or []:
+        if isinstance(r, dict) and str(r.get("gap", "")).strip():
+            answers[str(r["gap"]).strip()] = r
+
+    def answer_for(gap: str):
+        if gap.strip() in answers:
+            return answers[gap.strip()]
+        head = gap.strip()[:60].lower()   # a lightly rewritten gap still lands
+        for key, r in answers.items():
+            if key[:60].lower() == head:
+                return r
+        return None
+
+    promoted, kept = [], []
+    counts = {"confirmed": 0, "contradicted": 0, "unverifiable": 0, "unanswered": 0}
+    for g in gaps:
+        r = answer_for(g) if g in todo else None
+        if r is None:
+            kept.append(g)
+            if g in todo:
+                counts["unanswered"] += 1
+            continue
+        verdict = str(r.get("verdict", "")).strip().lower()
+        url = str(r.get("source_url", "")).strip()
+        value = str(r.get("value", "")).strip()
+        quote = str(r.get("quote", "")).strip()
+        reason = str(r.get("reason", "")).strip()
+        if verdict == "confirmed" and url.startswith("http") and value:
+            promoted.append({
+                "claim": r.get("claim") or g, "value": value, "source_url": url,
+                "source_title": r.get("source_title", ""), "quote": quote,
+                "as_of": r.get("as_of") or "undated", "kind": r.get("kind") or "statistic",
+                "origin": "gap-resolver"})
+            counts["confirmed"] += 1
+        elif verdict == "contradicted" and url.startswith("http"):
+            kept.append(f"{g} - CONTRADICTED by {url}: {quote or value or reason}"[:400])
+            counts["contradicted"] += 1
+        else:
+            kept.append(f"{g} - could not be verified ({reason or 'no opened page settles it'})"[:400])
+            counts["unverifiable"] += 1
+    merged = _clean_fact_pack({
+        "facts": list(pack.get("facts") or []) + promoted,
+        "primary_sources": list(pack.get("primary_sources") or [])
+                           + [f["source_url"] for f in promoted],
+        "gaps": kept,
+        "method": f"{pack.get('method') or 'none'}+gap-resolver",
+    })
+    merged["resolutions"] = [r for r in (out.get("resolutions") or []) if isinstance(r, dict)]
+    dropped = len(pack.get("facts") or []) + len(promoted) - len(merged["facts"])
+    print(f"  Gap resolver: {counts['confirmed']} confirmed and promoted to facts, "
+          f"{counts['contradicted']} contradicted, {counts['unverifiable']} unverifiable"
+          + (f", {counts['unanswered']} unanswered" if counts["unanswered"] else "")
+          + f"; {len(merged['gaps'])} gap(s) remain."
+          + (f" ({dropped} promoted fact(s) did not fit under the {FACT_PACK_MAX_FACTS}-fact cap.)"
+             if dropped > 0 else ""))
+    for f in promoted[:6]:
+        print(f"    + {f['value'][:28]:28} {str(f['claim'])[:60]}")
+    return merged
+
+
 def build_fact_pack(title: str, keywords: str, intent: str, research: dict) -> dict:
     log("STEP 1.5", "Building the fact pack (opening primary sources)")
     brief = _fact_pack_brief(title, keywords, intent, research)
@@ -1952,7 +2097,8 @@ out. Do not fill the gap from memory.
     lines = []
     for f in facts:
         as_of = f.get("as_of") or "undated"
-        origin = " | from the author's notes" if f.get("origin") == "research-notes" else ""
+        origin = {"research-notes": " | from the author's notes",
+                  "gap-resolver": " | confirmed by the gap resolver"}.get(f.get("origin"), "")
         lines.append(f"[{f['id']}] {f.get('claim','')} | value: {f['value']} | "
                      f"as of {as_of} | {f['source_url']}{origin}\n"
                      f"     quote: \"{str(f.get('quote',''))[:200]}\"")
@@ -5822,7 +5968,7 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
         linkedin: bool = False, video: bool = False, thumbnail: bool = False,
         take: str = "", facts: bool = True, diagram: bool = True,
         voiceover: bool = False, mp4: bool = False, from_theme: str = "",
-        notes=None):
+        notes=None, resolve_gaps: bool = False):
     profile = length_profile(words)
     take = (take or "").strip()
     if not take:
@@ -5874,6 +6020,10 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
         research["fact_pack"] = merge_fact_packs(notes_pack, research["fact_pack"])
         print(f"  Fact pack after merge: {len(research['fact_pack']['facts'])} fact(s), "
               f"{len(research['fact_pack']['gaps'])} gap(s); the notes' facts come first.")
+
+    # Step 1.6: settle the gaps by opening the pages (opt-in: it spends web calls).
+    if resolve_gaps:
+        research["fact_pack"] = resolve_fact_gaps(title, keywords, intent, research)
 
     # Step 2: Refine Title
     refined_title = refine_title(title, keywords, research, intent=intent)
@@ -6164,6 +6314,17 @@ def main():
         ),
     )
     parser.add_argument(
+        "--resolve-gaps",
+        action="store_true",
+        help=(
+            "Step 1.6: a tool-using call opens the page behind every gap in the fact "
+            "pack (claims the notes flagged, specifics no opened page stated) and "
+            "returns a verdict. Confirmed gaps join the pack as facts with the quote "
+            "that confirms them; contradicted and unverifiable ones stay gaps with the "
+            "reason. Up to 8 gaps a run; costs a few web fetches."
+        ),
+    )
+    parser.add_argument(
         "--no-facts",
         action="store_true",
         help=(
@@ -6360,6 +6521,7 @@ def main():
             diagram=not args.no_diagram,
             from_theme=args.from_theme,
             notes=args.notes,
+            resolve_gaps=args.resolve_gaps,
         )
     except ClaudeError as e:
         # Flattened to one line so the web UI, which reads the log line by line,

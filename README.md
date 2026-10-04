@@ -58,6 +58,10 @@ Topic + Intent
       │                 writer may state no figure that is not in the pack, and may
       │                 not widen a pack value into a range. Saved as <slug>_facts.json.
       ▼
+1.6 Gap resolver      — optional (--resolve-gaps): an agent opens the page behind
+      │                 every gap and returns a verdict; confirmed gaps join the
+      │                 pack as facts, the rest stay gaps with the reason
+      ▼
 2. Title Refinement   — picks the best angle and target keyword
       │
       ▼
@@ -196,6 +200,7 @@ python seo_writer.py "Semantic Caching for LLMs" --output-dir ./articles --editi
 | `--verify-rounds` | Maximum audit/fix rounds before accepting the article (default: `2`) |
 | `--take` | Your own positions and experiences, one per line (or a path to a text file). Each is written into the article in first person and the auditor checks it survived. The run warns loudly when this is missing, because it is the single biggest reason an article reads as generic |
 | `--notes` | Your own research notes: markdown files, or a folder of them. They become the first fact pack, built from the notes alone, and the Step 1.5 web pass is merged in after. See *Write from your own research notes* below |
+| `--resolve-gaps` | Step 1.6: open the page behind every gap in the fact pack and settle it. Confirmed gaps become facts with the confirming quote; contradicted and unverifiable ones stay gaps with the reason. Up to 8 gaps a run |
 | `--no-facts` | Skip the Step 1.5 fact pack. The writer is then forbidden from stating any price, date, version or statistic |
 | `--radar` | Don't write; find out what to write. See *Topic radar* below |
 | `--radar-days` | How far back the radar looks (default `14`) |
@@ -261,9 +266,19 @@ runs and is merged in after the notes' facts; add `--no-facts` to write from
 the notes only. The first part of each note also sits above the pack as a
 digest, so the outline follows the notes' angle, not the web's.
 
+Add `--resolve-gaps` and the gaps do not wait for you. One tool-using call
+opens the URL each gap names (or searches for the primary source when it names
+none) and returns a verdict per gap: confirmed gaps join the pack as facts, with
+the sentence that confirms them and the tag "confirmed by the gap resolver";
+contradicted and unverifiable ones stay gaps, now carrying the reason, so the
+writer still cannot state them. The verdicts are saved under `resolutions` in
+`<slug>_facts.json`. It settles up to 8 gaps a run and spends a few web
+fetches; what it confirms is still worth a glance, since a page can state a
+figure that is itself wrong.
+
 From the API, a run request may carry `"notes": ["notes", "my-report.md"]`,
 names resolved under `research/` (or the output folder); anything outside
-those is dropped. `research/` is where the notes live in this repo, with the
+those is dropped. `"resolve_gaps": true` turns the gap resolver on. `research/` is where the notes live in this repo, with the
 finished pieces under `articles/`.
 
 ## Topic radar: what should I write?

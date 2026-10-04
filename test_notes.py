@@ -179,6 +179,83 @@ check("no facts: digest still shown above the no-figures rule",
       empty.startswith("\nRESEARCH NOTES") and "state no price" in empty)
 check("no notes: nothing added", not sw.fact_pack_text({"fact_pack": merged}).startswith("\nRESEARCH"))
 
+# 5b. The gap resolver, web call stubbed: confirmed gaps become facts, the
+#     rest stay gaps with the reason, and a failed call changes nothing
+print("resolve_fact_gaps")
+GAPS = [
+    "Arista 1.6T platform named 7060XE7 - flagged in the notes; confirm at https://www.fool.com/y before use",
+    "AMD Helios connects 72 GPUs at 260 TB/s - flagged in the notes; confirm at https://www.fierce-network.com/h before use",
+    "CScale raised $145M - flagged in the notes; confirm at https://tech-insider.org/z before use",
+    "Nvidia Q2 FY27 networking revenue not retrieved",
+]
+RESOLUTIONS = {"resolutions": [
+    {"gap": GAPS[0], "verdict": "confirmed", "claim": "Arista's 1.6T platform is the 7060XE7",
+     "value": "7060XE7", "source_url": "https://www.fool.com/y", "source_title": "Arista Q2 call",
+     "quote": "the 7060XE7 ships for 1.6T", "as_of": "2026-08-11", "kind": "name",
+     "reason": "stated on the transcript page"},
+    {"gap": GAPS[1], "verdict": "contradicted", "claim": "Helios bandwidth", "value": "260 GB/s",
+     "source_url": "https://www.fierce-network.com/h", "quote": "260 GB/s of scale-up bandwidth",
+     "as_of": "2026-07-23", "kind": "spec", "reason": "the page says GB/s, not TB/s"},
+    {"gap": GAPS[2][:60] + " (rewritten by the model)", "verdict": "unverifiable", "claim": "", "value": "",
+     "source_url": "", "quote": "", "as_of": "undated", "kind": "statistic",
+     "reason": "the only page is a secondary write-up"},
+    # GAPS[3] gets no entry at all: it must stay exactly as it was
+]}
+seen_web = {}
+
+
+def stub_web(prompt, **kwargs):
+    seen_web["prompt"] = prompt
+    seen_web["kwargs"] = kwargs
+    return RESOLUTIONS
+
+
+real_web = sw._claude_web_call
+sw._claude_web_call = stub_web
+base = {"facts": [{"id": "f1", "claim": "existing", "value": "Q2 2026",
+                   "source_url": "https://www.delloro.com/news/x", "quote": "", "as_of": "2026-09-03",
+                   "kind": "statistic", "origin": "research-notes"}],
+        "primary_sources": ["https://www.delloro.com/news/x"], "gaps": list(GAPS),
+        "method": "research-notes+claude-web-tools"}
+research_g = dict(RESEARCH_BASE, fact_pack=base)
+resolved = sw.resolve_fact_gaps("Four planes", "AI networking", "explain the planes", research_g)
+check("the agent saw every gap and the URL each names",
+      all(g in seen_web["prompt"] for g in GAPS) and "URL named: https://www.fool.com/y" in seen_web["prompt"])
+check("called with the gap-resolve label and budgets",
+      seen_web["kwargs"].get("label") == "gap-resolve"
+      and seen_web["kwargs"].get("fetches") == sw.GAP_RESOLVE_FETCHES)
+check("confirmed gap promoted to a fact with its quote and origin",
+      len(resolved["facts"]) == 2 and resolved["facts"][1]["value"] == "7060XE7"
+      and resolved["facts"][1]["origin"] == "gap-resolver" and resolved["facts"][1]["id"] == "f2",
+      [f.get("value") for f in resolved["facts"]])
+check("existing facts kept first", resolved["facts"][0]["value"] == "Q2 2026")
+check("contradicted gap stays a gap, marked, with the page's words",
+      any(g.startswith(GAPS[1]) and "CONTRADICTED" in g and "260 GB/s" in g for g in resolved["gaps"]),
+      resolved["gaps"])
+check("unverifiable gap matched on its first 60 characters and marked",
+      any(g.startswith(GAPS[2]) and "could not be verified" in g and "secondary" in g for g in resolved["gaps"]))
+check("a gap the agent skipped is left exactly as it was", GAPS[3] in resolved["gaps"])
+check("confirmed gap no longer listed as a gap", not any(g.startswith(GAPS[0]) for g in resolved["gaps"]))
+check("method records the step", resolved["method"].endswith("+gap-resolver"), resolved["method"])
+check("verdicts saved for the facts file", len(resolved.get("resolutions", [])) == 3)
+check("confirming page added to the sources", "https://www.fool.com/y" in resolved["primary_sources"])
+text_g = sw.fact_pack_text({"fact_pack": resolved})
+check("writer sees the promoted fact tagged", "| confirmed by the gap resolver" in text_g)
+check("writer still sees the contradiction as a gap", "CONTRADICTED" in text_g.split("KNOWN GAPS")[1])
+
+
+def failing_web(prompt, **kwargs):
+    raise sw.ClaudeError("web tools down")
+
+
+sw._claude_web_call = failing_web
+same = sw.resolve_fact_gaps("t", "k", "i", dict(RESEARCH_BASE, fact_pack=base))
+check("a failed call leaves the pack untouched", same is base)
+sw._claude_web_call = real_web
+empty_pack = {"facts": [], "primary_sources": [], "gaps": [], "method": "skipped"}
+check("no gaps: nothing called, pack returned as is",
+      sw.resolve_fact_gaps("t", "k", "i", {"fact_pack": empty_pack}) is empty_pack)
+
 # 6. The CLI flag exists and is passed through (parser built from main's source)
 print("cli")
 import inspect
@@ -186,6 +263,9 @@ src = inspect.getsource(sw.main)
 check("--notes is a CLI flag", '"--notes"' in src and 'nargs="+"' in src)
 check("run() receives it", "notes=args.notes" in src)
 check("run() accepts it", "notes" in inspect.signature(sw.run).parameters)
+check("--resolve-gaps is a CLI flag passed through",
+      '"--resolve-gaps"' in src and "resolve_gaps=args.resolve_gaps" in src
+      and "resolve_gaps" in inspect.signature(sw.run).parameters)
 
 # 7. app.py path resolution, when Flask is installed
 try:
