@@ -32,6 +32,7 @@ from pathlib import Path
 from flask import (Flask, Response, abort, g, has_app_context, jsonify, redirect,
                    render_template, request, send_from_directory, session, url_for)
 
+import signing
 import store as st
 import wordpress as wpress
 
@@ -1385,8 +1386,8 @@ def _b64(raw: bytes) -> str:
 
 
 def _download_sig(filename: str, exp: int) -> str:
-    msg = f"{exp}|{filename}".encode()
-    return _b64(hmac.new(app.secret_key.encode(), msg, hashlib.sha256).digest())
+    # The same signature the pipeline makes for the links it hands out (signing.py).
+    return signing.download_sig(filename, exp, key=app.secret_key)
 
 
 def signed_download_url(filename: str, base_url: str,
@@ -2030,7 +2031,8 @@ def pipeline_env(ws: dict) -> dict:
     def val(key: str) -> str:
         return str(s.get(key) or "").strip()
 
-    env = {"WEB_CALL_DEBUG_DIR": str(out)}
+    # DL_ROOT lets the pipeline sign /dl/ links (the avatar's narration for Tavus).
+    env = {"WEB_CALL_DEBUG_DIR": str(out), "DL_ROOT": str(OUTPUT_DIR)}
     if ws["slug"] == st.DEFAULT_WORKSPACE:
         for key, var in (("site_url", "SITE_URL"), ("url_pattern", "ARTICLE_URL_PATTERN"),
                          ("author_name", "AUTHOR_NAME"), ("author_url", "AUTHOR_URL"),

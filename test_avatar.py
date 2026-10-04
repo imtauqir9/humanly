@@ -56,6 +56,8 @@ def fake_tavus(monkeypatch, statuses, final=None):
     monkeypatch.setattr(sw.time, "sleep", lambda s: None)
     monkeypatch.setenv("TAVUS_API_KEY", "tk")
     monkeypatch.setenv("TAVUS_REPLICA_ID", "r-imran")
+    for var in ("ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID", "PUBLIC_URL", "DL_ROOT"):
+        monkeypatch.delenv(var, raising=False)
     return sent
 
 
@@ -157,3 +159,43 @@ def test_no_avatar_button_for_a_client_or_without_an_avatar_url():
         c = m.app.test_client()
         c.get(f"/workspace/{ws['slug']}")
         assert c.get("/a/k8s/talk").status_code == 404
+
+
+def test_with_elevenlabs_the_avatar_is_synced_to_a_calmer_recording(tmp_path, monkeypatch):
+    sent = fake_tavus(monkeypatch, ["ready"])
+    calls = {}
+    tavus_post = sw.requests.post
+
+    def post(url, headers=None, json=None, timeout=None):
+        if "elevenlabs" in url:
+            calls["tts"] = json
+            r = _R(content=b"ID3audio")
+            r.headers = {"content-type": "audio/mpeg"}
+            return r
+        return tavus_post(url, headers=headers, json=json, timeout=timeout)
+
+    monkeypatch.setattr(sw.requests, "post", post)
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "ek")
+    monkeypatch.setenv("ELEVENLABS_VOICE_ID", "voice")
+    monkeypatch.setenv("PUBLIC_URL", "https://seo-writer-app.fly.dev")
+    monkeypatch.setenv("DL_ROOT", str(tmp_path))
+    monkeypatch.setattr(sw, "AVATAR_SPEECH_SPEED", 0.9)
+    sw.generate_avatar_video(SCRIPT, "k8s", tmp_path)
+    assert calls["tts"]["voice_settings"]["speed"] == 0.9
+    assert "script" not in sent["body"], "Tavus lip-syncs to the recording instead of reading"
+    assert sent["body"]["audio_url"].startswith("https://seo-writer-app.fly.dev/dl/")
+    assert sent["body"]["audio_url"].endswith("/k8s_avatar_voice.mp3")
+    assert (tmp_path / "k8s_avatar_voice.mp3").read_bytes() == b"ID3audio"
+
+
+def test_a_link_the_pipeline_signs_opens_through_the_app(monkeypatch):
+    with tempfile.TemporaryDirectory() as d:
+        m = make_app(d)
+        (Path(d) / "k8s_avatar_voice.mp3").write_bytes(b"ID3audio")
+        import signing
+        link = signing.signed_url("k8s_avatar_voice.mp3", "https://x.example", ttl=600, key=m.app.secret_key)
+        r = m.app.test_client().get(urlparse(link).path)
+        status, data = r.status_code, r.data
+        r.close()   # Windows will not delete a file a response still holds open
+        assert status == 200 and data == b"ID3audio"
+        assert signing.secret_key() == m.app.secret_key, "the pipeline derives the same key"

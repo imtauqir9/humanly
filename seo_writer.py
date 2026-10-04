@@ -4635,6 +4635,51 @@ def narration_text(script: str) -> str:
 # face and voice, so this is only offered in the studio's own workspace.
 
 TAVUS_API = "https://tavusapi.com/v2"
+# Tavus reads a script at its own pace, with no speed setting. Recording the
+# narration first, in the author's ElevenLabs voice at a calmer pace, and
+# having Tavus lip-sync the avatar to that audio, puts the delivery under
+# control. 1.0 is ElevenLabs' normal speed; lower is slower.
+AVATAR_SPEECH_SPEED = float(os.getenv("AVATAR_SPEECH_SPEED", "") or 0.9)
+
+
+def _avatar_audio_url(text: str, slug: str, output_dir: Path) -> str:
+    """Record the narration in the author's voice and return a short-lived
+    public link to it for Tavus, or "" to let Tavus read the script itself."""
+    key = os.getenv("ELEVENLABS_API_KEY", "").strip()
+    voice = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
+    public = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
+    dl_root = os.getenv("DL_ROOT", "").strip()
+    if not (key and voice and public and dl_root):
+        print("  Tavus will read the script itself (no speed control). For a calmer pace, set "
+              "ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID and PUBLIC_URL.")
+        return ""
+    try:
+        resp = requests.post(
+            f"{ELEVENLABS_BASE}/text-to-speech/{voice}",
+            headers={"xi-api-key": key, "accept": "audio/mpeg"},
+            json={"text": text, "model_id": ELEVENLABS_MODEL,
+                  "voice_settings": {"stability": 0.5, "similarity_boost": 0.8, "style": 0.2,
+                                     "use_speaker_boost": True, "speed": AVATAR_SPEECH_SPEED}},
+            timeout=180,
+        )
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        print(f"  Could not record the narration ({str(e)[:100]}); Tavus will read the script.")
+        return ""
+    if not resp.headers.get("content-type", "").startswith("audio"):
+        print("  ElevenLabs returned no audio; Tavus will read the script.")
+        return ""
+    record_usage("elevenlabs", "elevenlabs-tts", len(text), 0)
+    audio = output_dir / f"{slug}_avatar_voice.mp3"
+    audio.write_bytes(resp.content)
+    try:
+        rel = audio.resolve().relative_to(Path(dl_root).resolve()).as_posix()
+    except ValueError:
+        print("  The narration is outside the served folder; Tavus will read the script.")
+        return ""
+    import signing
+    print(f"  Narration recorded at {AVATAR_SPEECH_SPEED}x pace; the avatar is synced to it.")
+    return signing.signed_url(rel, public, ttl=6 * 3600)
 AVATAR_POLL_SECS = 20
 AVATAR_TIMEOUT_SECS = int(os.getenv("AVATAR_TIMEOUT_SECS", "") or 45 * 60)
 
@@ -4651,9 +4696,11 @@ def generate_avatar_video(script: str, slug: str, output_dir: Path) -> Path | No
         print("  Skipped: no narration found in the script.")
         return None
     headers = {"x-api-key": key, "Content-Type": "application/json"}
+    audio_url = _avatar_audio_url(text, slug, output_dir)
+    source = {"audio_url": audio_url} if audio_url else {"script": text}
     try:
         r = requests.post(f"{TAVUS_API}/videos", headers=headers, timeout=60,
-                          json={"replica_id": replica, "script": text, "video_name": slug[:80]})
+                          json={"replica_id": replica, "video_name": slug[:80], **source})
         r.raise_for_status()
         video_id = r.json().get("video_id")
     except (requests.RequestException, ValueError) as e:
