@@ -129,7 +129,8 @@ def test_write_radar_writes_dated_files_and_latest(tmp_path: Path):
 def test_run_radar_end_to_end_with_everything_faked(tmp_path: Path, monkeypatch, capsys):
     monkeypatch.setattr(sw, "_hn_top", lambda days, limit=40: [SIGNALS[0]])
     monkeypatch.setattr(sw, "_reddit_top", lambda days, limit=40: [])
-    monkeypatch.setattr(sw, "_radar_web_scan", lambda days: SIGNALS[1:])
+    monkeypatch.setattr(sw, "_radar_web_scan", lambda days, have_channels=False: SIGNALS[1:])
+    monkeypatch.setattr(sw, "_youtube_top", lambda days: [])
     seen = {}
 
     def fake_claude(prompt, **kw):
@@ -166,7 +167,9 @@ def test_app_radar_routes(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(a, "OUTPUT_DIR", tmp_path)
     c = a.app.test_client()
     assert c.get("/api/radar/latest").get_json() == {"themes": [], "generated_at": None}
-    (tmp_path / "radar_latest.json").write_text('{"themes": [{"title": "T"}], "generated_at": "2026-09-13T00:00:00Z"}', encoding="utf-8")
+    # Stamped now, not on a fixed date: the staleness check below is relative to today.
+    stamp = a.datetime.now(a.timezone.utc).isoformat()
+    (tmp_path / "radar_latest.json").write_text(json.dumps({"themes": [{"title": "T"}], "generated_at": stamp}), encoding="utf-8")
     assert c.get("/api/radar/latest").get_json()["themes"][0]["title"] == "T"
 
     spawned = {}

@@ -48,11 +48,19 @@ Topic + Intent
 1. SERP Research      — pulls live Google results via SerpAPI, reads what's ranking
       │
       ▼
+1.4 Research notes    — optional (--notes): your own notes become the first fact
+      │                 pack, built from the notes alone; anything they flag as
+      │                 unverified goes to the gaps, not the facts
+      ▼
 1.5 Fact pack         — opens the primary pages (vendor pricing, docs, exam guides,
       │                 first-party reports) with Claude's web search + fetch tools,
       │                 and pins every specific to a URL and a verbatim quote. The
       │                 writer may state no figure that is not in the pack, and may
       │                 not widen a pack value into a range. Saved as <slug>_facts.json.
+      ▼
+1.6 Gap resolver      — optional (--resolve-gaps): an agent opens the page behind
+      │                 every gap and returns a verdict; confirmed gaps join the
+      │                 pack as facts, the rest stay gaps with the reason
       ▼
 2. Title Refinement   — picks the best angle and target keyword
       │
@@ -144,9 +152,9 @@ Which roles run where, by the keys you have:
 
 | Keys present | Writer | Auditor | Judge |
 |---|---|---|---|
-| Anthropic only | `claude-sonnet-5` | `claude-opus-5` | `claude-opus-5` |
-| Anthropic + OpenAI | `claude-sonnet-5` | `gpt-5.5` | `claude-opus-5` |
-| Anthropic + OpenAI + Gemini | `claude-sonnet-5` | `gpt-5.5` | `gemini-2.5-pro` |
+| Anthropic only | `claude-sonnet-5-5` | `claude-opus-5-5` | `claude-opus-5-5` |
+| Anthropic + OpenAI | `claude-sonnet-5-5` | `gpt-5.5` | `claude-opus-5-5` |
+| Anthropic + OpenAI + Gemini | `claude-sonnet-5-5` | `gpt-5.5` | `gemini-2.5-pro` |
 
 The writer always stays on Anthropic — the style prompts and sample-article matching were tuned against it, so swapping it changes the product rather than checking it. If a vendor is down mid-run, that role falls back to Claude and says so, because a vendor outage must not destroy an article that already cost a dozen calls.
 
@@ -191,6 +199,8 @@ python seo_writer.py "Semantic Caching for LLMs" --output-dir ./articles --editi
 | `--no-verify` | Skip the step 6.5 audit — faster and cheaper, but nothing checks the article's claims or structure before it hits disk |
 | `--verify-rounds` | Maximum audit/fix rounds before accepting the article (default: `2`) |
 | `--take` | Your own positions and experiences, one per line (or a path to a text file). Each is written into the article in first person and the auditor checks it survived. The run warns loudly when this is missing, because it is the single biggest reason an article reads as generic |
+| `--notes` | Your own research notes: markdown files, or a folder of them. They become the first fact pack, built from the notes alone, and the Step 1.5 web pass is merged in after. See *Write from your own research notes* below |
+| `--resolve-gaps` | Step 1.6: open the page behind every gap in the fact pack and settle it. Confirmed gaps become facts with the confirming quote; contradicted and unverifiable ones stay gaps with the reason. Up to 8 gaps a run |
 | `--no-facts` | Skip the Step 1.5 fact pack. The writer is then forbidden from stating any price, date, version or statistic |
 | `--radar` | Don't write; find out what to write. See *Topic radar* below |
 | `--radar-days` | How far back the radar looks (default `14`) |
@@ -233,6 +243,44 @@ they were; the code did not do it).
 
 ---
 
+## Write from your own research notes
+
+The fact pack opens the web for you. When you have already done the reading,
+a report, a folder of dated notes with a URL on every claim, a competitor
+teardown, hand it over and the pipeline writes from that instead of from
+scratch:
+
+```bash
+python seo_writer.py "KV cache offload explained" \
+  --intent "the agent's working memory is now a network hop; explain the tiers" \
+  --notes research/notes \
+  --take "I looked for an independent benchmark of any offload product and found none."
+```
+
+`--notes` takes files or a folder (every `.md` in it). Step 1.4 builds a fact
+pack from the notes alone: every figure with the URL the notes give for it and
+the sentence they use, nothing from memory. A claim the notes mark `[VERIFY]`,
+"secondary source", "secondhand" or "unverified" is routed to the gaps, so the
+writer is told to check it rather than state it. The Step 1.5 web pass still
+runs and is merged in after the notes' facts; add `--no-facts` to write from
+the notes only. The first part of each note also sits above the pack as a
+digest, so the outline follows the notes' angle, not the web's.
+
+Add `--resolve-gaps` and the gaps do not wait for you. One tool-using call
+opens the URL each gap names (or searches for the primary source when it names
+none) and returns a verdict per gap: confirmed gaps join the pack as facts, with
+the sentence that confirms them and the tag "confirmed by the gap resolver";
+contradicted and unverifiable ones stay gaps, now carrying the reason, so the
+writer still cannot state them. The verdicts are saved under `resolutions` in
+`<slug>_facts.json`. It settles up to 8 gaps a run and spends a few web
+fetches; what it confirms is still worth a glance, since a page can state a
+figure that is itself wrong.
+
+From the API, a run request may carry `"notes": ["notes", "my-report.md"]`,
+names resolved under `research/` (or the output folder); anything outside
+those is dropped. `"resolve_gaps": true` turns the gap resolver on. `research/` is where the notes live in this repo, with the
+finished pieces under `articles/`.
+
 ## Topic radar: what should I write?
 
 The pipeline writes whatever topic it is handed. The radar answers the question
@@ -242,7 +290,8 @@ conversation:
 
 | Source | How it is read |
 |---|---|
-| YouTube — the most-watched AI videos and the big channels | Claude's web search + fetch, with the view counts the pages show |
+| YouTube — the tracked AI channels' recent uploads | Read directly: the YouTube Data API with `YOUTUBE_API_KEY` (exact views and comments, plus a most-viewed search), or the channels' Videos pages without one |
+| YouTube — big AI videos from other channels | Claude's web search + fetch, with the view counts the pages show |
 | Podcasts — Latent Space, Lex, No Priors, a16z, Practical AI, Dwarkesh, … | same |
 | Newsletters and posts — Simon Willison, Karpathy, Mollick, swyx, Hamel Husain, The Batch, … | same |
 | Hacker News | the Algolia API, free, no key |
@@ -425,6 +474,73 @@ from the outside whether the deployed app is actually locked.
 
 ---
 
+## Client workspaces
+
+The app can write for several clients, each in a workspace of its own: its own
+folder under `output/workspaces/<slug>/`, its own voice, settings, people and
+usage. The default workspace is still `output/` itself, so everything written
+before workspaces existed is where it was.
+
+**People and roles.** `APP_USERNAME` / `APP_PASSWORD` is the studio owner, an
+administrator who creates workspaces on the **Clients** page. Everyone else gets
+their own account (a one-time password to pass on) and a role per workspace:
+
+| Role | Can |
+|---|---|
+| Owner | everything, including Settings and people |
+| Editor | write, approve, publish |
+| Writer | write, edit, send for review |
+| Client reviewer | read, comment, approve or request changes; never starts a paid run |
+
+Scripts keep using basic auth; add `?ws=<slug>` to an `/api/...` call to act in
+a client's workspace.
+
+**Writing as the client.** Settings holds who the workspace publishes as: the
+website and its URL pattern (`{site}/blog/{slug}`), the byline, a short "who is
+speaking" for the LinkedIn post and video, a brand guide the writer follows
+and the auditor checks (an eleventh check, BRAND), and the closing call to
+action. A client workspace never inherits the studio owner's byline, greeting,
+sign-off or voice.
+
+**Reading their site.** *Read their site* in Settings runs `site_intake.py`: it
+reads the sitemap (honouring robots.txt, refusing private addresses), keeps
+every page with its title, takes two or three of their own long articles as
+voice samples, and saves their product and pricing pages as research notes with
+the source URL on top. From then on articles link to their real pages, use
+their product pages as facts (a checkbox on the form), and the form warns when
+a topic is close to a page they already have.
+
+```bash
+python site_intake.py https://www.example.com --out output/workspaces/acme
+```
+
+**Approval.** Every article has a page at `/a/<slug>`: the manuscript, its
+status (draft, in review, changes requested, approved, published), the moves
+your role allows, a discussion thread, and its versions. Editing keeps the old
+text as a version and rebuilds the HTML (`seo_writer.py --rerender <slug>`, no
+model calls). With *Require approval* on, nothing is published before approval,
+an article edited after approval goes back for it, and the client's feed
+(`/feed.json?ws=<slug>`) carries only approved work.
+
+**WordPress.** Connect a workspace with an application password (their
+WordPress: Users, Profile, Application Passwords; stored encrypted). An editor
+then sends an article as a draft, pending review, or published. Diagrams are
+uploaded to the media library, the first becomes the featured image, and
+sending again updates the same post.
+
+**Jobs.** Runs are queued in the database with their logs on the volume: a
+deploy marks a running job *interrupted* (retry is one click, never automatic,
+because a rerun spends money), and a dropped browser picks the log up where it
+left off. One job runs per workspace; different clients run side by side, up
+to `MAX_CONCURRENT_JOBS`.
+
+**Records.** An audit log per workspace (Settings, Audit log), usage per client
+on the Usage page for billing, a retention period per workspace, and `/trust`,
+a public page for a client's security review listing only the outside services
+this deployment has switched on.
+
+---
+
 ## Starting runs from Zapier, n8n or a script
 
 The browser follows a run over a live event stream, which an automation
@@ -517,7 +633,7 @@ Token counts come from what each API actually reports — `usage.input_tokens` a
 OpenAI, `usage_metadata` on Gemini. They are counted, never estimated.
 
 Cost is a softer layer. The built-in table carries Anthropic's first-party list
-prices (`claude-sonnet-5` $2/$10 per MTok, `claude-opus-5` $5/$25). **A model
+prices (`claude-sonnet-5-5` $2/$10 per MTok, `claude-opus-5-5` $4/$20). **A model
 with no price on file still has its tokens counted and simply reports no dollar
 figure** rather than a wrong one — the dashboard flags those runs and treats the
 total as a floor. Add your own rates rather than trusting a guess:
@@ -530,10 +646,10 @@ The CLI prints the same summary at the end of every run:
 
 ```
   Tokens: 184,203 in + 27,410 out = 211,613 across 17 calls
-    claude-sonnet-5       11 calls   120,400 in   19,900 out  $0.440
-    claude-opus-5          4 calls    48,100 in    6,200 out  $0.396
+    claude-sonnet-5-5     11 calls   120,400 in   19,900 out  $0.440
+    claude-opus-5-5        4 calls    48,100 in    6,200 out  $0.316
     gpt-5.5                2 calls    15,703 in    1,310 out  unpriced
-  Estimated cost: $0.84 plus unpriced models
+  Estimated cost: $0.76 plus unpriced models
 ```
 
 ---
@@ -655,14 +771,21 @@ passed `--apply`.
 ```
 humanly/
 ├── seo_writer.py       # Core agent + CLI — the whole pipeline lives here
-├── app.py              # Web UI (Flask): jobs, streaming log, auth, usage
+├── app.py              # Web UI (Flask): workspaces, jobs, streaming log, auth, usage
+├── store.py            # SQLite records: people, workspaces, roles, status, audit, jobs
+├── site_intake.py      # Reads a client's website: pages, voice samples, product notes
+├── wordpress.py        # Sends an article to a client's WordPress
 ├── requirements.txt
 ├── .env.example        # Copy to .env and fill in keys
 ├── templates/
 │   ├── index.html      # The form, the live log, the article library
 │   ├── review.html     # /review/<slug> — the argument, with all three voices
 │   ├── deck.html       # /deck/<slug> — the video script as timed slides
-│   ├── usage.html      # /usage — tokens and cost
+│   ├── usage.html      # /usage — tokens and cost, per client for admins
+│   ├── article.html    # /a/<slug> — status, discussion, edits, versions, publish
+│   ├── settings.html   # /settings — the workspace: identity, brand, site, WordPress, people
+│   ├── admin.html      # /admin — clients and accounts
+│   ├── trust.html      # /trust — public: how client data is handled
 │   └── login.html
 ├── docs/flow.html      # End-to-end walkthrough of how a run works
 ├── examples/           # A real article the pipeline produced, untouched

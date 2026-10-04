@@ -28,7 +28,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote_plus
 
@@ -60,7 +60,7 @@ _load_dotenv()
 # Configuration
 # ---------------------------------------------------------------------------
 
-MODEL = "claude-sonnet-5"
+MODEL = "claude-sonnet-5-5"
 
 # Three roles argue about the article: the writer produces it, the auditor attacks
 # it, the judge settles what they cannot. The point of the stage is decorrelated
@@ -72,9 +72,9 @@ MODEL = "claude-sonnet-5"
 # auditor means the finding never exists to be argued about. Distinctness is
 # therefore spent on the auditor first.
 
-VERIFIER_MODEL = "claude-opus-5"    # Anthropic-side auditor: not the writer's weights
+VERIFIER_MODEL = "claude-opus-5-5"  # Anthropic-side auditor: not the writer's weights
 VERIFIER_EFFORT = "high"
-JUDGE_MODEL = "claude-opus-5"
+JUDGE_MODEL = "claude-opus-5-5"
 JUDGE_EFFORT = "high"
 
 OPENAI_JUDGE_MODEL = os.getenv("OPENAI_JUDGE_MODEL", "gpt-5.5")
@@ -162,6 +162,33 @@ SITE_URL = os.getenv("SITE_URL", "").rstrip("/")
 AUTHOR_NAME = os.getenv("AUTHOR_NAME", "Imran Tauqir")
 AUTHOR_URL = os.getenv("AUTHOR_URL", "https://imrantauqir.com/")
 
+# How the client's blog addresses a post. {site} and {slug} are filled in; the
+# default is the flat SITE_URL/<slug> this pipeline always assumed.
+ARTICLE_URL_PATTERN = os.getenv("ARTICLE_URL_PATTERN", "").strip() or "{site}/{slug}"
+
+# Who the LinkedIn post and the video script speak as.
+AUTHOR_BIO = os.getenv("AUTHOR_BIO", "").strip() or (
+    "Imran Tauqir, an engineer who builds with AI agents and writes about it.")
+
+# A client's house rules: naming, claims it may not make, tone, spelling. The
+# writer follows them and the auditor flags what breaks them.
+BRAND_GUIDE = os.getenv("BRAND_GUIDE", "").strip()
+
+# The client's real pages, from site intake: [{url, title}, ...]. They are the
+# internal links the writer may use, alongside articles this app wrote.
+SITE_PAGES_FILE = os.getenv("SITE_PAGES_FILE", "").strip()
+# {slug: live url} of this workspace's published articles. Set for client
+# workspaces, where only what is live may be linked.
+PUBLISHED_FILE = os.getenv("PUBLISHED_FILE", "").strip()
+
+
+def public_url(slug: str) -> str:
+    """The article's address on the publishing site, or "" with no site. A wrong
+    canonical is worse than none, so nothing is guessed."""
+    if not SITE_URL:
+        return ""
+    return ARTICLE_URL_PATTERN.replace("{site}", SITE_URL).replace("{slug}", slug)
+
 # ---------------------------------------------------------------------------
 # Token accounting
 # ---------------------------------------------------------------------------
@@ -177,6 +204,9 @@ AUTHOR_URL = os.getenv("AUTHOR_URL", "https://imrantauqir.com/")
 # pricing page before trusting the totals - override with MODEL_PRICES, a JSON
 # object of {"model": [input, output]}.
 MODEL_PRICES = {
+    "claude-opus-5-5": (4.00, 20.00),
+    "claude-sonnet-5-5": (2.00, 10.00),
+    # The previous generation stays priced so older ledger rows still add up.
     "claude-opus-5": (5.00, 25.00),
     "claude-sonnet-5": (2.00, 10.00),
     "claude-haiku-4-5": (1.00, 5.00),
@@ -366,6 +396,15 @@ Until next time,
 **Imran**
 """
 
+# A workspace sets these (possibly to nothing). Unset, the studio's own greeting
+# and sign-off apply, as they always have.
+if "BRAND_CTA" in os.environ:
+    _cta = os.environ["BRAND_CTA"].strip()
+    AUTHOR_CTA = f"\n\n---\n\n{_cta}\n" if _cta else ""
+if "BRAND_INTRO" in os.environ:
+    AUTHOR_INTRO_TEMPLATE = os.environ["BRAND_INTRO"].strip()
+    AUTHOR_INTRO_TEMPLATE = AUTHOR_INTRO_TEMPLATE + "\n" if AUTHOR_INTRO_TEMPLATE else ""
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -379,6 +418,47 @@ def slugify(text: str) -> str:
 
 
 CONSOLE_LIMITS_URL = "https://console.anthropic.com/settings/limits"
+
+# The 5.5 models run safety classifiers that can decline a request, and benign
+# technical writing occasionally trips them. With server-side fallback the API
+# re-runs a declined request on the model Anthropic recommends for that kind of
+# decline, in the same call, instead of failing the article. Some categories
+# have no fallback; those still come back as a refusal. CLAUDE_FALLBACKS=off
+# turns it off.
+FALLBACK_BETA = "server-side-fallback-2026-07-01"
+USE_FALLBACKS = os.getenv("CLAUDE_FALLBACKS", "default").strip().lower() not in ("off", "0", "false", "no")
+
+
+def _with_fallbacks(kwargs: dict, betas: list | None = None) -> dict:
+    """The request as a beta call that opts into server-side refusal fallback."""
+    betas = list(betas or [])
+    if USE_FALLBACKS:
+        betas.append(FALLBACK_BETA)
+        kwargs = {**kwargs, "fallbacks": "default"}
+    return {**kwargs, "betas": betas} if betas else kwargs
+
+
+def _create(kwargs: dict, betas: list | None = None):
+    full = _with_fallbacks(kwargs, betas)
+    if "betas" in full:
+        return client.beta.messages.create(**full)
+    return client.messages.create(**full)
+
+
+def _refusal_message(response) -> str:
+    details = getattr(response, "stop_details", None)
+    category = getattr(details, "category", None) if details else None
+    reasons = {
+        "frontier_llm": "it reads as help with building competing AI models",
+        "cyber": "it reads as possible cyber harm",
+        "bio": "it reads as dual-use biology",
+        "reasoning_extraction": "it asks the model to write out its own reasoning",
+        "general_harms": "it touches another usage-policy area",
+    }
+    why = reasons.get(category or "", "for safety reasons")
+    return (f"Claude declined this prompt ({category or 'no category given'}: {why}). "
+            f"Benign technical topics occasionally trip the classifier; rephrase the "
+            f"topic or intent and run it again.")
 
 
 class ClaudeError(RuntimeError):
@@ -406,16 +486,15 @@ def call_claude(prompt: str, system: str = "", max_tokens: int = 16000,
         "model": model,
         "max_tokens": max_tokens,
         "messages": messages,
-        # Sonnet 5 runs adaptive thinking when `thinking` is omitted, so state it
-        # explicitly. Low effort keeps the token cost close to the old no-thinking
-        # behaviour while still buying Sonnet 5's better planning.
+        # The 5.5 models always think (a disabled setting is a 400), so effort is
+        # the only dial. State it every time: Opus 5.5 defaults to medium, not high.
         "thinking": {"type": "adaptive"},
         "output_config": {"effort": effort},
     }
     if system:
         kwargs["system"] = system
     try:
-        response = client.messages.create(**kwargs)
+        response = _create(kwargs)
     except anthropic.BadRequestError as e:
         # The spend cap set in the Console arrives as a 400, not a 429, and the
         # SDK does not retry it — surface the reset date the API gives us.
@@ -457,16 +536,15 @@ def call_claude(prompt: str, system: str = "", max_tokens: int = 16000,
 
     u = getattr(response, "usage", None)
     if u is not None:
-        record_usage("anthropic", model,
+        # Priced as the model that answered: after a fallback that is not the
+        # one asked for, and its rates apply to that attempt.
+        record_usage("anthropic", getattr(response, "model", None) or model,
                      getattr(u, "input_tokens", 0), getattr(u, "output_tokens", 0),
                      getattr(u, "cache_read_input_tokens", 0) or 0,
                      getattr(u, "cache_creation_input_tokens", 0) or 0)
 
     if response.stop_reason == "refusal":
-        raise ClaudeError(
-            "Claude declined to answer this prompt for safety reasons. "
-            "Try rephrasing the topic."
-        )
+        raise ClaudeError(_refusal_message(response))
 
     # With thinking enabled, content[0] is a thinking block — pick the text block
     # out rather than indexing blindly.
@@ -772,7 +850,7 @@ def date_context() -> str:
     )
 
 
-SAMPLE_DIR = Path(__file__).parent / "sample-articles"
+SAMPLE_DIR = Path(os.getenv("STYLE_SAMPLES_DIR", "").strip() or Path(__file__).parent / "sample-articles")
 STYLE_SAMPLE_WORDS = 1200
 STYLE_SAMPLE_COUNT = 2
 
@@ -837,8 +915,17 @@ def load_style_samples(limit_words: int = STYLE_SAMPLE_WORDS,
     return "\n".join(blocks)
 
 
+def brand_block() -> str:
+    if not BRAND_GUIDE:
+        return ""
+    return f"""
+BRAND GUIDE (the client's house rules; follow every one)
+{BRAND_GUIDE}
+"""
+
+
 def style_block(samples: str, profile: str = "") -> str:
-    parts = []
+    parts = [brand_block()]
     if samples:
         parts.append(f"""
 STYLE TO MATCH
@@ -871,13 +958,54 @@ the neutralised form that fails this rule.
 """
 
 
-def library_links(output_dir: Path, exclude_title: str = "", limit: int = 12) -> list[dict]:
-    """Articles already published, as {title, url}, for the outline to link to.
-    Needs SITE_URL: without a site there is nothing to link to, and the writer
-    is told to plan no internal links rather than invent anchors."""
-    if not SITE_URL or not output_dir.exists():
+_LINK_STOPWORDS = {"the", "a", "an", "and", "or", "of", "to", "for", "in", "on", "with", "how",
+                   "what", "why", "is", "are", "your", "you", "vs", "guide", "best", "from", "by"}
+
+
+def _words(text: str) -> set:
+    return {w for w in re.findall(r"[a-z0-9]+", (text or "").lower())
+            if len(w) > 2 and w not in _LINK_STOPWORDS}
+
+
+def site_pages(topic: str = "", limit: int = 10) -> list[dict]:
+    """The client's own pages most related to this topic, as {title, url}. They
+    come from site intake (SITE_PAGES_FILE); without it there are none."""
+    if not SITE_PAGES_FILE:
         return []
-    links = []
+    try:
+        pages = json.loads(Path(SITE_PAGES_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    want = _words(topic)
+    scored = []
+    for p in pages if isinstance(pages, list) else []:
+        title, url = str(p.get("title") or "").strip(), str(p.get("url") or "").strip()
+        if not title or not url.startswith("http"):
+            continue
+        overlap = len(want & _words(title + " " + url))
+        if overlap:
+            scored.append((overlap, title, url))
+    scored.sort(key=lambda t: -t[0])
+    return [{"title": t, "url": u} for _, t, u in scored[:limit]]
+
+
+def library_links(output_dir: Path, exclude_title: str = "", limit: int = 12) -> list[dict]:
+    """Pages that really exist, as {title, url}, for the outline to link to: the
+    client's own pages related to the topic, then articles already published.
+    Without a site there is nothing to link to, and the writer is told to plan
+    no internal links rather than invent anchors."""
+    links = site_pages(exclude_title, limit=limit // 2 or 1)
+    if not SITE_URL or not output_dir.exists():
+        return links
+    seen = {l["url"] for l in links}
+    # A client workspace lists what is actually live ({slug: url}); a draft on
+    # this app's disk is not a page a reader can follow.
+    live = None
+    if PUBLISHED_FILE:
+        try:
+            live = json.loads(Path(PUBLISHED_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            live = {}
     for meta_file in sorted(output_dir.glob("*_meta.json"), key=lambda p: p.stat().st_mtime, reverse=True):
         try:
             meta = json.loads(meta_file.read_text(encoding="utf-8"))
@@ -887,7 +1015,12 @@ def library_links(output_dir: Path, exclude_title: str = "", limit: int = 12) ->
         title_ = (meta.get("seo_meta") or {}).get("title") or slug.replace("-", " ")
         if exclude_title and title_.strip().lower() == exclude_title.strip().lower():
             continue
-        links.append({"title": title_, "url": f"{SITE_URL}/{slug}"})
+        if live is not None and slug not in live:
+            continue
+        url = (live or {}).get(slug) or public_url(slug)
+        if url in seen:
+            continue
+        links.append({"title": title_, "url": url})
         if len(links) >= limit:
             break
     return links
@@ -923,9 +1056,16 @@ def read_take(value: str | None) -> str:
     """--take accepts inline text, or a path to a text file."""
     if not value:
         return ""
-    p = Path(value)
-    if p.exists() and p.is_file():
-        return p.read_text(encoding="utf-8", errors="ignore")
+    # A multi-line or very long take (a dig angle, say) is text, not a path;
+    # asking the OS about it raises ENAMETOOLONG rather than returning False.
+    if "\n" in value or len(value) > 255:
+        return value
+    try:
+        p = Path(value)
+        if p.is_file():
+            return p.read_text(encoding="utf-8", errors="ignore")
+    except (OSError, ValueError):
+        pass
     return value
 
 
@@ -1763,6 +1903,294 @@ def _clean_fact_pack(pack: dict) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Step 1.4: Research notes - the author's own sourced notes as a fact pack
+# ---------------------------------------------------------------------------
+#
+# A radar brief is one page the app wrote itself. Research notes are the
+# author's own: a ranked report, a set of dated notes with a URL on every
+# claim, a competitor teardown. They go in as a second fact pack, built from
+# the notes alone (nothing from memory), so the writer may use their figures
+# under the same citation rules. A claim the notes flag as unverified or
+# secondhand goes to "gaps", not "facts": the writer is then told to check it,
+# not to state it.
+
+NOTES_MAX_CHARS = 180_000   # about 45K tokens of notes in one call
+NOTES_FLAGS = re.compile(
+    r"\[VERIFY[^\]]*\]|\bsecondary source\b|\bsecondhand\b|\bunverified\b"
+    r"|\bnot (?:yet )?(?:confirmed|verified)\b",
+    re.I,
+)
+
+
+def load_research_notes(paths) -> dict:
+    """Read the notes files, or every .md in a folder. Each file is headed with
+    its name so a fact can say which note it came from, and the first part of
+    each file is kept as a digest the outliner sees above the pack."""
+    files = []
+    for p in paths or []:
+        p = Path(p)
+        if p.is_dir():
+            files += sorted(q for q in p.rglob("*.md") if q.is_file())
+        elif p.is_file():
+            files.append(p)
+        else:
+            print(f"  WARNING: research notes not found: {p}")
+    chunks, digest, total = [], [], 0
+    for f in files:
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            print(f"  WARNING: could not read {f}: {e}")
+            continue
+        head = f"\n\n===== NOTES FILE: {f.name} =====\n"
+        room = NOTES_MAX_CHARS - total - len(head)
+        if room <= 0:
+            print(f"  NOTE: research notes capped at {NOTES_MAX_CHARS:,} characters; {f.name} left out.")
+            break
+        if len(text) > room:
+            print(f"  NOTE: research notes capped at {NOTES_MAX_CHARS:,} characters; {f.name} truncated.")
+            text = text[:room]
+        chunks.append(head + text)
+        total += len(head) + len(text)
+        body = re.sub(r"\s+", " ", text).strip()
+        digest.append(f"- {f.name}: {body[:1200]}")
+    text = "".join(chunks)
+    return {
+        "files": [str(f) for f in files],
+        "text": text,
+        "digest": "\n".join(digest),
+        "flagged": len(NOTES_FLAGS.findall(text)),
+    }
+
+
+def research_notes_text(research: dict) -> str:
+    """The notes' digest as the writer, outliner and auditor see it, above the pack."""
+    notes = research.get("notes") or {}
+    if not notes.get("digest"):
+        return ""
+    return (f"\nRESEARCH NOTES (the author's own, {len(notes.get('files') or [])} file(s). "
+            f"The facts below marked 'from the author's notes' were taken from them, "
+            f"and their angle is the article's angle.)\n{notes['digest']}\n")
+
+
+def _fact_pack_via_notes(brief: str, notes: dict) -> dict:
+    """One Claude call, no tools: the pack is built from the notes alone."""
+    prompt = f"""You are a research assistant building the evidence pack for an article
+from the author's own research notes.
+
+{brief}
+
+THE NOTES
+{notes.get('text', '')}
+
+Do this:
+1. Read the notes. They were compiled from pages a researcher opened, and most
+   claims carry the URL they came from and a date.
+2. Extract every specific figure, date, version, named product, standard or
+   quotation a reader of this article would want, with the URL the notes give
+   for it and the sentence the notes use, verbatim.
+3. Anything the notes mark [VERIFY], "secondary source", "secondhand",
+   "unverified", "not confirmed" or "single source" is NOT a fact. Put it in
+   "gaps" as: "<the claim> - flagged in the notes; confirm at <url> before use".
+   A vendor's own figure with a primary URL may be a fact if its "claim" says
+   it is a vendor claim.
+4. Prefer the newest dated item when two conflict, and say so in "claim".
+
+Rules:
+- Only what the notes state. Nothing from memory, and nothing about the topic
+  that the notes do not cover.
+- A fact with no URL in the notes goes to "gaps", not "facts".
+- Exact values as the notes give them.
+- Up to {FACT_PACK_MAX_FACTS} facts; pick the ones closest to the topic and intent.
+
+Return ONLY valid JSON in exactly this shape:
+{FACT_PACK_SCHEMA}"""
+    pack = extract_json(call_claude(prompt, max_tokens=12000))
+    pack["method"] = "research-notes"
+    return pack
+
+
+def build_notes_pack(title: str, keywords: str, intent: str, research: dict):
+    """The notes as a fact pack, or None if the call failed (the run goes on)."""
+    notes = research.get("notes") or {}
+    log("STEP 1.4", f"Fact pack from your research notes ({len(notes.get('files') or [])} file(s), "
+        f"{len(notes.get('text') or ''):,} characters, {notes.get('flagged', 0)} flagged claim(s))")
+    brief = _fact_pack_brief(title, keywords, intent, research)
+    try:
+        pack = _fact_pack_via_notes(brief, notes)
+    except Exception as e:
+        print(f"  Could not build a pack from the notes ({str(e)[:120]}); continuing without it.")
+        return None
+    pack = _clean_fact_pack(pack)
+    for f in pack["facts"]:
+        f["origin"] = "research-notes"
+    print(f"  Notes pack: {len(pack['facts'])} fact(s) from {len(pack['primary_sources'])} URL(s); "
+          f"{len(pack['gaps'])} flagged or unsourced claim(s) routed to gaps.")
+    for f in pack["facts"][:8]:
+        print(f"    {f['id']} {f.get('kind','?'):9} {f['value'][:28]:28} {f.get('claim','')[:60]}")
+    return pack
+
+
+def merge_fact_packs(first: dict, second: dict) -> dict:
+    """Two packs as one. `first` wins on duplicates (same value and URL) and on
+    the cap, which is why the author's notes go first."""
+    methods = [m for m in (first.get("method"), second.get("method")) if m and m != "skipped"]
+    merged = {
+        "facts": list(first.get("facts") or []) + list(second.get("facts") or []),
+        "primary_sources": list(dict.fromkeys(
+            list(first.get("primary_sources") or []) + list(second.get("primary_sources") or []))),
+        "gaps": list(dict.fromkeys(list(first.get("gaps") or []) + list(second.get("gaps") or []))),
+        "method": "+".join(methods) or "none",
+    }
+    return _clean_fact_pack(merged)
+
+
+# ---------------------------------------------------------------------------
+# Step 1.6: Gap resolver - an agent opens the page behind every flagged or
+# missing specific and settles it
+# ---------------------------------------------------------------------------
+#
+# The pack's gaps are the claims the writer may not use: figures the notes
+# flagged [VERIFY], figures no opened page stated. Until now a person settled
+# them by hand before publishing. This step hands them to one tool-using call:
+# it opens the URL a gap names (or searches when it names none) and returns a
+# verdict per gap. Confirmed gaps join the pack as facts with the quote that
+# confirms them; contradicted and unverifiable ones stay gaps, now carrying
+# the reason, so the writer still cannot state them.
+
+GAP_RESOLVE_MAX = 8          # gaps settled per run; the rest stay gaps
+GAP_RESOLVE_SEARCHES = 4
+GAP_RESOLVE_FETCHES = 10
+GAP_RESOLVE_SCHEMA = """{
+  "resolutions": [
+    {
+      "gap": "<the gap exactly as given>",
+      "verdict": "confirmed | contradicted | unverifiable",
+      "claim": "<what the page establishes, one sentence>",
+      "value": "<the exact figure, name, date or version the page states, or empty>",
+      "source_url": "<the page you read it on, or empty>",
+      "source_title": "<page title, or empty>",
+      "quote": "<the sentence on the page, verbatim, under 40 words, or empty>",
+      "as_of": "<date the page states or was published, YYYY-MM-DD or YYYY-MM, or 'undated'>",
+      "kind": "price | date | version | spec | statistic | quote | policy | name",
+      "reason": "<one sentence: why this verdict>"
+    }
+  ]
+}"""
+
+
+def _gap_url(gap: str) -> str:
+    m = re.search(r"https?://[^\s)\]>\"']+", gap or "")
+    return m.group(0).rstrip(".,;") if m else ""
+
+
+def resolve_fact_gaps(title: str, keywords: str, intent: str, research: dict) -> dict:
+    """Settle the pack's gaps with one tool-using call. Returns the pack with
+    confirmed gaps promoted to facts and the rest annotated; never raises."""
+    pack = research.get("fact_pack") or {}
+    gaps = [str(g) for g in (pack.get("gaps") or []) if str(g).strip()]
+    if not gaps:
+        log("STEP 1.6", "Gap resolver: no gaps to settle")
+        return pack
+    todo = gaps[:GAP_RESOLVE_MAX]
+    log("STEP 1.6", f"Gap resolver: settling {len(todo)} of {len(gaps)} gap(s) by opening the pages")
+    lines = "\n".join(
+        f"{i + 1}. {g}" + (f"\n   URL named: {_gap_url(g)}" if _gap_url(g) else "")
+        for i, g in enumerate(todo))
+    prompt = f"""You are a fact checker. Each gap below is a specific the writer wants
+to state but may not, because no opened page has confirmed it yet.
+
+TOPIC: {title}
+PRIMARY KEYWORD: {keywords}
+WRITER'S INTENT: {intent or '(none given)'}
+{date_context()}
+
+GAPS
+{lines}
+
+For each gap, in order:
+1. If it names a URL, open that page first. If the page does not state the
+   figure, or no URL is named, search for the primary source (the vendor's own
+   page, the standards body, the analyst's release, the filing) and open it.
+2. Verdict "confirmed" only when a page you opened states the specific; copy
+   the exact value and the sentence that states it, verbatim.
+3. Verdict "contradicted" when a page you opened states something else; give
+   that value and sentence instead.
+4. Verdict "unverifiable" when no opened page settles it. Never confirm from
+   memory, and never widen a value into a range.
+
+Return ONLY valid JSON in exactly this shape, one entry per gap, in the same
+order, with "gap" copied exactly as given:
+{GAP_RESOLVE_SCHEMA}"""
+    try:
+        out = _claude_web_call(prompt, max_tokens=8000, searches=GAP_RESOLVE_SEARCHES,
+                               fetches=GAP_RESOLVE_FETCHES, label="gap-resolve",
+                               schema=GAP_RESOLVE_SCHEMA)
+    except Exception as e:
+        print(f"  Gap resolver unavailable ({str(e)[:120]}); the gaps stay as they are.")
+        return pack
+    answers = {}
+    for r in out.get("resolutions") or []:
+        if isinstance(r, dict) and str(r.get("gap", "")).strip():
+            answers[str(r["gap"]).strip()] = r
+
+    def answer_for(gap: str):
+        if gap.strip() in answers:
+            return answers[gap.strip()]
+        head = gap.strip()[:60].lower()   # a lightly rewritten gap still lands
+        for key, r in answers.items():
+            if key[:60].lower() == head:
+                return r
+        return None
+
+    promoted, kept = [], []
+    counts = {"confirmed": 0, "contradicted": 0, "unverifiable": 0, "unanswered": 0}
+    for g in gaps:
+        r = answer_for(g) if g in todo else None
+        if r is None:
+            kept.append(g)
+            if g in todo:
+                counts["unanswered"] += 1
+            continue
+        verdict = str(r.get("verdict", "")).strip().lower()
+        url = str(r.get("source_url", "")).strip()
+        value = str(r.get("value", "")).strip()
+        quote = str(r.get("quote", "")).strip()
+        reason = str(r.get("reason", "")).strip()
+        if verdict == "confirmed" and url.startswith("http") and value:
+            promoted.append({
+                "claim": r.get("claim") or g, "value": value, "source_url": url,
+                "source_title": r.get("source_title", ""), "quote": quote,
+                "as_of": r.get("as_of") or "undated", "kind": r.get("kind") or "statistic",
+                "origin": "gap-resolver"})
+            counts["confirmed"] += 1
+        elif verdict == "contradicted" and url.startswith("http"):
+            kept.append(f"{g} - CONTRADICTED by {url}: {quote or value or reason}"[:400])
+            counts["contradicted"] += 1
+        else:
+            kept.append(f"{g} - could not be verified ({reason or 'no opened page settles it'})"[:400])
+            counts["unverifiable"] += 1
+    merged = _clean_fact_pack({
+        "facts": list(pack.get("facts") or []) + promoted,
+        "primary_sources": list(pack.get("primary_sources") or [])
+                           + [f["source_url"] for f in promoted],
+        "gaps": kept,
+        "method": f"{pack.get('method') or 'none'}+gap-resolver",
+    })
+    merged["resolutions"] = [r for r in (out.get("resolutions") or []) if isinstance(r, dict)]
+    dropped = len(pack.get("facts") or []) + len(promoted) - len(merged["facts"])
+    print(f"  Gap resolver: {counts['confirmed']} confirmed and promoted to facts, "
+          f"{counts['contradicted']} contradicted, {counts['unverifiable']} unverifiable"
+          + (f", {counts['unanswered']} unanswered" if counts["unanswered"] else "")
+          + f"; {len(merged['gaps'])} gap(s) remain."
+          + (f" ({dropped} promoted fact(s) did not fit under the {FACT_PACK_MAX_FACTS}-fact cap.)"
+             if dropped > 0 else ""))
+    for f in promoted[:6]:
+        print(f"    + {f['value'][:28]:28} {str(f['claim'])[:60]}")
+    return merged
+
+
 def build_fact_pack(title: str, keywords: str, intent: str, research: dict) -> dict:
     log("STEP 1.5", "Building the fact pack (opening primary sources)")
     brief = _fact_pack_brief(title, keywords, intent, research)
@@ -1790,8 +2218,9 @@ def fact_pack_text(research: dict) -> str:
     """The pack as the writer, outliner and auditor see it."""
     pack = research.get("fact_pack") or {}
     facts = pack.get("facts") or []
+    notes_text = research_notes_text(research)
     if not facts:
-        return """
+        return notes_text + """
 FACT PACK
 No verified facts were collected for this article. Therefore: state no price,
 date, version, count or statistic as fact. Where a figure is needed, say plainly
@@ -1801,13 +2230,15 @@ out. Do not fill the gap from memory.
     lines = []
     for f in facts:
         as_of = f.get("as_of") or "undated"
+        origin = {"research-notes": " | from the author's notes",
+                  "gap-resolver": " | confirmed by the gap resolver"}.get(f.get("origin"), "")
         lines.append(f"[{f['id']}] {f.get('claim','')} | value: {f['value']} | "
-                     f"as of {as_of} | {f['source_url']}\n"
+                     f"as of {as_of} | {f['source_url']}{origin}\n"
                      f"     quote: \"{str(f.get('quote',''))[:200]}\"")
     gaps = pack.get("gaps") or []
     gap_text = ("\nKNOWN GAPS (no opened source states these - do not invent them):\n"
                 + "\n".join(f"- {g}" for g in gaps)) if gaps else ""
-    return f"""
+    return notes_text + f"""
 FACT PACK (the only permitted source of specifics)
 {chr(10).join(lines)}
 {gap_text}
@@ -1831,8 +2262,9 @@ Rules for using it:
 # what the industry is actually talking about: the most-watched AI videos,
 # the podcasts engineers listen to, the newsletters and posts of the people
 # they follow, and the two forums where they argue. Signals come from code
-# where a free API exists (Hacker News, Reddit) and from Claude's web tools
-# where none does (YouTube, podcasts, newsletters); one synthesis call then
+# where the data can be read directly (Hacker News, Reddit, and the tracked
+# YouTube channels, with real view counts) and from Claude's web tools where
+# it cannot (podcasts, newsletters, LinkedIn, other videos); one synthesis call then
 # clusters them into themes and says, for each, the angle an engineer-author
 # could own. Every evidence link is one the radar actually saw.
 
@@ -1846,18 +2278,46 @@ RADAR_PODCASTS = [
     "Latent Space", "Lex Fridman Podcast", "No Priors", "The a16z Podcast",
     "Practical AI", "Dwarkesh Podcast", "The Cognitive Revolution", "AI Engineer",
     "How I AI", "Training Data (Sequoia)",
+    "Packet Pushers Heavy Networking",  # AI networking pillar
 ]
-RADAR_YOUTUBE_CHANNELS = [
-    "Fireship", "Matthew Berman", "AI Explained", "Wes Roth", "Two Minute Papers",
-    "Andrej Karpathy", "3Blue1Brown", "IndyDevDan", "Cole Medin", "Sam Witteveen",
-]
+# Channel name -> YouTube handle. The radar reads these channels' recent
+# uploads directly; the names also steer the web scan.
+RADAR_YOUTUBE_HANDLES = {
+    "Fireship": "Fireship", "Matthew Berman": "matthew_berman",
+    "AI Explained": "aiexplained-official", "Wes Roth": "WesRoth",
+    "Two Minute Papers": "TwoMinutePapers", "Andrej Karpathy": "AndrejKarpathy",
+    "3Blue1Brown": "3blue1brown", "IndyDevDan": "indydevdan",
+    "Cole Medin": "ColeMedin", "Sam Witteveen": "samwitteveenai",
+    "Ed Donner": "Edward.Donner", "Aishwarya Srinivasan": "aishwaryasrinivasan",
+    "Y Combinator": "ycombinator", "Priyanka Vergadia": "pvergadia",
+    "DeepLearning.AI": "Deeplearningai",
+    # AI networking pillar (added 3 Oct 2026): the handles were checked to
+    # resolve; drop any that crowd out the agent-builder channels.
+    "Stanford Online": "stanfordonline", "Claude": "claude",
+    "IBM Technology": "IBMTechnology", "NVIDIA Developer": "NVIDIADeveloper",
+    "Open Compute Project": "opencompute", "David Bombal": "davidbombal",
+    "NetworkChuck": "NetworkChuck",
+}
+RADAR_YOUTUBE_CHANNELS = list(RADAR_YOUTUBE_HANDLES)
+# A channel with a million views a video would otherwise crowd out a smaller
+# one the author follows for a reason; each channel gets this many at most.
+RADAR_YOUTUBE_PER_CHANNEL = 4
+# With an API key, these searches also find the most-viewed AI videos from
+# channels the list does not follow. Each search costs 100 of the 10,000
+# daily quota units; everything else the radar asks for costs 1.
+RADAR_YOUTUBE_QUERIES = ["AI", "LLM", "AI agents", "Claude OR GPT OR Gemini"]
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "").strip()
 RADAR_VOICES = [
     "Simon Willison", "Andrej Karpathy", "Ethan Mollick", "swyx", "Hamel Husain",
     "Jeremy Howard", "Nathan Lambert", "Sebastian Raschka", "Andrew Ng's The Batch",
     "Ben's Bites", "The Rundown AI", "Import AI",
+    # AI networking pillar
+    "The Next Platform", "HPCwire", "SemiAnalysis", "Dell'Oro Group",
 ]
-RADAR_SUBREDDITS = ["LocalLLaMA", "MachineLearning", "artificial", "ClaudeAI", "LangChain"]
-RADAR_HN_QUERIES = ["AI", "LLM", "agents", "GPT", "Claude", "RAG", "open source model"]
+RADAR_SUBREDDITS = ["LocalLLaMA", "MachineLearning", "artificial", "ClaudeAI", "LangChain",
+                    "networking", "HPC"]  # the last two: AI networking pillar
+RADAR_HN_QUERIES = ["AI", "LLM", "agents", "GPT", "Claude", "RAG", "open source model",
+                    "InfiniBand", "Ultra Ethernet", "NVLink", "MCP", "data center networking"]
 REDDIT_PAUSE_SECS = 6.0
 _RADAR_UA = {"User-Agent": "humanly-radar/1.0 (topic research; +https://imrantauqir.com)"}
 
@@ -1885,18 +2345,19 @@ def _claude_web_call(prompt: str, max_tokens: int, searches: int, fetches: int,
         thinking={"type": "adaptive"}, output_config={"effort": "medium"},
     )
     try:
-        response = client.messages.create(**kwargs)
+        response = _create(kwargs)
     except anthropic.BadRequestError as e:
         message = _api_message(e).lower()
         if "beta" in message or "web_fetch" in message or "tool" in message:
             # Older API surface: the fetch tool wants a beta header.
-            response = client.beta.messages.create(
-                betas=["web-fetch-2025-09-10"], **kwargs)
+            response = _create(kwargs, betas=["web-fetch-2025-09-10"])
         else:
             raise ClaudeError(f"Anthropic rejected the {label} request: {_api_message(e)}") from e
+    if getattr(response, "stop_reason", "") == "refusal":
+        raise ClaudeError(_refusal_message(response))
     u = getattr(response, "usage", None)
     if u is not None:
-        record_usage("anthropic", MODEL,
+        record_usage("anthropic", getattr(response, "model", None) or MODEL,
                      getattr(u, "input_tokens", 0), getattr(u, "output_tokens", 0),
                      getattr(u, "cache_read_input_tokens", 0) or 0,
                      getattr(u, "cache_creation_input_tokens", 0) or 0)
@@ -2008,6 +2469,191 @@ def _reddit_top(days: int, limit: int = 40) -> list[dict]:
     return out[:limit]
 
 
+_YT_BROWSER_UA = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+YOUTUBE_API = "https://www.googleapis.com/youtube/v3"
+
+
+def _yt_count(text: str) -> int:
+    """'1.4M', '1.4 million views', '12,345 views', '980K' -> an int."""
+    t = (text or "").lower().replace(",", "")
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(k|m|b|thousand|million|billion)?", t)
+    if not m:
+        return 0
+    n = float(m.group(1))
+    mult = {"k": 1e3, "thousand": 1e3, "m": 1e6, "million": 1e6, "b": 1e9, "billion": 1e9}
+    return int(n * mult.get(m.group(2) or "", 1))
+
+
+def _yt_age_days(text: str) -> float | None:
+    """'1d ago', '3 days ago', '5 hours ago', '2 weeks ago' -> days, or None."""
+    t = (text or "").lower()
+    m = re.search(r"(\d+)\s*(seconds?|minutes?|hours?|days?|weeks?|months?|years?|mo|s|m|h|d|w|y)\b", t)
+    if not m:
+        return None
+    unit = m.group(2)
+    if len(unit) > 2:
+        unit = unit.rstrip("s")
+    per_day = {"second": 1 / 86400, "s": 1 / 86400, "minute": 1 / 1440, "m": 1 / 1440,
+               "hour": 1 / 24, "h": 1 / 24, "day": 1, "d": 1, "week": 7, "w": 7,
+               "month": 30, "mo": 30, "year": 365, "y": 365}
+    return int(m.group(1)) * per_day[unit]
+
+
+def _yt_item(channel: str, video_id: str, title: str, views: int, date: str,
+             comments: int = 0, gist: str = "") -> dict:
+    return {
+        "source": channel[:60], "kind": "youtube", "title": title[:160],
+        "url": f"https://www.youtube.com/watch?v={video_id}", "discussion": "",
+        "signal": f"{views:,} views", "views": views, "comments": comments,
+        "date": date[:10], "gist": gist[:240],
+    }
+
+
+def _youtube_api_top(days: int, key: str, limit: int = 50) -> list[dict]:
+    """The tracked channels' recent uploads plus the most-viewed AI videos of
+    the window, from the YouTube Data API, with exact view and comment counts."""
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    since_iso = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+    ids: dict[str, str] = {}                      # video id -> channel name
+
+    def get(path: str, **params):
+        r = requests.get(f"{YOUTUBE_API}/{path}", params={**params, "key": key}, timeout=20)
+        if r.status_code != 200:
+            reason = ""
+            try:
+                reason = r.json()["error"]["message"]
+            except Exception:
+                pass
+            raise ClaudeError(f"YouTube API {path}: HTTP {r.status_code} {reason}"[:200])
+        return r.json()
+
+    for name, handle in RADAR_YOUTUBE_HANDLES.items():
+        try:
+            ch = get("channels", part="contentDetails", forHandle=f"@{handle}")
+            uploads = ch["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
+            pl = get("playlistItems", part="contentDetails", playlistId=uploads, maxResults=10)
+        except (ClaudeError, KeyError, IndexError) as e:
+            print(f"  YouTube @{handle}: {str(e)[:80]}")
+            continue
+        for it in pl.get("items", []):
+            cd = it.get("contentDetails", {})
+            if cd.get("videoPublishedAt", "") >= since_iso and cd.get("videoId"):
+                ids.setdefault(cd["videoId"], name)
+    for q in RADAR_YOUTUBE_QUERIES:
+        try:
+            res = get("search", part="snippet", q=q, type="video", order="viewCount",
+                      publishedAfter=since_iso, maxResults=15, relevanceLanguage="en")
+        except ClaudeError as e:
+            print(f"  YouTube search '{q}': {str(e)[:80]}")
+            continue
+        for it in res.get("items", []):
+            vid = it.get("id", {}).get("videoId")
+            if vid:
+                ids.setdefault(vid, it.get("snippet", {}).get("channelTitle", "YouTube"))
+    out = []
+    id_list = list(ids)
+    for i in range(0, len(id_list), 50):
+        res = get("videos", part="snippet,statistics", id=",".join(id_list[i:i + 50]))
+        for v in res.get("items", []):
+            sn, st = v.get("snippet", {}), v.get("statistics", {})
+            out.append(_yt_item(
+                sn.get("channelTitle") or ids.get(v["id"], "YouTube"), v["id"], sn.get("title", ""),
+                int(st.get("viewCount") or 0), sn.get("publishedAt", ""),
+                int(st.get("commentCount") or 0),
+                " ".join((sn.get("description") or "").split())[:240]))
+    out.sort(key=lambda x: x["views"], reverse=True)
+    per: dict[str, int] = {}
+    capped = []
+    for v in out:
+        per[v["source"]] = per.get(v["source"], 0) + 1
+        if per[v["source"]] <= RADAR_YOUTUBE_PER_CHANNEL:
+            capped.append(v)
+    return capped[:limit]
+
+
+def _yt_initial_data(html: str) -> dict:
+    m = re.search(r"var ytInitialData\s*=\s*(\{.*?\});\s*</script>", html, re.S)
+    return json.loads(m.group(1)) if m else {}
+
+
+def _yt_lockups(node) -> list[dict]:
+    """Every video tile on a channel page. YouTube has two tile shapes in
+    circulation; both are read."""
+    found = []
+    stack = [node]
+    while stack:
+        o = stack.pop()
+        if isinstance(o, dict):
+            if "lockupViewModel" in o:
+                lv = o["lockupViewModel"]
+                meta = (lv.get("metadata") or {}).get("lockupMetadataViewModel") or {}
+                parts = []
+                for row in (((meta.get("metadata") or {}).get("contentMetadataViewModel") or {})
+                            .get("metadataRows") or []):
+                    for p in row.get("metadataParts") or []:
+                        parts.append(p.get("accessibilityLabel") or (p.get("text") or {}).get("content", ""))
+                found.append({"id": lv.get("contentId", ""),
+                              "title": (meta.get("title") or {}).get("content", ""),
+                              "views": next((p for p in parts if "view" in p.lower()), ""),
+                              "age": next((p for p in parts if "ago" in p.lower()), "")})
+                continue
+            if "videoRenderer" in o:
+                v = o["videoRenderer"]
+                found.append({"id": v.get("videoId", ""),
+                              "title": "".join(r.get("text", "") for r in (v.get("title") or {}).get("runs", [])),
+                              "views": (v.get("viewCountText") or {}).get("simpleText", ""),
+                              "age": (v.get("publishedTimeText") or {}).get("simpleText", "")})
+                continue
+            stack.extend(o.values())
+        elif isinstance(o, list):
+            stack.extend(o)
+    return found
+
+
+def _youtube_page_top(days: int, limit: int = 50) -> list[dict]:
+    """Without an API key: each tracked channel's Videos tab, as a browser sees
+    it. View counts there are rounded ('1.4M'); dates are relative."""
+    out = []
+    for name, handle in RADAR_YOUTUBE_HANDLES.items():
+        try:
+            r = requests.get(f"https://www.youtube.com/@{handle}/videos", headers=_YT_BROWSER_UA,
+                             cookies={"CONSENT": "YES+1"}, timeout=20)
+            if r.status_code != 200:
+                print(f"  YouTube @{handle}: HTTP {r.status_code}, skipped")
+                continue
+            tiles = _yt_lockups(_yt_initial_data(r.text))
+        except Exception as e:
+            print(f"  YouTube @{handle} failed ({str(e)[:60]})")
+            continue
+        mine = []
+        for t in tiles:
+            age = _yt_age_days(t["age"])
+            if not t["id"] or not t["title"] or age is None or age > days:
+                continue
+            date = (TODAY - timedelta(days=int(age))).strftime("%Y-%m-%d")
+            mine.append(_yt_item(name, t["id"], t["title"], _yt_count(t["views"]), date))
+        mine.sort(key=lambda x: x["views"], reverse=True)
+        out.extend(mine[:RADAR_YOUTUBE_PER_CHANNEL])
+    out.sort(key=lambda x: x["views"], reverse=True)
+    return out[:limit]
+
+
+def _youtube_top(days: int) -> list[dict]:
+    """Recent AI videos with their view counts, read by code rather than
+    searched for: the Data API when there is a key, the channel pages when
+    there is not or the API refuses."""
+    if YOUTUBE_API_KEY:
+        try:
+            return _youtube_api_top(days, YOUTUBE_API_KEY)
+        except Exception as e:
+            print(f"  YouTube API failed ({str(e)[:100]}); reading the channel pages instead")
+    return _youtube_page_top(days)
+
+
 RADAR_SCAN_SCHEMA = """{
   "items": [
     {
@@ -2023,16 +2669,23 @@ RADAR_SCAN_SCHEMA = """{
 }"""
 
 
-def _radar_web_scan(days: int) -> list[dict]:
-    """YouTube, podcasts and newsletters, via Claude's own search and fetch."""
+def _radar_web_scan(days: int, have_channels: bool = False) -> list[dict]:
+    """Podcasts, newsletters, LinkedIn, and videos beyond the tracked channels,
+    via Claude's own search and fetch."""
+    if have_channels:
+        videos = (f"1. The most-watched YouTube videos about AI from the last {days} days that are\n"
+                  f"   NOT from these channels, which are already read directly: "
+                  f"{', '.join(RADAR_YOUTUBE_CHANNELS)}.\n   Record the view count the page shows.")
+    else:
+        videos = (f"1. The most-watched YouTube videos about AI from the last {days} days. Search for\n"
+                  f"   the week's most viewed AI videos and for these channels: "
+                  f"{', '.join(RADAR_YOUTUBE_CHANNELS)}.\n   Record the view count the page shows.")
     prompt = f"""You are scanning what the AI industry has talked about in the last {days} days,
 for an author who writes for {RADAR_LENS}.
 {date_context()}
 
 Find, by searching and opening pages:
-1. The most-watched YouTube videos about AI from the last {days} days. Search for
-   the week's most viewed AI videos and for these channels: {", ".join(RADAR_YOUTUBE_CHANNELS)}.
-   Record the view count the page shows.
+{videos}
 2. New episodes of these podcasts and what each discussed: {", ".join(RADAR_PODCASTS)}.
 3. What widely followed AI voices published or argued this fortnight, in newsletters
    and posts: {", ".join(RADAR_VOICES)}.
@@ -2322,21 +2975,28 @@ def run_radar(output_dir: Path, days: int = RADAR_DAYS):
     print(f"Output  : {output_dir}")
     print(f"{'='*60}")
 
-    log("RADAR 1", "Forums: Hacker News and Reddit")
+    log("RADAR 1", "Forums and YouTube: Hacker News, Reddit, the tracked channels")
     hn = _hn_top(days)
     print(f"  Hacker News: {len(hn)} stories")
     reddit = _reddit_top(days)
     print(f"  Reddit: {len(reddit)} posts")
+    youtube = _youtube_top(days)
+    via = "Data API" if YOUTUBE_API_KEY else "channel pages"
+    print(f"  YouTube: {len(youtube)} videos ({via})")
 
-    log("RADAR 2", "YouTube, podcasts and newsletters (Claude web search)")
+    log("RADAR 2", "Podcasts, newsletters, LinkedIn and other videos (Claude web search)")
     try:
-        web = _radar_web_scan(days)
+        web = _radar_web_scan(days, have_channels=bool(youtube))
     except ClaudeError as e:
-        print(f"  Web scan failed ({str(e)[:120]}); continuing with the forums only.")
+        print(f"  Web scan failed ({str(e)[:120]}); continuing with the forums and YouTube.")
         web = []
     print(f"  Web scan: {len(web)} items")
 
-    signals = web + hn + reddit
+    # The same video can arrive from the channel read and the web scan; keep
+    # the one with the real view count.
+    seen_urls = {v["url"] for v in youtube}
+    web = [w for w in web if w["url"] not in seen_urls]
+    signals = youtube + web + hn + reddit
     if not signals:
         raise ClaudeError("The radar found no signals at all. Check the network and the API key.")
 
@@ -3706,7 +4366,7 @@ def build_jsonld(slug: str, article: str, meta: dict, images: dict,
     """
     seo_title = meta.get("title") or ""
     description = meta.get("description") or ""
-    canonical = f"{SITE_URL}/{slug}" if SITE_URL else ""
+    canonical = public_url(slug)
 
     article_node = {
         "@type": "Article",
@@ -3802,13 +4462,13 @@ def generate_linkedin_post(title: str, article: str, research: dict,
     log("STEP 9", "Writing the LinkedIn post")
 
     kw = research.get("keywords", {})
-    link = article_url or (f"{SITE_URL}/{slugify(title)}" if SITE_URL else "")
+    link = article_url or public_url(slugify(title))
 
     prompt = f"""Write a LinkedIn post for the article below, in the author's own voice.
 
 WHO IS POSTING
-Imran Tauqir, an engineer who builds with AI agents and writes about it. He posts
-as a practitioner, not a commentator. He is not selling anything in this post.
+{AUTHOR_BIO}
+They post as a practitioner, not a commentator, and are not selling anything in this post.
 
 WHAT THE POST HAS TO DO
 Earn the click from someone scrolling past. LinkedIn shows roughly the first two
@@ -3859,8 +4519,8 @@ def generate_video_script(title: str, article: str, research: dict) -> str:
     prompt = f"""Write a 2 to 3 minute video script from the article below.
 
 WHO IS SPEAKING
-Imran Tauqir, an engineer who builds with AI agents and writes about it. He
-speaks to other engineers as a peer. Confident and plain-spoken, never hyped.
+{AUTHOR_BIO}
+They speak to their audience as a peer. Confident and plain-spoken, never hyped.
 
 LENGTH
 380 to 440 words of narration. That is 2:30 to 3:00 at a natural speaking pace.
@@ -3963,6 +4623,94 @@ def narration_text(script: str) -> str:
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
     text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+# ---------------------------------------------------------------------------
+# The author's avatar presents the video (Tavus)
+# ---------------------------------------------------------------------------
+#
+# Instead of slides under a cloned voice, the author's own Tavus replica reads
+# the narration on camera. Tavus renders it asynchronously: create the video,
+# poll until it is ready, download the mp4. The replica carries the author's
+# face and voice, so this is only offered in the studio's own workspace.
+
+TAVUS_API = "https://tavusapi.com/v2"
+AVATAR_POLL_SECS = 20
+AVATAR_TIMEOUT_SECS = int(os.getenv("AVATAR_TIMEOUT_SECS", "") or 45 * 60)
+
+
+def generate_avatar_video(script: str, slug: str, output_dir: Path) -> Path | None:
+    log("STEP 10.7", "The avatar records the video")
+    key = os.getenv("TAVUS_API_KEY", "").strip()
+    replica = os.getenv("TAVUS_REPLICA_ID", "").strip()
+    if not key or not replica:
+        print("  Skipped: set TAVUS_API_KEY and TAVUS_REPLICA_ID (your own replica) in .env.")
+        return None
+    text = narration_text(script)
+    if len(text.split()) < 20:
+        print("  Skipped: no narration found in the script.")
+        return None
+    headers = {"x-api-key": key, "Content-Type": "application/json"}
+    try:
+        r = requests.post(f"{TAVUS_API}/videos", headers=headers, timeout=60,
+                          json={"replica_id": replica, "script": text, "video_name": slug[:80]})
+        r.raise_for_status()
+        video_id = r.json().get("video_id")
+    except (requests.RequestException, ValueError) as e:
+        body = getattr(getattr(e, "response", None), "text", "") or ""
+        print(f"  Tavus would not start the video: {str(e)[:120]} {body[:200]}")
+        return None
+    if not video_id:
+        print("  Tavus returned no video id.")
+        return None
+    print(f"  Rendering {len(text.split())} words as video {video_id}. This usually takes several minutes.")
+
+    started, last_status, info, polls = time.time(), "", {}, 0
+    while time.time() - started < AVATAR_TIMEOUT_SECS:
+        time.sleep(AVATAR_POLL_SECS)
+        polls += 1
+        try:
+            info = requests.get(f"{TAVUS_API}/videos/{video_id}", headers=headers, timeout=30).json()
+        except (requests.RequestException, ValueError) as e:
+            print(f"  Status check failed ({str(e)[:80]}); trying again.")
+            continue
+        status = info.get("status", "")
+        # A line on every change and about once a minute, so the live log (and
+        # its silence watchdog) can see the render is still going.
+        if status != last_status or polls % 3 == 0:
+            print(f"  Avatar video: {status or 'unknown'} ({int(time.time() - started) // 60} min)")
+            last_status = status
+        if status == "ready":
+            break
+        if status in ("error", "deleted"):
+            print(f"  Tavus could not render it: {info.get('status_details') or status}")
+            return None
+    else:
+        print(f"  Still not ready after {AVATAR_TIMEOUT_SECS // 60} minutes. It may finish on "
+              f"Tavus's side: video {video_id}.")
+        (output_dir / f"{slug}_avatar.json").write_text(json.dumps({"video_id": video_id, "status": last_status}),
+                                                         encoding="utf-8")
+        return None
+
+    url = info.get("download_url") or info.get("stream_url")
+    path = output_dir / f"{slug}_avatar.mp4"
+    try:
+        with requests.get(url, stream=True, timeout=300) as dl:
+            dl.raise_for_status()
+            with open(path, "wb") as f:
+                for chunk in dl.iter_content(1 << 20):
+                    f.write(chunk)
+    except (requests.RequestException, TypeError) as e:
+        print(f"  The video is ready but the download failed ({str(e)[:100]}). "
+              f"It is on Tavus: {info.get('hosted_url', '')}")
+        path = None
+    (output_dir / f"{slug}_avatar.json").write_text(json.dumps({
+        "video_id": video_id, "hosted_url": info.get("hosted_url", ""),
+        "words": len(text.split()), "rendered_in_minutes": round((time.time() - started) / 60, 1),
+    }, indent=2), encoding="utf-8")
+    if path:
+        print(f"  Avatar video: {path.name} ({path.stat().st_size / 1e6:.1f} MB)")
+    return path
 
 
 def generate_voiceover(script: str, slug: str, output_dir: Path) -> Path | None:
@@ -4636,7 +5384,8 @@ def insert_answer_block(article: str, answer: str) -> str:
 def wrap_with_branding(article: str, edition: int) -> str:
     """The newsletter greeting only when this is a newsletter edition; an
     article with edition 0 is a standalone post and starts at its title."""
-    intro = AUTHOR_INTRO_TEMPLATE.format(edition=edition) if edition and edition > 0 else ""
+    intro = (AUTHOR_INTRO_TEMPLATE.replace("{edition}", str(edition))
+             if edition and edition > 0 and AUTHOR_INTRO_TEMPLATE else "")
     sources = build_sources_section(article)
     return intro + article + sources + AUTHOR_CTA
 
@@ -4659,7 +5408,7 @@ def write_outputs(slug: str, article: str, meta: dict, images: dict, output_dir:
     meta_payload = {
         "generated_at": generated_at,
         "seo_meta": meta,
-        "canonical": f"{SITE_URL}/{slug}" if SITE_URL else None,
+        "canonical": public_url(slug) or None,
         "author": {"name": AUTHOR_NAME, "url": AUTHOR_URL},
         "faq_count": len(faqs),
         "sources": [
@@ -4687,6 +5436,34 @@ def write_outputs(slug: str, article: str, meta: dict, images: dict, output_dir:
     print(f"  DOCX saved:     {docx_path}")
 
     return md_path, meta_path
+
+
+def rerender(slug: str, output_dir: Path) -> Path | None:
+    """Rebuild the HTML and DOCX from an edited <slug>.md. The markdown already
+    carries its intro, sources and sign-off, so it is not wrapped again; the
+    diagrams and images come back from the files and meta the run left."""
+    md_path = output_dir / f"{slug}.md"
+    if not md_path.exists():
+        print(f"ERROR: no such article: {md_path.name}")
+        sys.exit(1)
+    branded = md_path.read_text(encoding="utf-8")
+    try:
+        meta_payload = json.loads((output_dir / f"{slug}_meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        meta_payload = {}
+    images = {f"img{i}": img for i, img in enumerate(meta_payload.get("images") or [])}
+    diagrams = {}
+    for svg_file in sorted(output_dir.glob(f"{slug}_diagram_*.svg")):
+        png = svg_file.with_suffix(".png")
+        diagrams[svg_file.stem] = {"svg": svg_file.read_text(encoding="utf-8"),
+                                   "svg_name": svg_file.name,
+                                   "png": png.name if png.exists() else ""}
+    html_path = _write_html(slug, branded, output_dir, meta=meta_payload.get("seo_meta") or {},
+                            images=images, generated_at=meta_payload.get("generated_at", ""),
+                            diagrams=diagrams)
+    _write_docx(slug, branded, output_dir)
+    print(f"  Re-rendered {slug}: {html_path}")
+    return html_path
 
 
 def _linkify(text: str) -> str:
@@ -4749,7 +5526,7 @@ def _write_html(slug: str, branded: str, output_dir: Path, meta: dict | None = N
     html_body = md_lib.markdown(src_patched, extensions=['tables', 'fenced_code'])
     html_body = _linkify(html_body)
 
-    canonical = f"{SITE_URL}/{slug}" if SITE_URL else ""
+    canonical = public_url(slug)
     seo_title = (meta or {}).get("title") or slug.replace("-", " ").title()
     description = (meta or {}).get("description") or ""
     og_image = next((v["url"] for v in (images or {}).values()
@@ -5001,6 +5778,7 @@ What is currently ranking for this keyword:
 {fact_pack_text(research)}
 {take_block(research.get("take", ""))}
 {voice_block(research.get("voice_profile", ""))}
+{brand_block()}
 {LEVELS_BLOCK}
 {date_context()}
 
@@ -5027,6 +5805,10 @@ WHAT TO CHECK
    its terms, and it holds the [DIAGRAM: ...] marker. Flag jargon left undefined
    there, sentences a newcomer would have to reread, and a Level 3 section that
    never rises above what a beginner's guide would say.
+11. BRAND - If a BRAND GUIDE is given above, any sentence that breaks one of its
+   rules: a forbidden claim or comparison, a product name written wrongly, the
+   wrong spelling convention, a tone it rules out. A forbidden claim is high
+   severity; naming and spelling are medium. If no guide is given, skip this check.
 3. STRUCTURE - Sections in the outline that are missing, merged, or renamed beyond
    recognition. Count the [IMAGE: ...] and [DIAGRAM: ...] markers still present and compare
    with the outline.
@@ -5441,7 +6223,8 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
         verify: bool = True, verify_rounds: int = 2, words: str = "default",
         linkedin: bool = False, video: bool = False, thumbnail: bool = False,
         take: str = "", facts: bool = True, diagram: bool = True,
-        voiceover: bool = False, mp4: bool = False, from_theme: str = ""):
+        voiceover: bool = False, mp4: bool = False, from_theme: str = "", avatar: bool = False,
+        notes=None, resolve_gaps: bool = False):
     profile = length_profile(words)
     take = (take or "").strip()
     if not take:
@@ -5476,12 +6259,27 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
     research["voice_profile"] = build_voice_profile(research["style_samples"])
     research["internal_links"] = library_links(output_dir, exclude_title=title)
 
+    # Step 1.4: the author's own research notes, if any, become the first fact pack.
+    notes_pack = None
+    if notes:
+        research["notes"] = load_research_notes(notes)
+        if research["notes"]["text"].strip():
+            notes_pack = build_notes_pack(title, keywords, intent, research)
+
     # Step 1.5: Fact pack - open the primary pages and pin every specific to a URL.
     if facts:
         research["fact_pack"] = build_fact_pack(title, keywords, intent, research)
     else:
         log("STEP 1.5", "Fact pack skipped (--no-facts)")
         research["fact_pack"] = {"facts": [], "primary_sources": [], "gaps": [], "method": "skipped"}
+    if notes_pack:
+        research["fact_pack"] = merge_fact_packs(notes_pack, research["fact_pack"])
+        print(f"  Fact pack after merge: {len(research['fact_pack']['facts'])} fact(s), "
+              f"{len(research['fact_pack']['gaps'])} gap(s); the notes' facts come first.")
+
+    # Step 1.6: settle the gaps by opening the pages (opt-in: it spends web calls).
+    if resolve_gaps:
+        research["fact_pack"] = resolve_fact_gaps(title, keywords, intent, research)
 
     # Step 2: Refine Title
     refined_title = refine_title(title, keywords, research, intent=intent)
@@ -5596,6 +6394,8 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
                 (output_dir / f"{slug}_video_meta.md").write_text(meta_text, encoding="utf-8")
         if voiceover and not voice_path:
             voice_path = generate_voiceover(script, slug, output_dir)
+        if avatar:
+            generate_avatar_video(script, slug, output_dir)
 
     thumb_path = None
     if thumbnail:
@@ -5758,6 +6558,31 @@ def main():
         ),
     )
     parser.add_argument(
+        "--notes",
+        nargs="+",
+        metavar="FILE",
+        default=None,
+        help=(
+            "Your own research notes: markdown files, or a folder of them. They become "
+            "the first fact pack, built from the notes alone, with every figure pinned to "
+            "the URL the notes give and anything flagged [VERIFY] or secondhand routed to "
+            "the gaps, so the writer checks it rather than states it. The Step 1.5 web "
+            "pass still runs and is merged in after; add --no-facts to write from the "
+            "notes only."
+        ),
+    )
+    parser.add_argument(
+        "--resolve-gaps",
+        action="store_true",
+        help=(
+            "Step 1.6: a tool-using call opens the page behind every gap in the fact "
+            "pack (claims the notes flagged, specifics no opened page stated) and "
+            "returns a verdict. Confirmed gaps join the pack as facts with the quote "
+            "that confirms them; contradicted and unverifiable ones stay gaps with the "
+            "reason. Up to 8 gaps a run; costs a few web fetches."
+        ),
+    )
+    parser.add_argument(
         "--no-facts",
         action="store_true",
         help=(
@@ -5843,6 +6668,12 @@ def main():
         help="The radar theme this article answers; it is marked written when the run ends",
     )
     parser.add_argument(
+        "--avatar",
+        action="store_true",
+        help=("Have your Tavus avatar present the video script on camera, saved as "
+              "<slug>_avatar.mp4. Needs TAVUS_API_KEY and TAVUS_REPLICA_ID."),
+    )
+    parser.add_argument(
         "--mp4",
         action="store_true",
         help=("Also render the finished video: one slide per beat under your cloned "
@@ -5900,11 +6731,21 @@ def main():
         action="store_true",
         help="With --audit, also save the revised document as <slug>_revised.md",
     )
+    parser.add_argument(
+        "--rerender",
+        metavar="SLUG",
+        default="",
+        help="Rebuild the HTML and DOCX for an edited <slug>.md in --output-dir; no model calls",
+    )
     args = parser.parse_args()
 
-    if not os.getenv("ANTHROPIC_API_KEY"):
+    if not os.getenv("ANTHROPIC_API_KEY") and not args.rerender:
         print("ERROR: ANTHROPIC_API_KEY environment variable is not set.", file=sys.stderr)
         sys.exit(1)
+
+    if args.rerender:
+        rerender(args.rerender, Path(args.output_dir))
+        return
 
     if not args.audit and not args.radar and not args.dig and not args.topic:
         parser.error("a topic is required unless you pass --audit FILE, --radar or --dig N")
@@ -5945,7 +6786,8 @@ def main():
             verify_rounds=args.verify_rounds,
             words=args.words,
             linkedin=args.linkedin,
-            video=args.video or args.voiceover or args.mp4,
+            video=args.video or args.voiceover or args.mp4 or args.avatar,
+            avatar=args.avatar,
             thumbnail=args.thumbnail,
             voiceover=args.voiceover or args.mp4,
             mp4=args.mp4,
@@ -5953,6 +6795,8 @@ def main():
             facts=not args.no_facts,
             diagram=not args.no_diagram,
             from_theme=args.from_theme,
+            notes=args.notes,
+            resolve_gaps=args.resolve_gaps,
         )
     except ClaudeError as e:
         # Flattened to one line so the web UI, which reads the log line by line,

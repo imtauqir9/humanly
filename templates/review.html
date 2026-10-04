@@ -1,77 +1,90 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+{% include "_head.html" %}
 <title>Verification review — Humanly</title>
 <style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: Arial, sans-serif; background: #f5f5f5; color: #222; min-height: 100vh; }
+{% include "_theme.css" %}
 
-  header { background: #111; color: #fff; padding: 18px 32px; display: flex; align-items: center; gap: 12px; }
-  header h1 { font-size: 1.2rem; font-weight: 700; letter-spacing: -0.3px; }
-  header span { font-size: 0.85rem; color: #aaa; }
-  header a { color: #aaa; font-size: 0.85rem; text-decoration: none; }
-  header a:hover { color: #fff; }
-  header .spacer { margin-left: auto; }
+  main, .review-top { max-width: 920px; margin: 0 auto; padding: 4px 28px 72px; }
+  .review-top { padding: 44px 28px 0; }
+  .page-title { margin-bottom: 12px; }
+  .subbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 26px; }
+  .subbar .back { font-size: 13.5px; font-weight: 500; margin-right: auto; }
 
-  main { max-width: 880px; margin: 0 auto; padding: 28px 24px 60px; }
+  .roster { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); margin-bottom: 22px; }
+  .role { padding: 16px 18px; border-left: 1px solid var(--line); }
+  .role:first-child { border-left: none; padding-left: 4px; }
+  .role .who { font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+  .role:nth-child(1) .who { color: var(--link); } .role:nth-child(2) .who { color: var(--accent); } .role:nth-child(3) .who { color: var(--ink); }
+  .role .model { font-family: var(--mono); font-size: 13px; color: var(--ink); margin-top: 6px; word-break: break-all; }
+  .role .vendor { font-family: var(--serif); font-style: italic; font-size: 13px; color: var(--muted); margin-top: 1px; }
 
-  .roster { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 22px; }
-  .role { background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 14px 16px; }
-  .role .who { font-size: 0.7rem; font-weight: 700; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
-  .role .model { font-family: Consolas, monospace; font-size: 0.85rem; color: #111; margin-top: 5px; word-break: break-all; }
-  .role .vendor { font-size: 0.72rem; color: #999; margin-top: 2px; }
+  .outcome { font-family: var(--serif); font-size: 21px; font-weight: 350; color: var(--ink-2); margin-bottom: 8px; font-variation-settings: "opsz" 36; }
+  .outcome strong { color: var(--ink); font-weight: 450; }
+  .counts { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 10px; font-family: var(--sans); font-size: 12.5px; color: var(--muted); }
+  .counts b { font-family: var(--mono); font-weight: 500; color: var(--ink); }
 
-  .outcome { background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 14px 18px; font-size: 0.88rem; margin-bottom: 26px; }
-  .outcome strong { color: #111; }
-  .counts { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 10px; font-size: 0.8rem; color: #666; }
-  .counts b { color: #111; font-variant-numeric: tabular-nums; }
+  h2 { font-family: var(--serif); font-size: 26px; font-weight: 400; letter-spacing: -.015em; color: var(--ink); margin: 48px 0 16px; padding-bottom: 10px;
+       border-bottom: 2px solid var(--ink); font-variation-settings: "opsz" 72; }
 
-  h2 { font-size: 0.95rem; font-weight: 700; color: #111; margin: 26px 0 12px; }
+  .scores { display: flex; flex-wrap: wrap; margin-bottom: 22px; border-bottom: 1px solid var(--line); }
+  .score { padding: 4px 22px 14px 0; margin-right: 22px; border-right: 1px solid var(--line); font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+  .score:last-child { border-right: none; }
+  .score b { display: block; font-family: var(--serif); font-size: 30px; font-weight: 350; letter-spacing: 0; color: var(--ink); margin-top: 2px; font-variation-settings: "opsz" 144; }
 
-  .scores { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
-  .score { background: #fff; border: 1px solid #e0e0e0; border-radius: 5px; padding: 8px 12px; font-size: 0.78rem; color: #666; }
-  .score b { display: block; font-size: 1.1rem; color: #111; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  /* A finding is a marked-up passage with the three voices in the margin. */
+  .finding { display: grid; grid-template-columns: minmax(0,1fr) 250px; gap: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+             box-shadow: var(--shadow); margin-bottom: 14px; overflow: hidden; }
+  .finding { grid-template-columns: minmax(0,1fr) 300px; }
+  .passage { grid-column: 1; padding-bottom: 18px; }
+  .fhead { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 16px 20px 0; }
+  .tag { font-family: var(--mono); font-size: 10.5px; font-weight: 500; text-transform: uppercase; letter-spacing: .12em; }
+  .tag.sev-high { color: var(--bad); } .tag.sev-medium { color: var(--warn); } .tag.sev-low { color: var(--muted); }
+  .tag.cat { color: var(--muted); }
+  .tag.applied, .tag.dropped { margin-left: auto; border: 1.5px solid currentColor; border-radius: var(--radius-xs); padding: 1px 7px; }
+  .tag.applied { color: var(--accent); transform: rotate(-2deg); }
+  .tag.dropped { color: var(--faint); }
+  blockquote { margin: 12px 20px 0; font-family: var(--serif); font-size: 17px; line-height: 1.6; color: var(--ink); font-variation-settings: "opsz" 18; }
+  /* Applied: struck through in red pen, the fix written in underneath. */
+  blockquote.struck { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--accent); text-decoration-thickness: 1.5px; }
+  blockquote.kept { background: linear-gradient(transparent 60%, color-mix(in srgb, var(--accent) 16%, transparent) 60%); display: inline; box-decoration-break: clone; -webkit-box-decoration-break: clone; margin: 12px 0 0 20px; }
+  .fix { margin: 10px 20px 0; font-family: var(--serif); font-style: italic; font-size: 15.5px; line-height: 1.6; color: var(--accent); font-variation-settings: "opsz" 18; }
+  .fix::before { content: "\2038  "; font-style: normal; }
+  .finding > .fhead { grid-column: 1; }
+    .margin { grid-column: 2; grid-row: 1 / span 2; background: var(--surface-2); border-left: 1px solid var(--line); padding: 16px 16px; display: flex; flex-direction: column; gap: 12px; }
+  .voice { font-size: 13px; line-height: 1.55; color: var(--ink-2); border-left: 2px solid var(--line-2); padding-left: 10px; }
+  .voice .who { display: block; font-size: 10.5px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; margin-bottom: 2px; }
+  .voice.auditor { border-color: var(--accent); } .voice.auditor .who { color: var(--accent); }
+  .voice.writer { border-color: var(--link); } .voice.writer .who { color: var(--link); }
+  .voice.judge { border-color: var(--ink); } .voice.judge .who { color: var(--ink); }
+  .voice .wants { display: block; color: var(--muted); margin-top: 3px; font-family: var(--serif); font-style: italic; }
 
-  .finding { background: #fff; border: 1px solid #e0e0e0; border-left-width: 4px; border-radius: 6px; padding: 16px 18px; margin-bottom: 12px; }
-  .finding.high { border-left-color: #c0392b; }
-  .finding.medium { border-left-color: #d68910; }
-  .finding.low { border-left-color: #bbb; }
+  .empty { font-family: var(--serif); font-style: italic; font-size: 16px; padding: 48px 24px; text-align: center; color: var(--muted); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .pass { font-family: var(--serif); font-style: italic; font-size: 16px; color: var(--ok); padding: 6px 0 10px; }
 
-  .fhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
-  .tag { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; padding: 3px 7px; border-radius: 3px; }
-  .tag.sev-high { background: #fdecea; color: #8a2018; }
-  .tag.sev-medium { background: #fdf3e2; color: #8a5a00; }
-  .tag.sev-low { background: #f0f0f0; color: #666; }
-  .tag.cat { background: #eef2f8; color: #3a5a80; }
-  .tag.applied { background: #e6f9f0; color: #1a7a45; margin-left: auto; }
-  .tag.dropped { background: #f0f0f0; color: #888; margin-left: auto; }
-
-  blockquote { border-left: 3px solid #ddd; padding: 4px 0 4px 12px; margin: 0 0 12px; color: #555; font-size: 0.86rem; font-style: italic; }
-
-  .voice { font-size: 0.86rem; line-height: 1.55; margin-bottom: 7px; }
-  .voice .who { font-weight: 700; color: #111; }
-  .voice.auditor .who { color: #8a2018; }
-  .voice.writer .who { color: #1a6fc4; }
-  .voice.judge .who { color: #6b3fa0; }
-  .voice .wants { color: #666; }
-
-  .empty { background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 40px; text-align: center; color: #888; }
-  .pass { background: #e6f9f0; border: 1px solid #b2dfce; color: #1a7a45; border-radius: 6px; padding: 14px 18px; font-size: 0.88rem; }
+  @media (max-width: 760px) {
+    main { padding: 4px 14px 48px; } .review-top { padding: 24px 14px 0; }
+    .finding { grid-template-columns: 1fr; } .margin { grid-column: 1; grid-row: auto; border-left: none; border-top: 1px solid var(--line); }
+    .role { border-left: none; padding-left: 4px; }
+  }
 </style>
 </head>
 <body>
 
-<header>
-  <h1>Verification review</h1>
-  <span>{{ slug }}</span>
-  <span class="spacer"></span>
-  <a href="/">&larr; Back</a>
-  <a href="/output/{{ slug }}_review.md" target="_blank" style="margin-left:18px;">Markdown</a>
-  <a href="/output/{{ slug }}_review.json" target="_blank" style="margin-left:18px;">JSON</a>
-  <a href="/logout" style="margin-left:18px;">Sign out</a>
-</header>
+{% set active = '' %}{% set crumb = 'Review · ' ~ slug %}
+{% include "_header.html" %}
+
+<div class="review-top">
+  <div class="page-title" style="margin-bottom:10px">
+    <h1>Verification review</h1>
+  </div>
+  <div class="subbar">
+    <a class="back" href="/library">&larr; Back to the library</a>
+    <a class="btn btn-quiet sm" href="/output/{{ slug }}_review.md" target="_blank">Markdown</a>
+    <a class="btn btn-quiet sm" href="/output/{{ slug }}_review.json" target="_blank">JSON</a>
+  </div>
+</div>
 
 <main>
 
@@ -139,15 +152,18 @@
           {% endif %}
         </div>
 
-        {% if issue.quote %}<blockquote>{{ issue.quote }}</blockquote>{% endif %}
+        <div class="passage">
+        {% if issue.quote %}<blockquote class="{{ 'struck' if issue.id in applied else 'kept' }}">{{ issue.quote }}</blockquote>{% endif %}
+        {% if issue.fix %}<p class="fix">{{ issue.fix }}</p>{% endif %}
+        </div>
 
+        <div class="margin">
         <div class="voice auditor">
-          <span class="who">Auditor:</span> {{ issue.problem }}
-          {% if issue.fix %}<span class="wants">Wants: {{ issue.fix }}</span>{% endif %}
+          <span class="who">Auditor</span> {{ issue.problem }}
         </div>
 
         <div class="voice writer">
-          <span class="who">Writer:</span>
+          <span class="who">Writer</span>
           {% if issue.id not in stances %}
             did not respond — counted as accepted.
           {% else %}
@@ -158,13 +174,14 @@
 
         {% if issue.id in rulings %}
           <div class="voice judge">
-            <span class="who">Judge:</span> {{ rulings[issue.id] }}. {{ why.get(issue.id, '') }}
+            <span class="who">Judge</span> {{ rulings[issue.id] }}. {{ why.get(issue.id, '') }}
           </div>
         {% elif stances.get(issue.id) == 'dispute' %}
           <div class="voice judge">
-            <span class="who">Judge:</span> no ruling returned — the text stands.
+            <span class="who">Judge</span> no ruling returned — the text stands.
           </div>
         {% endif %}
+        </div>
       </div>
     {% endfor %}
   {% endfor %}
