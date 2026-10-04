@@ -419,6 +419,47 @@ def slugify(text: str) -> str:
 
 CONSOLE_LIMITS_URL = "https://console.anthropic.com/settings/limits"
 
+# The 5.5 models run safety classifiers that can decline a request, and benign
+# technical writing occasionally trips them. With server-side fallback the API
+# re-runs a declined request on the model Anthropic recommends for that kind of
+# decline, in the same call, instead of failing the article. Some categories
+# have no fallback; those still come back as a refusal. CLAUDE_FALLBACKS=off
+# turns it off.
+FALLBACK_BETA = "server-side-fallback-2026-07-01"
+USE_FALLBACKS = os.getenv("CLAUDE_FALLBACKS", "default").strip().lower() not in ("off", "0", "false", "no")
+
+
+def _with_fallbacks(kwargs: dict, betas: list | None = None) -> dict:
+    """The request as a beta call that opts into server-side refusal fallback."""
+    betas = list(betas or [])
+    if USE_FALLBACKS:
+        betas.append(FALLBACK_BETA)
+        kwargs = {**kwargs, "fallbacks": "default"}
+    return {**kwargs, "betas": betas} if betas else kwargs
+
+
+def _create(kwargs: dict, betas: list | None = None):
+    full = _with_fallbacks(kwargs, betas)
+    if "betas" in full:
+        return client.beta.messages.create(**full)
+    return client.messages.create(**full)
+
+
+def _refusal_message(response) -> str:
+    details = getattr(response, "stop_details", None)
+    category = getattr(details, "category", None) if details else None
+    reasons = {
+        "frontier_llm": "it reads as help with building competing AI models",
+        "cyber": "it reads as possible cyber harm",
+        "bio": "it reads as dual-use biology",
+        "reasoning_extraction": "it asks the model to write out its own reasoning",
+        "general_harms": "it touches another usage-policy area",
+    }
+    why = reasons.get(category or "", "for safety reasons")
+    return (f"Claude declined this prompt ({category or 'no category given'}: {why}). "
+            f"Benign technical topics occasionally trip the classifier; rephrase the "
+            f"topic or intent and run it again.")
+
 
 class ClaudeError(RuntimeError):
     """An Anthropic API failure, already phrased for a human to read."""
@@ -453,7 +494,7 @@ def call_claude(prompt: str, system: str = "", max_tokens: int = 16000,
     if system:
         kwargs["system"] = system
     try:
-        response = client.messages.create(**kwargs)
+        response = _create(kwargs)
     except anthropic.BadRequestError as e:
         # The spend cap set in the Console arrives as a 400, not a 429, and the
         # SDK does not retry it — surface the reset date the API gives us.
@@ -495,16 +536,15 @@ def call_claude(prompt: str, system: str = "", max_tokens: int = 16000,
 
     u = getattr(response, "usage", None)
     if u is not None:
-        record_usage("anthropic", model,
+        # Priced as the model that answered: after a fallback that is not the
+        # one asked for, and its rates apply to that attempt.
+        record_usage("anthropic", getattr(response, "model", None) or model,
                      getattr(u, "input_tokens", 0), getattr(u, "output_tokens", 0),
                      getattr(u, "cache_read_input_tokens", 0) or 0,
                      getattr(u, "cache_creation_input_tokens", 0) or 0)
 
     if response.stop_reason == "refusal":
-        raise ClaudeError(
-            "Claude declined to answer this prompt for safety reasons. "
-            "Try rephrasing the topic."
-        )
+        raise ClaudeError(_refusal_message(response))
 
     # With thinking enabled, content[0] is a thinking block — pick the text block
     # out rather than indexing blindly.
@@ -2305,18 +2345,19 @@ def _claude_web_call(prompt: str, max_tokens: int, searches: int, fetches: int,
         thinking={"type": "adaptive"}, output_config={"effort": "medium"},
     )
     try:
-        response = client.messages.create(**kwargs)
+        response = _create(kwargs)
     except anthropic.BadRequestError as e:
         message = _api_message(e).lower()
         if "beta" in message or "web_fetch" in message or "tool" in message:
             # Older API surface: the fetch tool wants a beta header.
-            response = client.beta.messages.create(
-                betas=["web-fetch-2025-09-10"], **kwargs)
+            response = _create(kwargs, betas=["web-fetch-2025-09-10"])
         else:
             raise ClaudeError(f"Anthropic rejected the {label} request: {_api_message(e)}") from e
+    if getattr(response, "stop_reason", "") == "refusal":
+        raise ClaudeError(_refusal_message(response))
     u = getattr(response, "usage", None)
     if u is not None:
-        record_usage("anthropic", MODEL,
+        record_usage("anthropic", getattr(response, "model", None) or MODEL,
                      getattr(u, "input_tokens", 0), getattr(u, "output_tokens", 0),
                      getattr(u, "cache_read_input_tokens", 0) or 0,
                      getattr(u, "cache_creation_input_tokens", 0) or 0)

@@ -215,7 +215,7 @@ app.config.update(
 
 # Public because a browser must reach them before it can authenticate, and
 # because a health check should not need a credential.
-_OPEN_PATHS = {"/healthz", "/login", "/feed.json", "/feed.xml", "/embed.js", "/pipeline"}
+_OPEN_PATHS = {"/healthz", "/login", "/feed.json", "/feed.xml", "/embed.js", "/pipeline", "/trust"}
 
 # A login form on a public URL is a brute-force target. This is deliberately
 # small: a per-IP counter, not a rate-limiting library.
@@ -887,6 +887,118 @@ def article_publish(slug):
     label = {"draft": "as a draft", "pending": "for review in WordPress", "publish": "and published"}
     return redirect(url_for("article_page", slug=slug,
                             msg=f"{verb} to WordPress {label.get(result['status'], '')}."))
+
+
+# ---------------------------------------------------------------------------
+# Security headers, data retention, the trust page
+# ---------------------------------------------------------------------------
+
+@app.after_request
+def _security_headers(resp):
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("Referrer-Policy", "same-origin")
+    # The article page frames the article's own HTML; nothing else may frame us.
+    resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    if os.environ.get("FLY_APP_NAME"):
+        resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+    return resp
+
+
+RETENTION_CHECK_SECS = 6 * 3600
+UPLOAD_KEEP_SECS = 2 * 24 * 3600
+
+
+def _slug_files(out: Path, slug: str) -> list[Path]:
+    """Every file one article left: <slug>.md, <slug>_meta.json, <slug>_diagram_1.png,
+    and so on - but not those of another article whose slug merely starts the same."""
+    return [p for p in out.iterdir() if p.is_file()
+            and p.name.startswith(slug) and p.name[len(slug):len(slug) + 1] in (".", "_")]
+
+
+def sweep_retention(now: float | None = None) -> dict:
+    """Delete what a workspace asked not to keep: articles (and all their files,
+    versions and discussion) older than its retention period, its job logs, and
+    every uploaded draft after two days. Returns counts per workspace."""
+    now = now or time.time()
+    s = store()
+    report = {}
+    for ws in s.all_workspaces():
+        try:
+            days = int((ws.get("settings") or {}).get("retention_days") or 0)
+        except (TypeError, ValueError):
+            days = 0
+        if days <= 0:
+            continue
+        cutoff = now - days * 86400
+        out = ws_dir(ws)
+        removed = 0
+        if out.exists():
+            for meta in list(out.glob("*_meta.json")):
+                if meta.stat().st_mtime >= cutoff:
+                    continue
+                slug = meta.name[:-len("_meta.json")]
+                for f in _slug_files(out, slug):
+                    f.unlink(missing_ok=True)
+                for extra in list((out / VERSIONS).glob(f"{slug}.*.md")) if (out / VERSIONS).exists() else []:
+                    extra.unlink(missing_ok=True)
+                (out / "_wordpress" / f"{slug}.json").unlink(missing_ok=True)
+                s.forget_article(ws["id"], slug)
+                removed += 1
+        for job in s.jobs(ws["id"], limit=1000, statuses=TERMINAL):
+            log = _job_log(job["id"])
+            if log.exists() and log.stat().st_mtime < cutoff:
+                log.unlink(missing_ok=True)
+        if removed:
+            s.audit("retention.deleted", username="retention", ws_id=ws["id"],
+                    detail={"articles": removed, "older_than_days": days})
+            report[ws["slug"]] = removed
+    uploads = system_dir() / "uploads"
+    if uploads.exists():
+        for f in uploads.iterdir():
+            if f.is_file() and f.stat().st_mtime < now - UPLOAD_KEEP_SECS:
+                f.unlink(missing_ok=True)
+    return report
+
+
+def _retention_loop():
+    while True:
+        try:
+            done = sweep_retention()
+            if done:
+                print(f"[retention] deleted {done}", flush=True)
+        except Exception as e:
+            print(f"[retention] sweep failed: {e}", flush=True)
+        time.sleep(RETENTION_CHECK_SECS)
+
+
+if os.environ.get("FLY_APP_NAME") or os.environ.get("RETENTION_SWEEP") == "1":
+    threading.Thread(target=_retention_loop, daemon=True, name="retention").start()
+
+
+# Where a client's material can go, named by the setting that turns it on, so
+# the page only ever lists what this deployment really uses.
+PROCESSORS = [
+    ("Anthropic (Claude)", "ANTHROPIC_API_KEY", "Writes, edits and audits every article; reads the web for the fact pack and the radar.",
+     "https://www.anthropic.com/legal/privacy"),
+    ("OpenAI", "OPENAI_API_KEY", "Second-opinion auditor, when enabled: reads the draft and the facts behind it.",
+     "https://openai.com/policies/privacy-policy/"),
+    ("Google Gemini", "GEMINI_API_KEY", "Independent judge of disputed findings, when enabled.",
+     "https://policies.google.com/privacy"),
+    ("SerpAPI", "SERPAPI_KEY", "Search results for the topic: receives the search keywords, not the article.",
+     "https://serpapi.com/legal"),
+    ("ElevenLabs", "ELEVENLABS_API_KEY", "Voiceover, when asked for: receives the video narration text.",
+     "https://elevenlabs.io/privacy-policy"),
+    ("YouTube Data API", "YOUTUBE_API_KEY", "Topic radar: public video listings only, nothing of the client's.",
+     "https://policies.google.com/privacy"),
+]
+
+
+@app.route("/trust")
+def trust_page():
+    active = [{"name": n, "use": u, "policy": link} for n, env, u, link in PROCESSORS if os.environ.get(env)]
+    region = os.environ.get("FLY_REGION") or ""
+    return render_template("trust.html", processors=active, region=region,
+                           hosted=bool(os.environ.get("FLY_APP_NAME")))
 
 
 # ---------------------------------------------------------------------------
