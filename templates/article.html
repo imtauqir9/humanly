@@ -99,8 +99,8 @@
           <textarea name="note" placeholder="A note for the next person (optional)" aria-label="Note"></textarea>
           <div class="row">
             {% for m in moves %}
-              <button type="submit" name="status" value="{{ m }}" class="btn sm {% if m == 'approved' or m == 'in_review' %}btn-primary{% elif m == 'changes' %}btn-dark{% else %}btn-quiet{% endif %}">
-                {% if m == 'in_review' %}Send for review{% elif m == 'approved' %}Approve{% elif m == 'changes' %}Request changes{% else %}Back to draft{% endif %}
+              <button type="submit" name="status" value="{{ m }}" class="btn sm {% if m == 'approved' or m == 'in_review' %}btn-primary{% elif m == 'changes' or m == 'published' %}btn-dark{% else %}btn-quiet{% endif %}">
+                {% if m == 'in_review' %}Send for review{% elif m == 'approved' %}Approve{% elif m == 'changes' %}Request changes{% elif m == 'published' %}Mark as published{% else %}Back to draft{% endif %}
               </button>
             {% endfor %}
           </div>
@@ -108,7 +108,7 @@
         {% endif %}
       </section>
 
-      {% if wp is not none %}{% include "_publish.html" %}{% endif %}
+      {% include "_publish.html" %}
 
       <section id="discussion">
         <h2><span class="roman">ii.</span>Discussion</h2>

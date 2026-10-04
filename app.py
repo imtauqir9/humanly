@@ -33,6 +33,7 @@ from flask import (Flask, Response, abort, g, has_app_context, jsonify, redirect
                    render_template, request, send_from_directory, session, url_for)
 
 import store as st
+import wordpress as wpress
 
 app = Flask(__name__)
 BASE_DIR = Path(__file__).parent
@@ -701,6 +702,10 @@ def allowed_moves(state: dict) -> list[str]:
         cap, sources = st.TRANSITIONS[target]
         if state["status"] in sources and can(cap):
             moves.append(target)
+    # Without WordPress, someone publishes by hand and marks it here.
+    if can("publish") and not wordpress_status(g.ws)["configured"] and state["status"] != "published" \
+            and (state["status"] == "approved" or not needs_approval(g.ws)):
+        moves.append("published")
     return moves
 
 
@@ -732,7 +737,7 @@ def article_page(slug):
         html_file=html_files[0].name if html_files else None, artifacts=artifacts,
         has_review=(out / f"{slug}_review.json").exists(),
         approval_required=needs_approval(g.ws), public_url=article_public_url(g.ws, slug),
-        wp=wordpress_status(g.ws) if "wordpress_status" in globals() else None,
+        wp=wordpress_status(g.ws),
         msg=request.args.get("msg"), err=request.args.get("err"))
 
 
@@ -740,6 +745,8 @@ def article_page(slug):
 def article_status(slug):
     slug, _ = _article_or_404(slug)
     target = request.form.get("status") or (request.get_json(silent=True) or {}).get("status", "")
+    if target == "published" and target in allowed_moves(store().article_state(g.ws["id"], Path(slug).name)):
+        needs("publish")
     note = (request.form.get("note") or "").strip()
     state = store().article_state(g.ws["id"], slug)
     if target not in allowed_moves(state):
@@ -823,6 +830,66 @@ def article_restore(slug):
 
 
 # ---------------------------------------------------------------------------
+# WordPress
+# ---------------------------------------------------------------------------
+
+def wordpress_status(ws: dict) -> dict:
+    s = ws.get("settings") or {}
+    has_password = store().has_secret(ws["id"], WP_SECRET)
+    return {"url": s.get("wp_url") or "", "user": s.get("wp_user") or "",
+            "status": s.get("wp_status") or "draft", "category": s.get("wp_category") or "",
+            "has_password": has_password,
+            "configured": bool(s.get("wp_url") and s.get("wp_user") and has_password)}
+
+
+def wp_client(ws: dict) -> "wpress.WordPress":
+    status = wordpress_status(ws)
+    return wpress.WordPress(status["url"], status["user"], store().get_secret(ws["id"], WP_SECRET))
+
+
+def _wp_media_cache(slug: str) -> tuple[Path, dict]:
+    path = ws_dir() / "_wordpress" / f"{slug}.json"
+    try:
+        return path, json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return path, {}
+
+
+@app.route("/a/<slug>/publish", methods=["POST"])
+def article_publish(slug):
+    needs("publish")
+    slug, _ = _article_or_404(slug)
+    state = store().article_state(g.ws["id"], slug)
+    if needs_approval(g.ws) and state["status"] not in ("approved", "published"):
+        return redirect(url_for("article_page", slug=slug,
+                                err="This workspace needs the article approved before it is published."))
+    wp = wordpress_status(g.ws)
+    if not wp["configured"]:
+        return redirect(url_for("article_page", slug=slug, err="Connect WordPress in Settings first."))
+    cache_path, cache = _wp_media_cache(slug)
+    try:
+        category = int(wp["category"]) if str(wp["category"]).isdigit() else None
+        result = wpress.publish_article(wp_client(g.ws), ws_dir(), slug, status=wp["status"],
+                                        post_id=state.get("wp_post_id"), category_id=category,
+                                        media_cache=cache)
+    except wpress.WordPressError as e:
+        audit("wordpress.failed", target=slug, detail={"error": str(e)[:300]})
+        return redirect(url_for("article_page", slug=slug, err=str(e)))
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(cache), encoding="utf-8")
+    store().set_wordpress(g.ws["id"], slug, result["id"], result["link"])
+    verb = "Updated" if state.get("wp_post_id") else "Sent"
+    store().add_comment(g.ws["id"], slug, actor(),
+                        f"{verb} in WordPress as {result['status']}: {result['link']}", kind="publish")
+    if result["status"] == "publish" and state["status"] != "published":
+        store().set_status(g.ws["id"], slug, "published", actor())
+    audit("wordpress.sent", target=slug, detail={"post_id": result["id"], "status": result["status"]})
+    label = {"draft": "as a draft", "pending": "for review in WordPress", "publish": "and published"}
+    return redirect(url_for("article_page", slug=slug,
+                            msg=f"{verb} to WordPress {label.get(result['status'], '')}."))
+
+
+# ---------------------------------------------------------------------------
 # Workspace settings, people, the audit log
 # ---------------------------------------------------------------------------
 
@@ -853,6 +920,27 @@ def settings_page():
                 s.update_workspace(g.ws["slug"], name=name or None, settings=settings)
                 audit("settings.updated", target=g.ws["name"], detail={"fields": sorted(settings)})
                 return _back("settings_page", msg="Settings saved.")
+            if action == "wordpress":
+                settings = {k: (request.form.get(k) or "").strip()[:500] for k in WP_FIELDS}
+                if settings["wp_status"] not in wpress.POST_STATUSES:
+                    settings["wp_status"] = "draft"
+                s.update_workspace(g.ws["slug"], settings=settings)
+                password = (request.form.get("wp_password") or "").strip()
+                if password:
+                    s.set_secret(g.ws["id"], WP_SECRET, password)
+                if request.form.get("wp_forget"):
+                    s.set_secret(g.ws["id"], WP_SECRET, "")
+                audit("wordpress.updated", target=settings["wp_url"],
+                      detail={"password_changed": bool(password), "status": settings["wp_status"]})
+                return _back("settings_page", msg="WordPress settings saved.")
+            if action == "wp_test":
+                me = wp_client(g.ws).whoami()
+                if not me["can_publish"] or not me["can_upload"]:
+                    raise ValueError(f"Connected as {me['name']}, but that user cannot "
+                                     f"{'publish posts' if not me['can_publish'] else 'upload images'}. "
+                                     f"Use an Editor or Administrator account.")
+                audit("wordpress.tested", target=g.ws["settings"].get("wp_url", ""))
+                return _back("settings_page", msg=f"Connected to WordPress as {me['name']}.")
             if action == "intake":
                 url = (request.form.get("url") or g.ws["settings"].get("site_url") or "").strip()
                 if not url:
@@ -894,7 +982,7 @@ def settings_page():
                 audit("member.removed" if role is None else "member.role_changed",
                       target=user["username"], detail={"role": role})
                 return _back("settings_page", msg="Saved.")
-        except (ValueError, KeyError) as e:
+        except (ValueError, KeyError, wpress.WordPressError) as e:
             return _back("settings_page", err=str(e) or "That did not work.")
         abort(400)
 
@@ -902,7 +990,8 @@ def settings_page():
                            roles=st.ROLES, msg=request.args.get("msg"),
                            err=request.args.get("err"),
                            ident=ws_identity(g.ws), feed_query=_ws_query(g.ws),
-                           site=site_summary(g.ws), jobs=[_job_view(j) for j in s.jobs(g.ws["id"], limit=12)])
+                           site=site_summary(g.ws), wp=wordpress_status(g.ws),
+                           wp_statuses=wpress.POST_STATUSES, jobs=[_job_view(j) for j in s.jobs(g.ws["id"], limit=12)])
 
 
 def site_summary(ws: dict) -> dict:
@@ -1701,6 +1790,8 @@ def _worker_loop(key: str):
 # What a workspace can say about itself. Text fields, all optional.
 WORKSPACE_FIELDS = ("site_url", "url_pattern", "author_name", "author_url", "author_bio",
                     "brand_guide", "brand_cta", "radar_lens", "retention_days")
+WP_FIELDS = ("wp_url", "wp_user", "wp_status", "wp_category")
+WP_SECRET = "wp_app_password"
 WORKSPACE_FLAGS = ("require_approval",)
 
 

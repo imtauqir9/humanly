@@ -1,0 +1,23 @@
+<section>
+  <h2><span class="roman">↗</span>Publish</h2>
+  {% if wp.configured %}
+    {% if state.wp_link %}
+      <p class="hint" style="margin-bottom:10px">In WordPress: <a href="{{ state.wp_link }}" target="_blank" rel="noopener">{{ state.wp_link }}</a></p>
+    {% endif %}
+    {% if can('publish') %}
+      {% set blocked = approval_required and state.status not in ('approved', 'published') %}
+      <form method="post" action="/a/{{ slug }}/publish">
+        <button type="submit" class="btn {% if blocked %}btn-quiet{% else %}btn-primary{% endif %} sm"{% if blocked %} disabled{% endif %}>
+          {% if state.wp_post_id %}Update in WordPress{% elif wp.status == 'publish' %}Publish to WordPress{% elif wp.status == 'pending' %}Send to WordPress for review{% else %}Send to WordPress as a draft{% endif %}
+        </button>
+      </form>
+      <p class="hint" style="margin-top:8px">
+        {% if blocked %}Needs approval first.{% else %}To <span class="mono">{{ wp.url }}</span>, with the diagrams uploaded and the first one as the featured image.{% endif %}
+      </p>
+    {% else %}
+      <p class="hint">An editor or owner sends it to WordPress.</p>
+    {% endif %}
+  {% else %}
+    <p class="hint">{% if can('manage') %}<a href="/settings#wordpress">Connect WordPress</a> to send articles straight to their site, or publish by hand and mark it published above.{% else %}Published by hand; an editor marks it published here.{% endif %}</p>
+  {% endif %}
+</section>

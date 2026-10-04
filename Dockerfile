@@ -18,7 +18,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # App source
-COPY seo_writer.py app.py store.py site_intake.py ./
+COPY seo_writer.py app.py store.py site_intake.py wordpress.py ./
 COPY templates ./templates
 COPY static ./static
 # The writer's style exemplars and the source of the voice profile. Without

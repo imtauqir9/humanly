@@ -135,7 +135,43 @@
     </form>
   </div>
 
-  <div class="section-label"><span class="roman">v.</span><h2>People</h2><span class="sub">{{ members|length }} in this workspace</span></div>
+  <div class="section-label" id="wordpress"><span class="roman">v.</span><h2>WordPress</h2><span class="sub">{% if wp.configured %}connected{% else %}not connected{% endif %}</span></div>
+  <form class="sheet card" method="post" action="/settings">
+    <input type="hidden" name="action" value="wordpress">
+    <div class="field-row">
+      <div class="field">
+        <label for="wp_url">Their WordPress site</label>
+        <input type="text" id="wp_url" name="wp_url" value="{{ wp.url }}" placeholder="https://www.example.com">
+      </div>
+      <div class="field">
+        <label for="wp_user">WordPress username</label>
+        <input type="text" id="wp_user" name="wp_user" value="{{ wp.user }}" placeholder="editor@example.com" autocomplete="off">
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label for="wp_password">Application password</label>
+        <input type="password" id="wp_password" name="wp_password" autocomplete="new-password"
+               placeholder="{% if wp.has_password %}Saved — leave empty to keep it{% else %}xxxx xxxx xxxx xxxx xxxx xxxx{% endif %}">
+        <div class="hint">Made in their WordPress under Users → Profile → Application Passwords. Stored encrypted; they can revoke it there at any time.</div>
+      </div>
+      <div class="field">
+        <label for="wp_status">Send articles as</label>
+        <select id="wp_status" name="wp_status">
+          {% for st_ in wp_statuses %}<option value="{{ st_ }}"{% if st_ == wp.status %} selected{% endif %}>{{ {'draft': 'A draft, for their editor to publish', 'pending': 'Pending review in WordPress', 'publish': 'Published right away'}[st_] }}</option>{% endfor %}
+        </select>
+        <div class="hint" style="margin-top:12px"><label for="wp_category" style="display:inline;font-weight:600">Category ID</label>
+          <input type="text" id="wp_category" name="wp_category" value="{{ wp.category }}" placeholder="optional, e.g. 12" style="width:120px;margin-left:8px;padding:6px 8px"></div>
+      </div>
+    </div>
+    <div class="actions">
+      <button type="submit" class="btn btn-dark">Save WordPress settings</button>
+      {% if wp.configured %}<button type="submit" class="btn btn-ghost" name="action" value="wp_test" formnovalidate>Test the connection</button>
+      <label class="check" style="font-weight:400;font-size:13px;margin-left:auto"><input type="checkbox" name="wp_forget" value="1"><span>Forget the password</span></label>{% endif %}
+    </div>
+  </form>
+
+  <div class="section-label"><span class="roman">vi.</span><h2>People</h2><span class="sub">{{ members|length }} in this workspace</span></div>
   <div class="table-wrap">
     <table>
       <thead><tr><th>Person</th><th>Role</th><th></th></tr></thead>
@@ -188,7 +224,7 @@
       <b>Writer</b> writes and sends for review. <b>Client reviewer</b> reads, comments, approves or sends back; never spends credits.</div>
   </form>
 
-  <div class="section-label"><span class="roman">vi.</span><h2>Recent jobs</h2><span class="sub">queued work survives a restart</span></div>
+  <div class="section-label"><span class="roman">vii.</span><h2>Recent jobs</h2><span class="sub">queued work survives a restart</span></div>
   <div class="table-wrap">
     <table>
       <thead><tr><th>What</th><th>Who</th><th>Started</th><th class="num">Took</th><th>State</th><th></th></tr></thead>
@@ -215,7 +251,7 @@
     }
   </script>
 
-  <div class="section-label"><span class="roman">vii.</span><h2>Feed and records</h2></div>
+  <div class="section-label"><span class="roman">viii.</span><h2>Feed and records</h2></div>
   <div class="sheet card">
     <div class="field">
       <label>Public feed</label>
