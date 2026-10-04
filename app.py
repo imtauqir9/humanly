@@ -193,6 +193,9 @@ def _ws_by_id(ws_id: int) -> dict:
 
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
 APP_USERNAME = os.environ.get("APP_USERNAME", "admin")
+if APP_PASSWORD and len(APP_PASSWORD) < 12:
+    print("[auth] WARNING: APP_PASSWORD is shorter than 12 characters; anyone who finds the "
+          "URL can try to guess it.", flush=True)
 
 # A browser gets a real login form and a session cookie; scripts and curl keep
 # working with basic auth against the same password. Either satisfies the gate.
@@ -221,6 +224,9 @@ _OPEN_PATHS = {"/healthz", "/login", "/feed.json", "/feed.xml", "/embed.js", "/p
 # small: a per-IP counter, not a rate-limiting library.
 _LOGIN_MAX_ATTEMPTS = 8
 _LOGIN_LOCKOUT_SECS = 300
+# Per account, across every address: slows a distributed guess at one password
+# without letting a stranger lock the owner out for long.
+_ACCOUNT_MAX_ATTEMPTS = 20
 _login_failures: dict[str, list] = {}
 _login_lock = threading.Lock()
 
@@ -230,13 +236,13 @@ def _client_ip() -> str:
     return (fwd.split(",")[0].strip() or request.remote_addr or "unknown")
 
 
-def _locked_out(ip: str) -> int:
+def _locked_out(ip: str, limit: int = _LOGIN_MAX_ATTEMPTS) -> int:
     """Seconds remaining on a lockout, or 0."""
     with _login_lock:
         hits = [t for t in _login_failures.get(ip, [])
                 if time.time() - t < _LOGIN_LOCKOUT_SECS]
         _login_failures[ip] = hits
-        if len(hits) >= _LOGIN_MAX_ATTEMPTS:
+        if len(hits) >= limit:
             return int(_LOGIN_LOCKOUT_SECS - (time.time() - hits[0])) + 1
     return 0
 
@@ -389,13 +395,15 @@ def login():
     username = (request.form.get("username") or "").strip() or APP_USERNAME
     if request.method == "POST":
         ip = _client_ip()
-        wait = _locked_out(ip)
+        account = "account:" + username.lower()
+        wait = _locked_out(ip) or _locked_out(account, _ACCOUNT_MAX_ATTEMPTS)
         if wait:
             error = f"Too many attempts. Try again in {wait} seconds."
         else:
             user = store().check_login(username, request.form.get("password", ""))
             if user:
                 _clear_failures(ip)
+                _clear_failures(account)
                 session.clear()
                 session["uid"] = user["id"]
                 session["mark"] = _session_mark(user)
@@ -404,6 +412,7 @@ def login():
                 audit("signed_in", ws={"id": None})
                 return redirect(target)
             _record_failure(ip)
+            _record_failure(account)
             store().audit("sign_in_failed", username=username[:80], ip=ip)
             error = "That password is not right."
 
@@ -906,6 +915,11 @@ def _security_headers(resp):
     resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     if os.environ.get("FLY_APP_NAME"):
         resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+    resp.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    if request.path.startswith(("/output/", "/dl/")):
+        resp.headers["Content-Security-Policy"] = (
+            "sandbox; default-src 'none'; img-src * data: blob:; media-src * data: blob:; "
+            "style-src 'unsafe-inline' *; font-src * data:")
     return resp
 
 
@@ -1077,12 +1091,16 @@ def article_talk(slug):
 # ---------------------------------------------------------------------------
 
 def _back(endpoint: str, msg: str = "", err: str = "", **kw):
-    params = {**kw}
-    if msg:
-        params["msg"] = msg
-    if err:
-        params["err"] = err
-    return redirect(url_for(endpoint, **params))
+    """Redirect with a one-time notice. It rides in the signed session cookie,
+    not the address: a temporary password in a URL ends up in browser history
+    and in access logs."""
+    session["notice"] = {"msg": msg, "err": err}
+    return redirect(url_for(endpoint, **kw))
+
+
+def _notice() -> tuple[str | None, str | None]:
+    n = session.pop("notice", None) or {}
+    return n.get("msg") or None, n.get("err") or None
 
 
 @app.route("/settings", methods=["GET", "POST"])
@@ -1169,9 +1187,9 @@ def settings_page():
             return _back("settings_page", err=str(e) or "That did not work.")
         abort(400)
 
+    msg, err = _notice()
     return render_template("settings.html", ws=g.ws, members=s.members(g.ws["id"]),
-                           roles=st.ROLES, msg=request.args.get("msg"),
-                           err=request.args.get("err"),
+                           roles=st.ROLES, msg=msg or request.args.get("msg"), err=err,
                            ident=ws_identity(g.ws), feed_query=_ws_query(g.ws),
                            site=site_summary(g.ws), wp=wordpress_status(g.ws),
                            wp_statuses=wpress.POST_STATUSES, jobs=[_job_view(j) for j in s.jobs(g.ws["id"], limit=12)])
@@ -1299,8 +1317,8 @@ def admin_page():
         users = [dict(r) for r in c.execute(
             "SELECT id, username, name, is_admin, bootstrap, disabled, created_at FROM users "
             "ORDER BY username COLLATE NOCASE").fetchall()]
-    return render_template("admin.html", workspaces=workspaces, users=users,
-                           msg=request.args.get("msg"), err=request.args.get("err"))
+    msg, err = _notice()
+    return render_template("admin.html", workspaces=workspaces, users=users, msg=msg, err=err)
 
 
 @app.route("/account", methods=["GET", "POST"])
@@ -1480,14 +1498,17 @@ def feed_items(base_url: str, limit: int = FEED_DEFAULT_LIMIT, include_content: 
     # A client's feed carries only what the client signed off. The studio's own
     # feed keeps working as before, approval or not.
     states = store().article_states(ws["id"])
-    only_cleared = ws["slug"] != st.DEFAULT_WORKSPACE
     author = ws_identity(ws)["author_name"]
     items = []
     for meta_file in sorted(out.glob("*_meta.json"), key=lambda p: p.stat().st_mtime, reverse=True):
         if len(items) >= limit:
             break
         slug = meta_file.stem[:-len("_meta")]
-        if only_cleared and (states.get(slug) or {}).get("status") not in ("approved", "published"):
+        state = states.get(slug)
+        # The studio's articles from before the workflow have no status and stay
+        # listed; anything with a status, and anything of a client's, must be cleared.
+        legacy = state is None and ws["slug"] == st.DEFAULT_WORKSPACE
+        if not legacy and (state or {}).get("status") not in ("approved", "published"):
             continue
         try:
             meta = json.loads(meta_file.read_text(encoding="utf-8"))
@@ -1772,7 +1793,14 @@ def _post_callback(url: str, payload: dict):
     delay = 2
     for attempt in range(1, CALLBACK_ATTEMPTS + 1):
         try:
-            r = requests.post(url, json=payload, timeout=CALLBACK_TIMEOUT_SECS)
+            from site_intake import BlockedURL, _check_public
+            try:
+                _check_public(url)
+            except BlockedURL as e:
+                print(f"[callback] refused {url}: {e}", flush=True)
+                return
+            r = requests.post(url, json=payload, timeout=CALLBACK_TIMEOUT_SECS,
+                              allow_redirects=False)
             if r.status_code < 400:
                 print(f"[callback] delivered to {url} ({r.status_code})", flush=True)
                 return
