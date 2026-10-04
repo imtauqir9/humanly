@@ -1456,8 +1456,54 @@ WORKSPACE_FLAGS = ("require_approval",)
 
 def pipeline_env(ws: dict) -> dict:
     """Environment overrides that make the pipeline write as this workspace.
-    Filled in by the workspace settings (see the Settings page)."""
-    return {}
+
+    A client workspace sets every key, empty or not, so nothing of the studio
+    owner's - byline, newsletter greeting, sign-off, voice - can leak into a
+    client's article. The default workspace overrides only what its settings
+    fill in, and otherwise behaves exactly as before workspaces existed."""
+    s = ws.get("settings") or {}
+    out = ws_dir(ws)
+    ident = ws_identity(ws)
+
+    def val(key: str) -> str:
+        return str(s.get(key) or "").strip()
+
+    env = {"WEB_CALL_DEBUG_DIR": str(out)}
+    if ws["slug"] == st.DEFAULT_WORKSPACE:
+        for key, var in (("site_url", "SITE_URL"), ("url_pattern", "ARTICLE_URL_PATTERN"),
+                         ("author_name", "AUTHOR_NAME"), ("author_url", "AUTHOR_URL"),
+                         ("author_bio", "AUTHOR_BIO"), ("brand_guide", "BRAND_GUIDE"),
+                         ("radar_lens", "RADAR_LENS")):
+            if val(key):
+                env[var] = val(key)
+        if "brand_cta" in s:
+            env["BRAND_CTA"] = val("brand_cta")
+    else:
+        name = ident["author_name"]
+        env.update({
+            "SITE_URL": ident["site_url"],
+            "ARTICLE_URL_PATTERN": ident["url_pattern"],
+            "AUTHOR_NAME": name,
+            "AUTHOR_URL": ident["author_url"],
+            "AUTHOR_BIO": val("author_bio") or f"{name}, writing for its own readers.",
+            "BRAND_GUIDE": val("brand_guide"),
+            "BRAND_CTA": val("brand_cta"),
+            "BRAND_INTRO": "",
+            "RADAR_LENS": val("radar_lens") or f"the readers of {ws['name']}",
+            "STYLE_SAMPLES_DIR": str(samples_dir(ws)),
+        })
+        # Only what is live on the client's site may be linked to.
+        live = {slug: state.get("wp_link") or article_public_url(ws, slug)
+                for slug, state in store().article_states(ws["id"]).items()
+                if state.get("status") == "published"}
+        published_file = out / "_published.json"
+        out.mkdir(parents=True, exist_ok=True)
+        published_file.write_text(json.dumps(live), encoding="utf-8")
+        env["PUBLISHED_FILE"] = str(published_file)
+    pages = out / "site_pages.json"
+    if pages.exists():
+        env["SITE_PAGES_FILE"] = str(pages)
+    return env
 
 
 def _run_job(job: dict):

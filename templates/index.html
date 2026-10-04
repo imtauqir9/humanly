@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 {% include "_head.html" %}
-<title>Humanly — Imran Tauqir's AI writing pipeline</title>
+<title>Humanly — {{ current_ws.name if current_ws and current_ws.slug != 'default' else "Imran Tauqir's AI writing pipeline" }}</title>
 <style>
 {% include "_theme.css" %}
 

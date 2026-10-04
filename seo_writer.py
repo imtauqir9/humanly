@@ -162,6 +162,33 @@ SITE_URL = os.getenv("SITE_URL", "").rstrip("/")
 AUTHOR_NAME = os.getenv("AUTHOR_NAME", "Imran Tauqir")
 AUTHOR_URL = os.getenv("AUTHOR_URL", "https://imrantauqir.com/")
 
+# How the client's blog addresses a post. {site} and {slug} are filled in; the
+# default is the flat SITE_URL/<slug> this pipeline always assumed.
+ARTICLE_URL_PATTERN = os.getenv("ARTICLE_URL_PATTERN", "").strip() or "{site}/{slug}"
+
+# Who the LinkedIn post and the video script speak as.
+AUTHOR_BIO = os.getenv("AUTHOR_BIO", "").strip() or (
+    "Imran Tauqir, an engineer who builds with AI agents and writes about it.")
+
+# A client's house rules: naming, claims it may not make, tone, spelling. The
+# writer follows them and the auditor flags what breaks them.
+BRAND_GUIDE = os.getenv("BRAND_GUIDE", "").strip()
+
+# The client's real pages, from site intake: [{url, title}, ...]. They are the
+# internal links the writer may use, alongside articles this app wrote.
+SITE_PAGES_FILE = os.getenv("SITE_PAGES_FILE", "").strip()
+# {slug: live url} of this workspace's published articles. Set for client
+# workspaces, where only what is live may be linked.
+PUBLISHED_FILE = os.getenv("PUBLISHED_FILE", "").strip()
+
+
+def public_url(slug: str) -> str:
+    """The article's address on the publishing site, or "" with no site. A wrong
+    canonical is worse than none, so nothing is guessed."""
+    if not SITE_URL:
+        return ""
+    return ARTICLE_URL_PATTERN.replace("{site}", SITE_URL).replace("{slug}", slug)
+
 # ---------------------------------------------------------------------------
 # Token accounting
 # ---------------------------------------------------------------------------
@@ -368,6 +395,15 @@ That's a wrap for this edition. If it gave you something useful, the best next s
 Until next time,
 **Imran**
 """
+
+# A workspace sets these (possibly to nothing). Unset, the studio's own greeting
+# and sign-off apply, as they always have.
+if "BRAND_CTA" in os.environ:
+    _cta = os.environ["BRAND_CTA"].strip()
+    AUTHOR_CTA = f"\n\n---\n\n{_cta}\n" if _cta else ""
+if "BRAND_INTRO" in os.environ:
+    AUTHOR_INTRO_TEMPLATE = os.environ["BRAND_INTRO"].strip()
+    AUTHOR_INTRO_TEMPLATE = AUTHOR_INTRO_TEMPLATE + "\n" if AUTHOR_INTRO_TEMPLATE else ""
 
 
 # ---------------------------------------------------------------------------
@@ -774,7 +810,7 @@ def date_context() -> str:
     )
 
 
-SAMPLE_DIR = Path(__file__).parent / "sample-articles"
+SAMPLE_DIR = Path(os.getenv("STYLE_SAMPLES_DIR", "").strip() or Path(__file__).parent / "sample-articles")
 STYLE_SAMPLE_WORDS = 1200
 STYLE_SAMPLE_COUNT = 2
 
@@ -839,8 +875,17 @@ def load_style_samples(limit_words: int = STYLE_SAMPLE_WORDS,
     return "\n".join(blocks)
 
 
+def brand_block() -> str:
+    if not BRAND_GUIDE:
+        return ""
+    return f"""
+BRAND GUIDE (the client's house rules; follow every one)
+{BRAND_GUIDE}
+"""
+
+
 def style_block(samples: str, profile: str = "") -> str:
-    parts = []
+    parts = [brand_block()]
     if samples:
         parts.append(f"""
 STYLE TO MATCH
@@ -873,13 +918,54 @@ the neutralised form that fails this rule.
 """
 
 
-def library_links(output_dir: Path, exclude_title: str = "", limit: int = 12) -> list[dict]:
-    """Articles already published, as {title, url}, for the outline to link to.
-    Needs SITE_URL: without a site there is nothing to link to, and the writer
-    is told to plan no internal links rather than invent anchors."""
-    if not SITE_URL or not output_dir.exists():
+_LINK_STOPWORDS = {"the", "a", "an", "and", "or", "of", "to", "for", "in", "on", "with", "how",
+                   "what", "why", "is", "are", "your", "you", "vs", "guide", "best", "from", "by"}
+
+
+def _words(text: str) -> set:
+    return {w for w in re.findall(r"[a-z0-9]+", (text or "").lower())
+            if len(w) > 2 and w not in _LINK_STOPWORDS}
+
+
+def site_pages(topic: str = "", limit: int = 10) -> list[dict]:
+    """The client's own pages most related to this topic, as {title, url}. They
+    come from site intake (SITE_PAGES_FILE); without it there are none."""
+    if not SITE_PAGES_FILE:
         return []
-    links = []
+    try:
+        pages = json.loads(Path(SITE_PAGES_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    want = _words(topic)
+    scored = []
+    for p in pages if isinstance(pages, list) else []:
+        title, url = str(p.get("title") or "").strip(), str(p.get("url") or "").strip()
+        if not title or not url.startswith("http"):
+            continue
+        overlap = len(want & _words(title + " " + url))
+        if overlap:
+            scored.append((overlap, title, url))
+    scored.sort(key=lambda t: -t[0])
+    return [{"title": t, "url": u} for _, t, u in scored[:limit]]
+
+
+def library_links(output_dir: Path, exclude_title: str = "", limit: int = 12) -> list[dict]:
+    """Pages that really exist, as {title, url}, for the outline to link to: the
+    client's own pages related to the topic, then articles already published.
+    Without a site there is nothing to link to, and the writer is told to plan
+    no internal links rather than invent anchors."""
+    links = site_pages(exclude_title, limit=limit // 2 or 1)
+    if not SITE_URL or not output_dir.exists():
+        return links
+    seen = {l["url"] for l in links}
+    # A client workspace lists what is actually live ({slug: url}); a draft on
+    # this app's disk is not a page a reader can follow.
+    live = None
+    if PUBLISHED_FILE:
+        try:
+            live = json.loads(Path(PUBLISHED_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            live = {}
     for meta_file in sorted(output_dir.glob("*_meta.json"), key=lambda p: p.stat().st_mtime, reverse=True):
         try:
             meta = json.loads(meta_file.read_text(encoding="utf-8"))
@@ -889,7 +975,12 @@ def library_links(output_dir: Path, exclude_title: str = "", limit: int = 12) ->
         title_ = (meta.get("seo_meta") or {}).get("title") or slug.replace("-", " ")
         if exclude_title and title_.strip().lower() == exclude_title.strip().lower():
             continue
-        links.append({"title": title_, "url": f"{SITE_URL}/{slug}"})
+        if live is not None and slug not in live:
+            continue
+        url = (live or {}).get(slug) or public_url(slug)
+        if url in seen:
+            continue
+        links.append({"title": title_, "url": url})
         if len(links) >= limit:
             break
     return links
@@ -4234,7 +4325,7 @@ def build_jsonld(slug: str, article: str, meta: dict, images: dict,
     """
     seo_title = meta.get("title") or ""
     description = meta.get("description") or ""
-    canonical = f"{SITE_URL}/{slug}" if SITE_URL else ""
+    canonical = public_url(slug)
 
     article_node = {
         "@type": "Article",
@@ -4330,13 +4421,13 @@ def generate_linkedin_post(title: str, article: str, research: dict,
     log("STEP 9", "Writing the LinkedIn post")
 
     kw = research.get("keywords", {})
-    link = article_url or (f"{SITE_URL}/{slugify(title)}" if SITE_URL else "")
+    link = article_url or public_url(slugify(title))
 
     prompt = f"""Write a LinkedIn post for the article below, in the author's own voice.
 
 WHO IS POSTING
-Imran Tauqir, an engineer who builds with AI agents and writes about it. He posts
-as a practitioner, not a commentator. He is not selling anything in this post.
+{AUTHOR_BIO}
+They post as a practitioner, not a commentator, and are not selling anything in this post.
 
 WHAT THE POST HAS TO DO
 Earn the click from someone scrolling past. LinkedIn shows roughly the first two
@@ -4387,8 +4478,8 @@ def generate_video_script(title: str, article: str, research: dict) -> str:
     prompt = f"""Write a 2 to 3 minute video script from the article below.
 
 WHO IS SPEAKING
-Imran Tauqir, an engineer who builds with AI agents and writes about it. He
-speaks to other engineers as a peer. Confident and plain-spoken, never hyped.
+{AUTHOR_BIO}
+They speak to their audience as a peer. Confident and plain-spoken, never hyped.
 
 LENGTH
 380 to 440 words of narration. That is 2:30 to 3:00 at a natural speaking pace.
@@ -5164,7 +5255,8 @@ def insert_answer_block(article: str, answer: str) -> str:
 def wrap_with_branding(article: str, edition: int) -> str:
     """The newsletter greeting only when this is a newsletter edition; an
     article with edition 0 is a standalone post and starts at its title."""
-    intro = AUTHOR_INTRO_TEMPLATE.format(edition=edition) if edition and edition > 0 else ""
+    intro = (AUTHOR_INTRO_TEMPLATE.replace("{edition}", str(edition))
+             if edition and edition > 0 and AUTHOR_INTRO_TEMPLATE else "")
     sources = build_sources_section(article)
     return intro + article + sources + AUTHOR_CTA
 
@@ -5187,7 +5279,7 @@ def write_outputs(slug: str, article: str, meta: dict, images: dict, output_dir:
     meta_payload = {
         "generated_at": generated_at,
         "seo_meta": meta,
-        "canonical": f"{SITE_URL}/{slug}" if SITE_URL else None,
+        "canonical": public_url(slug) or None,
         "author": {"name": AUTHOR_NAME, "url": AUTHOR_URL},
         "faq_count": len(faqs),
         "sources": [
@@ -5277,7 +5369,7 @@ def _write_html(slug: str, branded: str, output_dir: Path, meta: dict | None = N
     html_body = md_lib.markdown(src_patched, extensions=['tables', 'fenced_code'])
     html_body = _linkify(html_body)
 
-    canonical = f"{SITE_URL}/{slug}" if SITE_URL else ""
+    canonical = public_url(slug)
     seo_title = (meta or {}).get("title") or slug.replace("-", " ").title()
     description = (meta or {}).get("description") or ""
     og_image = next((v["url"] for v in (images or {}).values()
@@ -5529,6 +5621,7 @@ What is currently ranking for this keyword:
 {fact_pack_text(research)}
 {take_block(research.get("take", ""))}
 {voice_block(research.get("voice_profile", ""))}
+{brand_block()}
 {LEVELS_BLOCK}
 {date_context()}
 
@@ -5555,6 +5648,10 @@ WHAT TO CHECK
    its terms, and it holds the [DIAGRAM: ...] marker. Flag jargon left undefined
    there, sentences a newcomer would have to reread, and a Level 3 section that
    never rises above what a beginner's guide would say.
+11. BRAND - If a BRAND GUIDE is given above, any sentence that breaks one of its
+   rules: a forbidden claim or comparison, a product name written wrongly, the
+   wrong spelling convention, a tone it rules out. A forbidden claim is high
+   severity; naming and spelling are medium. If no guide is given, skip this check.
 3. STRUCTURE - Sections in the outline that are missing, merged, or renamed beyond
    recognition. Count the [IMAGE: ...] and [DIAGRAM: ...] markers still present and compare
    with the outline.
