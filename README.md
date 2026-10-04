@@ -474,6 +474,73 @@ from the outside whether the deployed app is actually locked.
 
 ---
 
+## Client workspaces
+
+The app can write for several clients, each in a workspace of its own: its own
+folder under `output/workspaces/<slug>/`, its own voice, settings, people and
+usage. The default workspace is still `output/` itself, so everything written
+before workspaces existed is where it was.
+
+**People and roles.** `APP_USERNAME` / `APP_PASSWORD` is the studio owner, an
+administrator who creates workspaces on the **Clients** page. Everyone else gets
+their own account (a one-time password to pass on) and a role per workspace:
+
+| Role | Can |
+|---|---|
+| Owner | everything, including Settings and people |
+| Editor | write, approve, publish |
+| Writer | write, edit, send for review |
+| Client reviewer | read, comment, approve or request changes; never starts a paid run |
+
+Scripts keep using basic auth; add `?ws=<slug>` to an `/api/...` call to act in
+a client's workspace.
+
+**Writing as the client.** Settings holds who the workspace publishes as: the
+website and its URL pattern (`{site}/blog/{slug}`), the byline, a short "who is
+speaking" for the LinkedIn post and video, a brand guide the writer follows
+and the auditor checks (an eleventh check, BRAND), and the closing call to
+action. A client workspace never inherits the studio owner's byline, greeting,
+sign-off or voice.
+
+**Reading their site.** *Read their site* in Settings runs `site_intake.py`: it
+reads the sitemap (honouring robots.txt, refusing private addresses), keeps
+every page with its title, takes two or three of their own long articles as
+voice samples, and saves their product and pricing pages as research notes with
+the source URL on top. From then on articles link to their real pages, use
+their product pages as facts (a checkbox on the form), and the form warns when
+a topic is close to a page they already have.
+
+```bash
+python site_intake.py https://www.example.com --out output/workspaces/acme
+```
+
+**Approval.** Every article has a page at `/a/<slug>`: the manuscript, its
+status (draft, in review, changes requested, approved, published), the moves
+your role allows, a discussion thread, and its versions. Editing keeps the old
+text as a version and rebuilds the HTML (`seo_writer.py --rerender <slug>`, no
+model calls). With *Require approval* on, nothing is published before approval,
+an article edited after approval goes back for it, and the client's feed
+(`/feed.json?ws=<slug>`) carries only approved work.
+
+**WordPress.** Connect a workspace with an application password (their
+WordPress: Users, Profile, Application Passwords; stored encrypted). An editor
+then sends an article as a draft, pending review, or published. Diagrams are
+uploaded to the media library, the first becomes the featured image, and
+sending again updates the same post.
+
+**Jobs.** Runs are queued in the database with their logs on the volume: a
+deploy marks a running job *interrupted* (retry is one click, never automatic,
+because a rerun spends money), and a dropped browser picks the log up where it
+left off. One job runs per workspace; different clients run side by side, up
+to `MAX_CONCURRENT_JOBS`.
+
+**Records.** An audit log per workspace (Settings, Audit log), usage per client
+on the Usage page for billing, a retention period per workspace, and `/trust`,
+a public page for a client's security review listing only the outside services
+this deployment has switched on.
+
+---
+
 ## Starting runs from Zapier, n8n or a script
 
 The browser follows a run over a live event stream, which an automation
@@ -704,14 +771,21 @@ passed `--apply`.
 ```
 humanly/
 ├── seo_writer.py       # Core agent + CLI — the whole pipeline lives here
-├── app.py              # Web UI (Flask): jobs, streaming log, auth, usage
+├── app.py              # Web UI (Flask): workspaces, jobs, streaming log, auth, usage
+├── store.py            # SQLite records: people, workspaces, roles, status, audit, jobs
+├── site_intake.py      # Reads a client's website: pages, voice samples, product notes
+├── wordpress.py        # Sends an article to a client's WordPress
 ├── requirements.txt
 ├── .env.example        # Copy to .env and fill in keys
 ├── templates/
 │   ├── index.html      # The form, the live log, the article library
 │   ├── review.html     # /review/<slug> — the argument, with all three voices
 │   ├── deck.html       # /deck/<slug> — the video script as timed slides
-│   ├── usage.html      # /usage — tokens and cost
+│   ├── usage.html      # /usage — tokens and cost, per client for admins
+│   ├── article.html    # /a/<slug> — status, discussion, edits, versions, publish
+│   ├── settings.html   # /settings — the workspace: identity, brand, site, WordPress, people
+│   ├── admin.html      # /admin — clients and accounts
+│   ├── trust.html      # /trust — public: how client data is handled
 │   └── login.html
 ├── docs/flow.html      # End-to-end walkthrough of how a run works
 ├── examples/           # A real article the pipeline produced, untouched

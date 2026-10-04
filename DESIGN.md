@@ -2,7 +2,7 @@
 
 ## Product Context
 - **What this is:** A private AI writing pipeline. You brief an article with your own first-person take; a topic radar suggests what to write; the pipeline researches, drafts, and runs a three-agent audit (auditor, writer, judge); the library holds every artifact it produced.
-- **Who it's for:** One author (Imran Tauqir) writing technical articles, LinkedIn posts and videos.
+- **Who it's for:** A studio (Imran Tauqir) writing technical articles, LinkedIn posts and videos for itself and for client companies, each client in its own workspace, with the client's people signing off.
 - **Space/industry:** AI writing tools, but deliberately not styled like one.
 - **Project type:** Internal web app (Flask + Jinja, `templates/`).
 
@@ -70,3 +70,4 @@
 |------|----------|-----------|
 | 2026-09-29 | Initial design system created | /design-consultation, "writer's studio" direction chosen by the user over mission-control and calm-premium |
 | 2026-09-29 | Palette lightened | User asked for lighter colours: paper #FBF9F5, white sheets, brighter vermilion #D2553A |
+| 2026-10-04 | Client workspaces: status stamps | Article status reuses the stamp pattern in existing tokens: draft muted, in review ink-blue, changes ochre, approved moss, published vermilion (the editor's mark). The workspace switcher is the serif italic crumb. No new colours. |
