@@ -106,4 +106,4 @@ def test_the_app_hands_a_client_workspace_its_own_environment():
         live = json.loads(Path(env["PUBLISHED_FILE"]).read_text(encoding="utf-8"))
         assert live == {"old-post": "https://acme.example/blog/old-post"}
         # The studio's own workspace overrides nothing it has not filled in.
-        assert set(m.pipeline_env(s.workspace("default"))) == {"WEB_CALL_DEBUG_DIR"}
+        assert set(m.pipeline_env(s.workspace("default"))) == {"WEB_CALL_DEBUG_DIR", "DL_ROOT"}
