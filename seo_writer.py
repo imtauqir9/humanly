@@ -5309,6 +5309,34 @@ def write_outputs(slug: str, article: str, meta: dict, images: dict, output_dir:
     return md_path, meta_path
 
 
+def rerender(slug: str, output_dir: Path) -> Path | None:
+    """Rebuild the HTML and DOCX from an edited <slug>.md. The markdown already
+    carries its intro, sources and sign-off, so it is not wrapped again; the
+    diagrams and images come back from the files and meta the run left."""
+    md_path = output_dir / f"{slug}.md"
+    if not md_path.exists():
+        print(f"ERROR: no such article: {md_path.name}")
+        sys.exit(1)
+    branded = md_path.read_text(encoding="utf-8")
+    try:
+        meta_payload = json.loads((output_dir / f"{slug}_meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        meta_payload = {}
+    images = {f"img{i}": img for i, img in enumerate(meta_payload.get("images") or [])}
+    diagrams = {}
+    for svg_file in sorted(output_dir.glob(f"{slug}_diagram_*.svg")):
+        png = svg_file.with_suffix(".png")
+        diagrams[svg_file.stem] = {"svg": svg_file.read_text(encoding="utf-8"),
+                                   "svg_name": svg_file.name,
+                                   "png": png.name if png.exists() else ""}
+    html_path = _write_html(slug, branded, output_dir, meta=meta_payload.get("seo_meta") or {},
+                            images=images, generated_at=meta_payload.get("generated_at", ""),
+                            diagrams=diagrams)
+    _write_docx(slug, branded, output_dir)
+    print(f"  Re-rendered {slug}: {html_path}")
+    return html_path
+
+
 def _linkify(text: str) -> str:
     """Convert bare URLs in text to HTML anchor tags."""
     return re.sub(
@@ -6566,11 +6594,21 @@ def main():
         action="store_true",
         help="With --audit, also save the revised document as <slug>_revised.md",
     )
+    parser.add_argument(
+        "--rerender",
+        metavar="SLUG",
+        default="",
+        help="Rebuild the HTML and DOCX for an edited <slug>.md in --output-dir; no model calls",
+    )
     args = parser.parse_args()
 
-    if not os.getenv("ANTHROPIC_API_KEY"):
+    if not os.getenv("ANTHROPIC_API_KEY") and not args.rerender:
         print("ERROR: ANTHROPIC_API_KEY environment variable is not set.", file=sys.stderr)
         sys.exit(1)
+
+    if args.rerender:
+        rerender(args.rerender, Path(args.output_dir))
+        return
 
     if not args.audit and not args.radar and not args.dig and not args.topic:
         parser.error("a topic is required unless you pass --audit FILE, --radar or --dig N")

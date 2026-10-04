@@ -437,8 +437,10 @@ def healthz():
 
 def list_articles(out: Path | None = None) -> list[dict]:
     """Return metadata for every generated article, newest first."""
+    ws = _current_ws()
     out = out or ws_dir()
     out.mkdir(parents=True, exist_ok=True)
+    states = store().article_states(ws["id"]) if ws and out == ws_dir(ws) else {}
     articles = []
     for meta_file in sorted(out.glob("*_meta.json"), key=lambda p: p.stat().st_mtime, reverse=True):
         slug = meta_file.stem.replace("_meta", "")
@@ -479,8 +481,11 @@ def list_articles(out: Path | None = None) -> list[dict]:
             except Exception:
                 pass
 
+        state = states.get(slug) or {}
         articles.append({
             "slug": slug,
+            "status": state.get("status") or "draft",
+            "wp_link": state.get("wp_link"),
             "title": seo.get("title", slug.replace("-", " ").title()),
             "description": seo.get("description", ""),
             "generated_at": generated_at,
@@ -651,6 +656,170 @@ def usage_dashboard():
             t = usage_rollup(read_usage(out=ws_dir(ws)))["total"]
             per_workspace.append({"ws": ws, **t})
     return render_template("usage.html", runs=runs, per_workspace=per_workspace, **roll)
+
+
+# ---------------------------------------------------------------------------
+# One article: read it, discuss it, edit it, move it towards published
+# ---------------------------------------------------------------------------
+
+VERSIONS = "_versions"
+
+
+def _article_or_404(slug: str) -> tuple[str, Path]:
+    slug = Path(slug).name
+    md = ws_dir() / f"{slug}.md"
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", slug) or not md.exists():
+        abort(404)
+    return slug, md
+
+
+def _versions(slug: str) -> list[dict]:
+    folder = ws_dir() / VERSIONS
+    if not folder.exists():
+        return []
+    out = []
+    for f in sorted(folder.glob(f"{slug}.*.md"), reverse=True):
+        stamp = f.name[len(slug) + 1:-3]
+        out.append({"name": f.name, "at": stamp.replace("_", " ")[:16]})
+    return out
+
+
+def _rerender(slug: str) -> str:
+    """Rebuild the HTML and DOCX as this workspace, so the byline and canonical
+    are the client's. Fast and free: no model calls."""
+    cmd = [sys.executable, str(BASE_DIR / "seo_writer.py"), "--rerender", slug,
+           "--output-dir", str(ws_dir())]
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       env={**os.environ, **pipeline_env(g.ws)}, timeout=120)
+    return "" if r.returncode == 0 else (r.stdout + r.stderr)[-400:]
+
+
+def allowed_moves(state: dict) -> list[str]:
+    """The status changes this person may make on this article, in button order."""
+    moves = []
+    for target in ("in_review", "approved", "changes", "draft"):
+        cap, sources = st.TRANSITIONS[target]
+        if state["status"] in sources and can(cap):
+            moves.append(target)
+    return moves
+
+
+def needs_approval(ws: dict) -> bool:
+    return bool((ws.get("settings") or {}).get("require_approval"))
+
+
+@app.route("/a/<slug>")
+def article_page(slug):
+    slug, md = _article_or_404(slug)
+    out = ws_dir()
+    meta = {}
+    try:
+        meta = json.loads((out / f"{slug}_meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    state = store().article_state(g.ws["id"], slug)
+    html_files = sorted(out.glob(f"{slug}*.html"), key=lambda p: p.stat().st_mtime, reverse=True)
+    artifacts = [(label, name) for label, name in (
+        ("Markdown", f"{slug}.md"), ("Word", f"{slug}.docx"), ("Review", f"{slug}_review.md"),
+        ("Facts", f"{slug}_facts.json"), ("LinkedIn", f"{slug}_linkedin.md"),
+        ("Video script", f"{slug}_video.md")) if (out / name).exists()]
+    return render_template(
+        "article.html", slug=slug, title=(meta.get("seo_meta") or {}).get("title") or slug,
+        description=(meta.get("seo_meta") or {}).get("description") or "",
+        markdown=md.read_text(encoding="utf-8"), state=state,
+        status_label=st.STATUS_LABELS, moves=allowed_moves(state),
+        comments=store().comments(g.ws["id"], slug), versions=_versions(slug),
+        html_file=html_files[0].name if html_files else None, artifacts=artifacts,
+        has_review=(out / f"{slug}_review.json").exists(),
+        approval_required=needs_approval(g.ws), public_url=article_public_url(g.ws, slug),
+        wp=wordpress_status(g.ws) if "wordpress_status" in globals() else None,
+        msg=request.args.get("msg"), err=request.args.get("err"))
+
+
+@app.route("/a/<slug>/status", methods=["POST"])
+def article_status(slug):
+    slug, _ = _article_or_404(slug)
+    target = request.form.get("status") or (request.get_json(silent=True) or {}).get("status", "")
+    note = (request.form.get("note") or "").strip()
+    state = store().article_state(g.ws["id"], slug)
+    if target not in allowed_moves(state):
+        abort(403)
+    store().set_status(g.ws["id"], slug, target, actor())
+    line = f"{st.STATUS_LABELS[state['status']]} → {st.STATUS_LABELS[target]}"
+    store().add_comment(g.ws["id"], slug, actor(), line + (f"\n\n{note}" if note else ""), kind="status")
+    audit("article.status", target=slug, detail={"from": state["status"], "to": target})
+    return redirect(url_for("article_page", slug=slug))
+
+
+@app.route("/a/<slug>/comment", methods=["POST"])
+def article_comment(slug):
+    needs("comment")
+    slug, _ = _article_or_404(slug)
+    try:
+        store().add_comment(g.ws["id"], slug, actor(), request.form.get("body", ""))
+    except ValueError as e:
+        return redirect(url_for("article_page", slug=slug, err=str(e)))
+    audit("article.commented", target=slug)
+    return redirect(url_for("article_page", slug=slug) + "#discussion")
+
+
+def _save_version(slug: str, md: Path):
+    folder = ws_dir() / VERSIONS
+    folder.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
+    (folder / f"{slug}.{stamp}.md").write_text(md.read_text(encoding="utf-8"), encoding="utf-8")
+
+
+def _apply_edit(slug: str, md: Path, text: str, how: str):
+    """Keep the old text, write the new, rebuild the HTML, and send an article
+    that was already signed off back for approval: what was approved is not
+    what will be published any more."""
+    _save_version(slug, md)
+    md.write_text(text.replace("\r\n", "\n"), encoding="utf-8")
+    problem = _rerender(slug)
+    state = store().article_state(g.ws["id"], slug)
+    store().add_comment(g.ws["id"], slug, actor(), how, kind="edit")
+    if needs_approval(g.ws) and state["status"] in ("approved", "published"):
+        store().set_status(g.ws["id"], slug, "in_review", actor())
+        store().add_comment(g.ws["id"], slug, actor(),
+                            f"{st.STATUS_LABELS[state['status']]} → In review\n\nEdited after approval, "
+                            f"so it needs approving again.", kind="status")
+    audit("article.edited", target=slug, detail={"how": how[:80]})
+    return problem
+
+
+@app.route("/a/<slug>/edit", methods=["POST"])
+def article_edit(slug):
+    needs("submit")
+    slug, md = _article_or_404(slug)
+    text = request.form.get("markdown", "")
+    if len(text.split()) < 20:
+        return redirect(url_for("article_page", slug=slug, err="That is too short to be the article."))
+    problem = _apply_edit(slug, md, text, "Edited the text.")
+    if problem:
+        return redirect(url_for("article_page", slug=slug, err="Saved, but the HTML could not be rebuilt: " + problem))
+    return redirect(url_for("article_page", slug=slug, msg="Saved. The previous text is kept under Versions."))
+
+
+@app.route("/a/<slug>/versions/<name>")
+def article_version(slug, name):
+    slug, _ = _article_or_404(slug)
+    f = ws_dir() / VERSIONS / Path(name).name
+    if not f.name.startswith(slug + ".") or not f.exists():
+        abort(404)
+    return Response(f.read_text(encoding="utf-8"), mimetype="text/plain; charset=utf-8")
+
+
+@app.route("/a/<slug>/restore", methods=["POST"])
+def article_restore(slug):
+    needs("submit")
+    slug, md = _article_or_404(slug)
+    f = ws_dir() / VERSIONS / Path(request.form.get("name", "")).name
+    if not f.name.startswith(slug + ".") or not f.exists():
+        abort(404)
+    problem = _apply_edit(slug, md, f.read_text(encoding="utf-8"), f"Restored the version from {f.name[len(slug) + 1:-3]}.")
+    return redirect(url_for("article_page", slug=slug,
+                            **({"err": problem} if problem else {"msg": "Restored."})))
 
 
 # ---------------------------------------------------------------------------

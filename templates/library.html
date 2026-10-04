@@ -98,7 +98,8 @@
       <span class="entry-no">{{ '%02d' % (articles|length - loop.index0) }}</span>
       <span class="entry-date">{{ a.generated_at or '' }}</span>
       <div>
-      {% if a.html_file %}<a class="card-title" href="/output/{{ a.html_file }}" target="_blank">{{ a.title }}</a>{% else %}<div class="card-title">{{ a.title }}</div>{% endif %}
+      <a class="card-title" href="/a/{{ a.slug }}">{{ a.title }}</a>
+      {% if a.status and (a.status != 'draft' or (current_ws and current_ws.slug != 'default')) %}<span class="status-stamp s-{{ a.status }}" style="margin-left:8px;vertical-align:3px">{{ {'draft': 'Draft', 'in_review': 'In review', 'changes': 'Changes requested', 'approved': 'Approved', 'published': 'Published'}[a.status] }}</span>{% endif %}
       {% if a.description %}<div class="card-desc">{{ a.description }}</div>{% endif %}
       <div class="card-actions">
         {% if a.html_file %}<a class="btn-link btn-html" href="/output/{{ a.html_file }}" target="_blank">HTML</a>{% endif %}
