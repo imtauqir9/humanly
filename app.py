@@ -574,7 +574,9 @@ def pipeline():
 
 @app.route("/library")
 def library():
-    return render_template("library.html", articles=list_articles(), radars=list_radars())
+    evaluations = [r for r in list_reviews() if not r["is_article"]]
+    return render_template("library.html", articles=list_articles(), radars=list_radars(),
+                           evaluations=evaluations)
 
 
 @app.route("/output/<path:filename>")
@@ -2141,6 +2143,9 @@ def _run_job(job: dict):
             if job["kind"] == "audit" and fresh_reviews:
                 newest = max(fresh_reviews, key=lambda p: p.stat().st_mtime)
                 result["review_slug"] = newest.stem[:-len("_review")]
+                revised = out / f"{result['review_slug']}_revised.md"
+                if revised.exists() and revised.stat().st_mtime >= newest.stat().st_mtime - 60:
+                    result["revised_file"] = revised.name
             if job["kind"] == "article":
                 slug = _new_slug(meta_before, out)
                 if slug:
@@ -2244,6 +2249,19 @@ def _docx_to_markdown(raw: bytes) -> str:
     return "\n".join(lines).strip()
 
 
+def _pasted_draft_name(text: str) -> str:
+    """A name for pasted text: its first heading, else its opening words.
+
+    Without one the audit falls back to the upload's uuid, and the review and
+    corrected version land under a name nobody can recognise."""
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    heading = next((m.group(1) for l in lines if (m := re.match(r"^#{1,6}\s+(.+)", l))), "")
+    name = heading or " ".join((lines[0].split() if lines else [])[:8])
+    # Leading punctuation goes: the name is passed on the command line, and
+    # one starting with "-" would be read as a flag.
+    return re.sub(r"^\W+", "", name.strip())[:80]
+
+
 def _draft_from_request() -> tuple[str, str]:
     """The document to audit, as (markdown, source name). Raises ValueError."""
     upload = request.files.get("file")
@@ -2266,7 +2284,7 @@ def _draft_from_request() -> tuple[str, str]:
 
     pasted = (request.form.get("text") or "").strip()
     if pasted:
-        return pasted, ""
+        return pasted, _pasted_draft_name(pasted)
     raise ValueError("Paste an article or choose a file to evaluate.")
 
 
@@ -2468,8 +2486,14 @@ def list_reviews() -> list[dict]:
         rounds = record.get("rounds") or []
         raised = sum(len(r.get("issues") or []) for r in rounds)
         applied = sum(len(r.get("applied") or []) for r in rounds)
+        revised = folder / f"{slug}_revised.md"
         out.append({
             "slug": slug,
+            "title": record.get("title") or _first_heading(revised) or _review_title(slug),
+            # An audit of a library article shows on that article's card; only
+            # evaluations of outside drafts need a listing of their own.
+            "is_article": (folder / f"{slug}_meta.json").exists(),
+            "revised_file": revised.name if revised.exists() else None,
             "outcome": record.get("outcome", ""),
             "rounds": len(rounds),
             "raised": raised,
@@ -2478,6 +2502,24 @@ def list_reviews() -> list[dict]:
             "agents": {k: v.get("model") for k, v in (record.get("agents") or {}).items()},
         })
     return out
+
+
+def _first_heading(path: Path) -> str:
+    """The document's first heading, or "" when there is none or no file."""
+    if not path.exists():
+        return ""
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        m = re.match(r"^#{1,6}\s+(.+)", line.strip())
+        if m:
+            return m.group(1).strip()
+    return ""
+
+
+def _review_title(slug: str) -> str:
+    # Pasted drafts audited before they were named carry a bare uuid as slug.
+    if re.fullmatch(r"[0-9a-f]{32}", slug):
+        return "Pasted draft"
+    return slug.replace("-", " ").capitalize()
 
 
 def parse_video_script(text: str) -> list[dict]:
@@ -2529,7 +2571,9 @@ def review_page(slug):
                         for x in (r.get("responses") or [])
                         if x.get("stance") == "dispute"),
     }
-    return render_template("review.html", record=record, slug=slug, counts=counts)
+    revised = ws_dir() / f"{Path(slug).name}_revised.md"
+    return render_template("review.html", record=record, slug=slug, counts=counts,
+                           revised_file=revised.name if revised.exists() else None)
 
 
 @app.route("/api/stream/<job_id>")

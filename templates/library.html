@@ -134,6 +134,35 @@
   <p class="empty-state"><span class="empty-icon">✎</span>No articles yet. <a href="/">Write the first one</a>.</p>
   {% endif %}
 
+  <div class="section" id="evaluations">
+    <div class="section-head">
+      <h2>Draft evaluations</h2>
+      <span class="hint">Drafts you brought for review, with the corrected version when you asked for one.</span>
+    </div>
+    {% if evaluations %}
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th style="width:120px">Date</th><th>Draft</th><th class="num" style="width:90px">Applied</th><th style="width:300px">Files</th></tr></thead>
+      <tbody>
+      {% for r in evaluations %}
+      <tr>
+        <td class="date">{{ r.at[:10] }}</td>
+        <td class="top">{{ r.title }}</td>
+        <td class="num">{{ r.applied }} of {{ r.raised }}</td>
+        <td>
+          <a href="/review/{{ r.slug }}">Review</a>
+          {% if r.revised_file %} · <a href="/output/{{ r.revised_file }}" download>Corrected version</a>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+    <p class="empty-state">No drafts evaluated yet. Use <a href="/">Evaluate a draft</a> on the Write page.</p>
+    {% endif %}
+  </div>
+
   <div class="section">
     <div class="section-head">
       <h2>Radar runs</h2>

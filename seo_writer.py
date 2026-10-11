@@ -6543,6 +6543,7 @@ DOCUMENT
                                 max_rounds=verify_rounds, record=record)
 
     slug = slugify(title)
+    record["title"] = title
     review_path, json_path = write_review(slug, record, output_dir, title)
 
     revised_path = None

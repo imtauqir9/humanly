@@ -65,3 +65,48 @@ def test_usage_page_carries_the_nav(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(a, "OUTPUT_DIR", tmp_path)
     html = a.app.test_client().get("/usage").get_data(as_text=True)
     assert 'href="/library"' in html and 'href="/"' in html
+
+
+def _evaluation(out: Path, slug: str, revised: str | None = None, title: str | None = None):
+    record = {"outcome": "passed", "finished_at": "2026-10-10T23:38:00+00:00",
+              "rounds": [{"issues": [{"id": "i1"}, {"id": "i2"}], "applied": ["i1"]}]}
+    if title:
+        record["title"] = title
+    (out / f"{slug}_review.json").write_text(json.dumps(record), encoding="utf-8")
+    if revised is not None:
+        (out / f"{slug}_revised.md").write_text(revised, encoding="utf-8")
+
+
+def test_library_lists_draft_evaluations_with_the_corrected_version(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(a, "OUTPUT_DIR", tmp_path)
+    uuid_slug = "838f0d44ae7e4e1b9651e0dfee518893"
+    _evaluation(tmp_path, uuid_slug, revised="# Why Agents Need Harnesses\n\nbody")
+    _evaluation(tmp_path, "unrevised-draft", title="An Unrevised Draft")
+    _article(tmp_path, "my-article", "My Article")
+    _evaluation(tmp_path, "my-article")            # an article's audit stays on its card
+    html = a.app.test_client().get("/library").get_data(as_text=True)
+    section = html[html.index('id="evaluations"'):html.index("Radar runs")]
+    assert "Why Agents Need Harnesses" in section     # named from the corrected version's heading
+    assert f'href="/output/{uuid_slug}_revised.md" download>Corrected version' in section
+    assert "An Unrevised Draft" in section and "unrevised-draft_revised.md" not in section
+    assert "1 of 2" in section
+    assert "my-article" not in section
+
+
+def test_review_page_offers_the_corrected_version_only_when_there_is_one(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(a, "OUTPUT_DIR", tmp_path)
+    _evaluation(tmp_path, "fixed", revised="# Fixed\n")
+    _evaluation(tmp_path, "untouched")
+    client = a.app.test_client()
+    assert 'href="/output/fixed_revised.md" download>Download corrected version' in \
+        client.get("/review/fixed").get_data(as_text=True)
+    assert "Download corrected version" not in client.get("/review/untouched").get_data(as_text=True)
+
+
+def test_pasted_drafts_are_named_from_their_text_not_a_uuid():
+    assert a._pasted_draft_name("Intro line\n\n## Real Title\nbody") == "Real Title"
+    assert a._pasted_draft_name("one two three four five six seven eight nine") == \
+        "one two three four five six seven eight"
+    # Passed on the command line, so it must never read as a flag.
+    assert a._pasted_draft_name("- bullet first\nmore") == "bullet first"
+    assert a._pasted_draft_name("# --apply everything") == "apply everything"

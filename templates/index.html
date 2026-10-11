@@ -836,7 +836,10 @@ auditForm.addEventListener('submit', async (e) => {
       statusBadge.className = 'status-badge success';
       if (payload.review_slug) {
         statusBadge.innerHTML =
-          `Audit complete. <a href="/review/${encodeURIComponent(payload.review_slug)}">Read the review &rarr;</a>`;
+          `Audit complete. <a href="/review/${encodeURIComponent(payload.review_slug)}">Read the review &rarr;</a>` +
+          (payload.revised_file
+            ? ` &middot; <a href="/output/${encodeURIComponent(payload.revised_file)}" download>Download the corrected version</a>`
+            : (document.getElementById('auditApply').checked ? ' &middot; No corrections were needed.' : ''));
         window.open(`/review/${encodeURIComponent(payload.review_slug)}`, '_blank');
       } else {
         statusBadge.textContent = 'Audit complete, but no review file was produced.';

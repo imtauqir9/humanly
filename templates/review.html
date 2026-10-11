@@ -81,6 +81,7 @@
   </div>
   <div class="subbar">
     <a class="back" href="/library">&larr; Back to the library</a>
+    {% if revised_file %}<a class="btn btn-primary sm" href="/output/{{ revised_file }}" download>Download corrected version</a>{% endif %}
     <a class="btn btn-quiet sm" href="/output/{{ slug }}_review.md" target="_blank">Markdown</a>
     <a class="btn btn-quiet sm" href="/output/{{ slug }}_review.json" target="_blank">JSON</a>
   </div>
