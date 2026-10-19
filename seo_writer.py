@@ -1256,8 +1256,9 @@ Return ONLY the full revised article."""
 #
 # A stock photo next to "the simple version" explains nothing. The writer
 # leaves one [DIAGRAM: title | Shows: ...] marker in that section; Claude turns
-# it into a small structured spec - boxes and arrows, a cycle, stacked layers or
-# side-by-side columns, never free-form drawing - and one layout is emitted
+# it into a small structured spec - boxes and arrows, a cycle, stacked layers,
+# side-by-side columns, overlapping sets or a labelled grid, never free-form
+# drawing - and one layout is emitted
 # twice: SVG inline in the HTML, PNG for the Markdown and the DOCX. No browser,
 # no cairo, no fonts to install: Pillow ships a scalable face of its own.
 
@@ -1266,13 +1267,17 @@ DIAGRAM_MARKER_RE = re.compile(
 DIAGRAM_MAX_NODES = 8
 
 DIAGRAM_SPEC_SCHEMA = """{
-  "type": "flow | cycle | layers | compare",
+  "type": "flow | cycle | layers | compare | venn | grid",
   "title": "<what the diagram is called, under 60 characters>",
+  "alt": "<one sentence describing what the picture shows, for a reader who cannot see it, under 30 words>",
   "nodes": [ {"label": "<2-5 words>", "note": "<optional detail, under 12 words>"} ],
   "edges": [ {"from": 0, "to": 2, "label": "<optional, under 4 words>"} ],
   "columns": [ {"title": "<column title>", "items": ["<under 8 words>", "..."]} ],
+  "overlap": "<venn only: what all the sets share, 2-6 words>",
+  "rows": [ {"label": "<grid only: row label>", "cells": ["<under 6 words, one per column>"]} ],
   "caption": "<the one sentence a reader should take away, under 20 words>"
 }"""
+DIAGRAM_KINDS = {"flow", "cycle", "layers", "compare", "venn", "grid"}
 
 
 def _section_around(content: str, pos: int) -> str:
@@ -1288,14 +1293,30 @@ def _clean_diagram_spec(spec: dict) -> dict | None:
     if not isinstance(spec, dict):
         return None
     kind = str(spec.get("type", "flow")).strip().lower()
-    if kind not in {"flow", "cycle", "layers", "compare"}:
+    if kind not in DIAGRAM_KINDS:
         kind = "flow"
+    clip = lambda v, n: " ".join(str(v or "").split())[:n]
     out = {
         "type": kind,
-        "title": " ".join(str(spec.get("title", "")).split())[:70],
-        "caption": " ".join(str(spec.get("caption", "") or "").split())[:160],
-        "nodes": [], "edges": [], "columns": [],
+        "title": clip(spec.get("title"), 70),
+        "alt": clip(spec.get("alt"), 240),
+        "caption": clip(spec.get("caption"), 160),
+        "nodes": [], "edges": [], "columns": [], "overlap": "", "rows": [],
     }
+    if kind == "grid":
+        heads = [clip(c.get("title") if isinstance(c, dict) else c, 30)
+                 for c in (spec.get("columns") or [])][:4]
+        heads = [h for h in heads if h]
+        for r in (spec.get("rows") or [])[:5]:
+            if not isinstance(r, dict):
+                continue
+            label = clip(r.get("label"), 30)
+            cells = [clip(c, 50) for c in (r.get("cells") or [])][:len(heads)]
+            if label and any(cells):
+                out["rows"].append({"label": label,
+                                    "cells": cells + [""] * (len(heads) - len(cells))})
+        out["columns"] = [{"title": h, "items": []} for h in heads]
+        return out if len(heads) >= 2 and len(out["rows"]) >= 2 else None
     if kind == "compare":
         for c in (spec.get("columns") or [])[:3]:
             if not isinstance(c, dict):
@@ -1317,6 +1338,10 @@ def _clean_diagram_spec(spec: dict) -> dict | None:
                                  "note": " ".join(str(n.get("note", "") or "").split())[:70]})
     if len(out["nodes"]) < 2:
         return None
+    if kind == "venn":
+        out["nodes"] = out["nodes"][:3]
+        out["overlap"] = clip(spec.get("overlap"), 40)
+        return out
     count = len(out["nodes"])
     for e in (spec.get("edges") or []):
         try:
@@ -1345,12 +1370,20 @@ Pick the one shape that fits:
 - "compare": 2-3 columns of 3-5 short items each (this versus that). If the
   section really contrasts just two things, this is the shape: a two-node flow
   or two-layer stack shows nothing.
+- "venn": 2-3 overlapping sets (disciplines, skills, concerns that share
+  ground), with "overlap" naming what sits where they all meet
+- "grid": a matrix, 2-4 "columns" (titles only) by 2-5 "rows", each row a label
+  and one short cell per column (a blueprint, a story map, options against
+  criteria)
 
 Rules: labels are 2-5 words a beginner understands; a note adds one detail only
 when it earns its place; no fact, price or figure that is not in the section;
 at most {DIAGRAM_MAX_NODES} nodes. For "compare" fill "columns" and leave "nodes"
-empty. For the others fill "nodes" and leave "columns" empty; "edges" is optional
-and only for arrows that are not simply step-to-next-step.
+empty. For "grid" fill "columns" and "rows". For the others fill "nodes" and
+leave "columns" empty; "edges" is optional and only for arrows that are not
+simply step-to-next-step. "alt" describes what is drawn and how the parts
+relate, so a screen reader or an image search learns what the diagram says;
+never "diagram" or "image" alone.
 
 Return ONLY valid JSON in exactly this shape:
 {DIAGRAM_SPEC_SCHEMA}"""
@@ -1406,6 +1439,11 @@ def _t(x, y, text, role, bold=False, color=None, anchor="middle") -> dict:
 def _r(x, y, w, h, fill=None, stroke=None, rx=10) -> dict:
     return {"kind": "rect", "x": x, "y": y, "w": w, "h": h,
             "fill": fill, "stroke": stroke, "rx": rx}
+
+
+def _c(cx, cy, r, color) -> dict:
+    """A translucent set for a Venn: tinted fill, solid rim, in one colour."""
+    return {"kind": "circle", "cx": cx, "cy": cy, "r": r, "color": color}
 
 
 def _a(x1, y1, x2, y2, label="", dashed=False) -> dict:
@@ -1549,6 +1587,79 @@ def _lay_compare(spec: dict, els: list, y: float) -> float:
     return y + head_h + body_h
 
 
+_VENN_COLORS = ("#3b5bdb", "#0ca678", "#e8590c")
+
+
+def _lay_venn(spec: dict, els: list, y: float) -> float:
+    nodes, W = spec["nodes"], _DG_W
+    k = len(nodes)
+    if k == 2:
+        r = 190
+        centres = [(W / 2 - 125, y + r), (W / 2 + 125, y + r)]
+    else:
+        r = 175
+        centres = [(W / 2 - 115, y + r), (W / 2 + 115, y + r), (W / 2, y + r + 195)]
+    mx = sum(c[0] for c in centres) / k
+    my = sum(c[1] for c in centres) / k
+    for (cx, cy), color in zip(centres, _VENN_COLORS):
+        els.append(_c(cx, cy, r, color))
+    for (cx, cy), nd in zip(centres, nodes):
+        # Each label sits in the part of its circle nobody else covers: pushed
+        # away from the shared centre.
+        dx, dy = cx - mx, cy - my
+        d = (dx * dx + dy * dy) ** 0.5 or 1.0
+        lx, ly = cx + dx / d * r * 0.5, cy + dy / d * r * 0.5
+        lines = _dg_wrap(nd["label"], 190, _DG_FONT["label"], 2)
+        note = _dg_wrap(nd["note"], 190, _DG_FONT["note"], 2) if nd.get("note") else []
+        ty = ly - (len(lines) + len(note)) * 10 + _DG_FONT["label"] / 2
+        for line in lines:
+            els.append(_t(lx, ty, line, "label", bold=True))
+            ty += _DG_FONT["label"] + 4
+        for line in note:
+            els.append(_t(lx, ty, line, "note", color=_DG_COLORS["muted"]))
+            ty += _DG_FONT["note"] + 3
+    if spec.get("overlap"):
+        lines = _dg_wrap(spec["overlap"], 130, _DG_FONT["note"], 3)
+        ty = my - len(lines) * 9 + _DG_FONT["note"] / 2
+        for line in lines:
+            els.append(_t(mx, ty, line, "note", bold=True))
+            ty += _DG_FONT["note"] + 3
+    return max(cy for _, cy in centres) + r
+
+
+def _lay_grid(spec: dict, els: list, y: float) -> float:
+    heads, rows, W, pad = [c["title"] for c in spec["columns"]], spec["rows"], _DG_W, _DG_PAD
+    label_w = 220
+    col_w = (W - 2 * pad - label_w) / len(heads)
+    head_h, line_h = 52, _DG_FONT["item"] + 6
+    els.append(_r(pad + label_w, y, W - 2 * pad - label_w, head_h,
+                  fill=_DG_COLORS["accent"], stroke=None, rx=8))
+    for j, h in enumerate(heads):
+        x = pad + label_w + j * col_w
+        els.append(_t(x + col_w / 2, y + head_h / 2 + 7, _dg_wrap(h, col_w, _DG_FONT["col"], 1)[0],
+                      "col", bold=True, color=_DG_COLORS["headtext"]))
+    y += head_h + 8
+    for i, row in enumerate(rows):
+        wrapped = [_dg_wrap(c, col_w - 16, _DG_FONT["item"], 3) if c else [] for c in row["cells"]]
+        label = _dg_wrap(row["label"], label_w - 8, _DG_FONT["label"], 2)
+        h = max(56, 24 + max([len(w) for w in wrapped] + [len(label)]) * line_h)
+        els.append(_r(pad, y, label_w - 8, h, fill=_DG_COLORS["box"], stroke=_DG_COLORS["border"], rx=8))
+        ty = y + (h - len(label) * (_DG_FONT["label"] + 4)) / 2 + _DG_FONT["label"] - 3
+        for line in label:
+            els.append(_t(pad + (label_w - 8) / 2, ty, line, "label", bold=True))
+            ty += _DG_FONT["label"] + 4
+        for j, lines in enumerate(wrapped):
+            x = pad + label_w + j * col_w
+            els.append(_r(x + 4, y, col_w - 8, h, fill=_tint(0.4 + 0.6 * (i % 2)),
+                          stroke=_DG_COLORS["border"], rx=8))
+            ty = y + (h - len(lines) * line_h) / 2 + _DG_FONT["item"]
+            for line in lines:
+                els.append(_t(x + col_w / 2, ty, line, "item"))
+                ty += line_h
+        y += h + 8
+    return y - 8
+
+
 def layout_diagram(spec: dict) -> dict:
     """Turn a cleaned spec into primitives (rects, text lines, arrows) on a
     1200-wide canvas. Both renderers draw exactly this."""
@@ -1562,6 +1673,10 @@ def layout_diagram(spec: dict) -> dict:
     kind = spec["type"]
     if kind == "compare":
         y = _lay_compare(spec, els, y)
+    elif kind == "venn":
+        y = _lay_venn(spec, els, y)
+    elif kind == "grid":
+        y = _lay_grid(spec, els, y)
     elif kind == "layers":
         y = _lay_layers(spec, els, y)
     else:
@@ -1596,6 +1711,10 @@ def diagram_svg(layout: dict) -> str:
             out.append(f'<rect x="{e["x"]:.1f}" y="{e["y"]:.1f}" width="{e["w"]:.1f}" '
                        f'height="{e["h"]:.1f}" rx="{e["rx"]}" fill="{e["fill"] or "none"}" '
                        f'stroke="{e["stroke"] or "none"}" stroke-width="2"/>')
+        elif k == "circle":
+            out.append(f'<circle cx="{e["cx"]:.1f}" cy="{e["cy"]:.1f}" r="{e["r"]:.1f}" '
+                       f'fill="{e["color"]}" fill-opacity="0.16" stroke="{e["color"]}" '
+                       'stroke-width="2.5"/>')
         elif k == "text":
             weight = ' font-weight="bold"' if e["bold"] else ""
             out.append(f'<text x="{e["x"]:.1f}" y="{e["y"]:.1f}" font-size="{e["size"]}" '
@@ -1669,7 +1788,18 @@ def diagram_png(layout: dict, path: Path, scale: float = 1.5) -> bool:
     S = lambda v: v * scale
     for e in layout["elements"]:
         k = e["kind"]
-        if k == "rect":
+        if k == "circle":
+            # Pillow has no fill opacity on an RGB canvas: draw the set on a
+            # transparent layer and composite it, so overlaps blend.
+            box = [S(e["cx"] - e["r"]), S(e["cy"] - e["r"]),
+                   S(e["cx"] + e["r"]), S(e["cy"] + e["r"])]
+            layer = Image.new("RGBA", im.size, (0, 0, 0, 0))
+            rgb = tuple(int(e["color"][i:i + 2], 16) for i in (1, 3, 5))
+            ImageDraw.Draw(layer).ellipse(box, fill=rgb + (41,))
+            im = Image.alpha_composite(im.convert("RGBA"), layer).convert("RGB")
+            draw = ImageDraw.Draw(im)
+            draw.ellipse(box, outline=e["color"], width=max(2, int(2.5 * scale)))
+        elif k == "rect":
             draw.rounded_rectangle(
                 [S(e["x"]), S(e["y"]), S(e["x"] + e["w"]), S(e["y"] + e["h"])],
                 radius=S(e["rx"]), fill=e["fill"], outline=e["stroke"],
@@ -1718,9 +1848,10 @@ def render_diagrams(content: str, slug: str, output_dir: Path) -> dict[str, dict
         svg = diagram_svg(layout)
         (output_dir / svg_name).write_text(svg, encoding="utf-8")
         png_ok = diagram_png(layout, output_dir / png_name)
-        parts = len(spec["nodes"]) or len(spec["columns"])
+        parts = len(spec["nodes"]) or len(spec["rows"]) or len(spec["columns"])
         out[m.group(0)] = {
-            "alt": spec["title"] or title, "caption": spec["caption"] or shows,
+            "alt": spec.get("alt") or spec["title"] or title,
+            "caption": spec["caption"] or shows,
             "type": spec["type"], "svg": svg, "svg_name": svg_name,
             "png": png_name if png_ok else None,
         }
@@ -3433,18 +3564,39 @@ Long-tail Keywords: {long_tail_kws}
 OUTLINE REQUIREMENTS
 Produce a detailed markdown outline with:
 1. H1 (the article title)
-2. Introduction section ({profile['intro']} words)
+2. Introduction section ({profile['intro']} words). Its first one or two sentences
+   define the topic outright ("X is ...") so they can be lifted whole as a
+   featured snippet; the hook and the stakes come after the definition.
 3. {profile['sections']} H2 main sections, each with {profile['subsections']} H3 subsections,
    arranged as the three LEVELS above: the first H2 is Level 1, the last H2 before
    the FAQ is Level 3, the rest are Level 2. Write "Level: 1", "Level: 2" or
    "Level: 3" directly under each H2 so the writer knows the altitude.
-4. For each section: brief description of what to cover (1–2 sentences)
-5. Exactly one diagram marker inside the Level 1 section, and optionally one more
-   in a Level 2 section where a process, a stack or a comparison is clearer drawn
-   than described, each formatted as:
+   - Headings are keyword clusters where the section honestly covers them: an H2
+     may name two to four related long-tail terms from the list above ("Identity,
+     access management and zero trust") so one heading answers several searches.
+     Never a term the section does not actually cover.
+   - When the Level 2 sections are parallel parts of one taxonomy (components,
+     roles, layers, phases), number them ("1. Data ingestion") so the reader can
+     see the map.
+   - If readers commonly confuse the topic with a neighbour, one Level 2 H2 is
+     "How <topic> differs from <neighbour>", to answer the "X vs Y" search
+     directly. Skip it when there is no real neighbour.
+   - Where a section walks through several parallel items, note "bold-label
+     paragraphs" against it: the writer opens each item's paragraph with a short
+     **Bold label:** and two or three sentences.
+4. For each section: brief description of what to cover (1–2 sentences), and the
+   one concrete example, worked case or first-hand observation it will carry.
+5. Diagrams are the main visuals: they show how things relate, which a stock photo
+   cannot. Exactly one diagram marker inside the Level 1 section, plus one in each
+   Level 2 section where a process, a stack, overlapping disciplines, a matrix or a
+   comparison is clearer drawn than described, each formatted as:
    [DIAGRAM: <title> | Shows: <the one thing the picture must make obvious>]
-   and {profile['images']} image placement markers elsewhere (never in Level 1), formatted as:
-   [IMAGE: <descriptive alt text> | Query: <google image search query>]
+   Across the article, use {profile['images']} visuals in total, at least half of
+   them diagrams. The rest are image markers (never in Level 1), and only for a
+   real photo or screenshot of a real, named thing (a product's dashboard, a
+   piece of hardware, a person quoted). Never generic stock imagery: no
+   handshakes, glowing brains, people pointing at screens. Formatted as:
+   [IMAGE: <alt text describing exactly what the picture shows> | Query: <google image search query>]
 6. At least one comparison table, placed in whichever section it genuinely belongs
    to. Note its columns in the outline. Tables are the passage an answer engine is
    most likely to quote whole, so give it real rows: prices, versions, tradeoffs,
@@ -3531,6 +3683,17 @@ INSTRUCTIONS
 14. Keep every [DIAGRAM: ... | Shows: ...] marker exactly where the outline puts it.
 15. Internal links only to the URLs in INTERNAL LINKS, if any. Never write a link
     whose target is "#" or a page that does not exist.
+16. Open the introduction with a plain one- or two-sentence definition of the topic.
+17. Every H2 section carries at least one concrete example, worked case, named tool
+    or standard, or first-hand observation. Name the real products, protocols and
+    standards the topic involves rather than categories ("Kafka", "OpenTelemetry",
+    not "a streaming platform"); any figure about them still comes from the FACT PACK.
+18. Where the outline marks bold-label paragraphs, open each paragraph with a short
+    **Bold label:** followed by two or three sentences. Never as bullets.
+19. No template across sections. Sections must not open the same way ("A good
+    architect...", "When it comes to...") or close on the same line ("The goal is
+    to...", "Ultimately..."). Vary how each one starts and stop when the point is
+    made. No rhetorical questions in the body; FAQ headings are the only questions.
 {internal_links_block(research.get("internal_links", []))}
 Write the full article now. Output the article content ONLY."""
 
@@ -3597,6 +3760,8 @@ _HUMANIZER_PATTERNS = """
 14. Excessive boldface — bold only terms that genuinely need emphasis; remove decorative bolding.
 
 15. Inline-header bullet lists — "- **Speed:** Faster because…" → Convert to prose or clean bullets without bold headers.
+    This is about bullets only. A paragraph that opens with a short bold label ("**Latency:** Two or
+    three sentences...") is a deliberate skimming aid: keep it, label and all.
 
 16. Title Case In Headings — change to sentence case (first word + proper nouns only).
 
@@ -3622,6 +3787,16 @@ _HUMANIZER_PATTERNS = """
 
 24. Generic positive conclusions — "The future looks bright", "exciting times lie ahead", "a step in the right direction"
     → End with a specific fact, next step, or genuine observation.
+
+### Repetition across sections
+25. Templated section openers — several sections starting the same way ("A Forward Deployed Architect…",
+    "When it comes to…", "In this section…") → Give each section its own first sentence, led by its subject.
+
+26. Templated section closers — sections ending on the same summing-up line ("The goal is to…",
+    "The objective is to…", "Ultimately, …", "In short, …") → Cut the closer; end on the last real point.
+
+27. Rhetorical questions in the body — "So what does this mean for you?", "Why does this matter?"
+    → State the answer instead. FAQ headings are the only questions an article needs.
 
 ### Voice and personality (beyond removing patterns)
 - Vary sentence length. Short punchy sentences mixed with longer ones.
@@ -3653,6 +3828,7 @@ STRUCTURAL CONSTRAINTS (never break these):
 - Do NOT change any number, price, date, version or "(Source: ...)" citation
 - Do NOT soften, hedge or remove first-person opinions ("I think", "in my experience"):
   those are the author's own and are the point
+- Keep paragraphs that open with a **Bold label:**, and keep comparison tables intact
 
 {voice_block((research or {}).get("voice_profile", ""))}
 AI PATTERN CHECKLIST — fix every instance you find:
@@ -3911,7 +4087,12 @@ _TELL_PHRASES = (
     "it is worth noting", "needless to say",
     # 20 - knowledge-cutoff disclaimers
     "as of my last update", "while specific details are limited",
+    # 26 - templated section closers
+    "the goal is to", "the objective is to", "the aim is to", "in short,",
 )
+
+# How many sections may open with the same words before it reads as a template.
+REPEATED_OPENER_MIN = 3
 
 # Words that stay lowercase in sentence case, so a heading full of them is not
 # evidence of title casing.
@@ -3938,6 +4119,44 @@ def _scannable_lines(text: str) -> list[str]:
             continue
         lines.append(line)
     return lines
+
+
+def _section_openers(lines: list[str]) -> dict:
+    """First three words of the first prose paragraph under each heading, counted.
+    The same opener under many headings is the template no wordlist catches."""
+    counts, waiting = {}, False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            waiting = True
+            continue
+        if not waiting or not stripped or stripped.startswith(("|", "!", "*Diagram", ">")):
+            continue
+        waiting = False
+        words = re.findall(r"[A-Za-z0-9'’-]+", stripped.lstrip("-* "))[:3]
+        if len(words) == 3:
+            key = " ".join(words).lower()
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _body_questions(lines: list[str]) -> list[str]:
+    """Question sentences in body prose. Headings are skipped, and so is the FAQ
+    section, where questions are the point."""
+    found, in_faq = [], False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            if stripped.startswith("## "):
+                low = stripped.lower()
+                in_faq = "faq" in low or "frequently asked" in low
+            continue
+        if in_faq or not stripped or stripped.startswith("|"):
+            continue
+        for sentence in re.split(r"(?<=[.!?])\s+", stripped):
+            if sentence.rstrip("*_)\"'’” ").endswith("?"):
+                found.append(sentence.strip())
+    return found
 
 
 def _is_title_case(heading: str) -> bool:
@@ -3994,6 +4213,18 @@ def scan_ai_tells(text: str) -> dict:
     if inline_headers:
         structural.append({"kind": "inline_header_bullet", "count": len(inline_headers),
                            "examples": inline_headers[:5]})
+
+    openers = _section_openers(lines)
+    repeated = {o: n for o, n in openers.items() if n >= REPEATED_OPENER_MIN}
+    if repeated:
+        structural.append({"kind": "repeated_section_opener", "count": sum(repeated.values()),
+                           "examples": [f'"{o}..." opens {n} sections'
+                                        for o, n in sorted(repeated.items(), key=lambda x: -x[1])]})
+
+    questions = _body_questions(lines)
+    if questions:
+        structural.append({"kind": "rhetorical_question", "count": len(questions),
+                           "examples": questions[:5]})
 
     em_dashes = body.count("—")
     if em_dashes:

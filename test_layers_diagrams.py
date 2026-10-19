@@ -105,6 +105,18 @@ def test_clean_diagram_spec_handles_every_shape_and_junk():
     assert len(cmp_["columns"]) == 2 and len(cmp_["columns"][0]["items"]) == 5
     assert sw._clean_diagram_spec({"type": "compare", "columns": [{"title": "X", "items": ["a"]}]}) is None
 
+    venn = sw._clean_diagram_spec({"type": "venn", "overlap": "shared",
+                                   "nodes": ["A", "B", "C", "D"]})
+    assert len(venn["nodes"]) == 3 and venn["overlap"] == "shared"
+    grid = sw._clean_diagram_spec({"type": "grid", "columns": ["X", {"title": "Y"}],
+                                   "rows": [{"label": "r1", "cells": ["a"]},
+                                            {"label": "r2", "cells": ["b", "c", "dropped"]},
+                                            {"label": "", "cells": ["no label"]}]})
+    assert [c["title"] for c in grid["columns"]] == ["X", "Y"]
+    assert grid["rows"] == [{"label": "r1", "cells": ["a", ""]}, {"label": "r2", "cells": ["b", "c"]}]
+    assert sw._clean_diagram_spec({"type": "grid", "columns": ["X"],
+                                   "rows": [{"label": "r", "cells": ["a"]}] * 2}) is None
+
     too_many = sw._clean_diagram_spec({"type": "layers", "nodes": [f"L{i}" for i in range(20)]})
     assert len(too_many["nodes"]) == sw.DIAGRAM_MAX_NODES
 
@@ -127,6 +139,16 @@ SHAPES = [
      "nodes": [], "edges": [],
      "columns": [{"title": "Naive RAG", "items": ["Fast to ship", "Chunks of text", "Struggles with relationships between many things"]},
                  {"title": "Knowledge graph", "items": ["Slow to model", "Entities and edges", "Answers multi-hop questions"]}]},
+    {"type": "venn", "title": "Where the architect works", "caption": "The job is the middle.",
+     "nodes": [{"label": "User experience", "note": "what people need"}, {"label": "Business", "note": ""},
+               {"label": "Engineering", "note": "what can ship"}],
+     "edges": [], "columns": [], "overlap": "The FDA's patch", "rows": []},
+    {"type": "grid", "title": "Service blueprint", "caption": "Each row is a layer of the same journey.",
+     "nodes": [], "edges": [], "overlap": "",
+     "columns": [{"title": "Sign up", "items": []}, {"title": "First run", "items": []}, {"title": "Renew", "items": []}],
+     "rows": [{"label": "Customer", "cells": ["Fills the form", "Imports data", "Gets an invoice"]},
+              {"label": "Frontstage", "cells": ["Onboarding email", "", "Renewal reminder"]},
+              {"label": "Backstage", "cells": ["Account created in Okta", "Kafka topic per tenant", "Billing job"]}]},
 ]
 
 
@@ -139,7 +161,8 @@ def test_every_shape_renders_to_valid_svg_and_a_png(tmp_path: Path, spec):
     root = ET.fromstring(svg)
     assert root.tag.endswith("svg")
     texts = " ".join(t.text or "" for t in root.iter() if t.tag.endswith("text"))
-    labels = [n["label"] for n in spec["nodes"]] + [c["title"] for c in spec["columns"]]
+    labels = ([n["label"] for n in spec["nodes"]] + [c["title"] for c in spec["columns"]]
+              + [r["label"] for r in spec.get("rows", [])])
     for label in labels:
         assert label in texts, label
     assert spec["title"] in texts and sw.AUTHOR_NAME in texts
@@ -147,6 +170,10 @@ def test_every_shape_renders_to_valid_svg_and_a_png(tmp_path: Path, spec):
         assert "polyline" in svg and "repeats" in texts
     if spec["type"] == "flow":
         assert "stroke-dasharray" in svg and "hit" in texts
+    if spec["type"] == "venn":
+        assert svg.count("<circle") == 3 and "The FDA's patch" in texts
+    if spec["type"] == "grid":
+        assert "Kafka topic per tenant" in texts
 
     png = tmp_path / "d.png"
     assert sw.diagram_png(layout, png) is True
@@ -172,6 +199,16 @@ def test_render_and_inject_diagrams_end_to_end(tmp_path: Path, monkeypatch):
     assert "![Cache path](slug_diagram_1.png)" in out
     assert "*Diagram: Hits skip the model.*" in out
     assert "[DIAGRAM:" not in out
+
+
+def test_diagram_alt_text_describes_the_picture(tmp_path: Path, monkeypatch):
+    spec = {"type": "flow", "title": "Cache path", "caption": "c",
+            "alt": "Three boxes: a question is checked against the cache before the model is called.",
+            "nodes": [{"label": "Ask"}, {"label": "Check cache"}, {"label": "Answer"}]}
+    monkeypatch.setattr(sw, "call_claude", lambda prompt, **kw: json.dumps(spec))
+    article = "## S\n\n[DIAGRAM: Cache path | Shows: order]\n"
+    out = sw.inject_diagrams(article, sw.render_diagrams(article, "slug", tmp_path))
+    assert "![Three boxes: a question is checked against the cache" in out
 
 
 def test_unusable_spec_drops_the_marker(tmp_path: Path, monkeypatch):
@@ -235,3 +272,19 @@ def test_outline_writer_and_auditor_all_teach_in_layers(monkeypatch):
     assert joined.count("[DIAGRAM:") >= 3
     assert joined.count("No throat-clearing.") >= 5, "voice profile missing from a prompt"
     assert "10. LAYERING" in joined
+
+
+def test_outline_and_writer_carry_the_article_style_lessons(monkeypatch):
+    seen = []
+    monkeypatch.setattr(sw, "call_claude", lambda prompt, system="", **kw: (seen.append(prompt), "# T")[1])
+    research = {"keywords": {}, "semantic_analysis": {}, "take": "", "style_samples": "",
+                "voice_profile": "", "fact_pack": {"facts": [], "gaps": []}}
+    sw.generate_outline("T", "k", research, "- t1")
+    sw.write_content("T", "k", "outline", research, "- t1")
+    sw.humanize_content("body", research)
+    outline, draft, humanizer = seen[0], seen[1], seen[2]
+    assert "featured snippet" in outline and "keyword clusters" in outline
+    assert "differs from" in outline and "bold-label" in outline
+    assert "them diagrams" in outline and "Never generic stock" in outline
+    assert "No template across sections" in draft and "No rhetorical questions" in draft
+    assert "Templated section openers" in humanizer and "This is about bullets only" in humanizer
