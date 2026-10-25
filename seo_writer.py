@@ -480,8 +480,18 @@ def _api_message(e: "anthropic.APIStatusError") -> str:
 
 
 def call_claude(prompt: str, system: str = "", max_tokens: int = 16000,
-                model: str = MODEL, effort: str = "low") -> str:
-    messages = [{"role": "user", "content": prompt}]
+                model: str = MODEL, effort: str = "low",
+                images: list[bytes] | None = None) -> str:
+    """One turn. `images` are PNG bytes shown to the model ahead of the prompt,
+    so it can look at what the pipeline drew."""
+    content = prompt
+    if images:
+        import base64
+        content = [{"type": "image", "source": {
+                       "type": "base64", "media_type": "image/png",
+                       "data": base64.b64encode(img).decode("ascii")}}
+                   for img in images] + [{"type": "text", "text": prompt}]
+    messages = [{"role": "user", "content": content}]
     kwargs = {
         "model": model,
         "max_tokens": max_tokens,
@@ -1254,30 +1264,105 @@ Return ONLY the full revised article."""
 # Diagrams: drawn by the pipeline, not searched for
 # ---------------------------------------------------------------------------
 #
-# A stock photo next to "the simple version" explains nothing. The writer
-# leaves one [DIAGRAM: title | Shows: ...] marker in that section; Claude turns
-# it into a small structured spec - boxes and arrows, a cycle, stacked layers,
-# side-by-side columns, overlapping sets or a labelled grid, never free-form
-# drawing - and one layout is emitted
-# twice: SVG inline in the HTML, PNG for the Markdown and the DOCX. No browser,
-# no cairo, no fonts to install: Pillow ships a scalable face of its own.
+# A stock photo next to "the simple version" explains nothing. Pictures here
+# exist to teach, so the pipeline decides what to draw before it draws:
+#
+#   plan      plan_visuals() reads the finished article, names the ideas a
+#             reader is most likely to get wrong, keeps the outline's markers
+#             that show one of them, drops the rest, adds what is missing and
+#             picks one signature visual that carries the whole piece.
+#   spec      Claude turns each [DIAGRAM: title | Shows: ...] marker into a
+#             small structured spec - one of DIAGRAM_KINDS, never free drawing -
+#             with a highlight (the part that is the point) and numbered callouts.
+#   layout    one geometry (rects, text, arrows, badges) on a 1200-wide canvas,
+#             in one of three styles.
+#   render    that geometry twice: SVG inline in the HTML, PNG for the Markdown
+#             and the DOCX. No browser, no cairo: Pillow ships a face of its own.
+#   critique  Claude looks at the PNG and keeps it, redraws it or drops it.
+#
+# The spec is saved next to the files, so the HTML can step through a diagram
+# and a re-render can rebuild it.
 
 DIAGRAM_MARKER_RE = re.compile(
     r"\[DIAGRAM:\s*([^|\]]+?)\s*\|\s*Shows:\s*([^\]]+?)\s*\]", re.IGNORECASE)
 DIAGRAM_MAX_NODES = 8
+DIAGRAM_SIGNATURE_MAX_NODES = 10
+DIAGRAM_MAX_VISUALS = 5
+DIAGRAM_CRITIQUE_ROUNDS = 2
+DIAGRAM_STYLES = ("clean", "bold", "sketch")
+DIAGRAM_STYLE = os.environ.get("DIAGRAM_STYLE", "clean").strip().lower()
+# Trailing marker flags: "| Signature" carries the article, "| Explore" becomes
+# a chart with a slider on the web, "| Summary" is the closing mental model.
+DIAGRAM_FLAGS = ("signature", "explore", "summary")
 
 DIAGRAM_SPEC_SCHEMA = """{
-  "type": "flow | cycle | layers | compare | venn | grid",
+  "type": "flow | cycle | layers | compare | venn | grid | timeline | tree | graph | hub | funnel | before_after | quadrant | spectrum | bar | line",
   "title": "<what the diagram is called, under 60 characters>",
   "alt": "<one sentence describing what the picture shows, for a reader who cannot see it, under 30 words>",
-  "nodes": [ {"label": "<2-5 words>", "note": "<optional detail, under 12 words>"} ],
+  "nodes": [ {"label": "<2-5 words>", "note": "<optional detail, under 12 words>", "x": <quadrant and spectrum only: 0-1>, "y": <quadrant only: 0-1>} ],
   "edges": [ {"from": 0, "to": 2, "label": "<optional, under 4 words>"} ],
   "columns": [ {"title": "<column title>", "items": ["<under 8 words>", "..."]} ],
   "overlap": "<venn only: what all the sets share, 2-6 words>",
   "rows": [ {"label": "<grid only: row label>", "cells": ["<under 6 words, one per column>"]} ],
+  "axes": {"x": "<quadrant: x axis name>", "y": "<quadrant: y axis name>", "low": "<spectrum: the left end>", "high": "<spectrum: the right end>"},
+  "quadrants": ["<quadrant only, optional: top-left name>", "<top-right>", "<bottom-left>", "<bottom-right>"],
+  "data": [ {"label": "<bar or point label>", "value": <a number copied from the section>} ],
+  "unit": "<bar and line only: $, %, hours, ...>",
+  "slider": {"label": "<explore only: what the reader sets, e.g. Your budget>", "keep": "below | above"},
+  "highlight": <index of the one node, column, row or bar that is the point; -1 for none>,
+  "callouts": [ {"target": <index>, "text": "<under 10 words: what to notice there>"} ],
   "caption": "<the one sentence a reader should take away, under 20 words>"
 }"""
-DIAGRAM_KINDS = {"flow", "cycle", "layers", "compare", "venn", "grid"}
+DIAGRAM_KINDS = {"flow", "cycle", "layers", "compare", "venn", "grid", "timeline", "tree",
+                 "graph", "hub", "funnel", "before_after", "quadrant", "spectrum", "bar",
+                 "line", "card"}
+# Kinds whose parts have an order a reader can step through on the web.
+STEP_KINDS = {"flow", "cycle", "layers", "timeline", "funnel", "tree", "graph", "card"}
+# Fewer parts than this and the picture restates a sentence.
+_MIN_NODES = {"flow": 3, "cycle": 3, "layers": 3, "timeline": 3, "funnel": 3, "hub": 4,
+              "tree": 3, "graph": 3, "venn": 2, "quadrant": 3, "spectrum": 2, "card": 3}
+
+
+def _shapes_guide(max_nodes: int) -> str:
+    return f"""- "flow": 3-{max_nodes} steps in order (a process, a pipeline, a request's path)
+- "cycle": 3-6 steps that repeat (a loop, a lifecycle)
+- "layers": 3-6 stacked levels (a stack, tiers, a hierarchy; top level first)
+- "timeline": 3-8 events in time order; each "note" is the date or when it happens
+- "funnel": 3-6 stages where each keeps fewer than the last (applicants to hires);
+  "note" carries the count when the section gives one
+- "tree": a decision or a hierarchy that branches. Node 0 is the root (the
+  question); "edges" go parent to child, labelled with the answer that leads
+  there ("yes", "under $500")
+- "graph": parts that connect in more than a straight line (an architecture,
+  services calling each other, data moving through a system); "edges" carry
+  every arrow
+- "hub": one central thing (node 0) and 3-7 parts around it (the anatomy of a
+  system, what one role touches)
+- "compare": 2-3 columns of 3-5 short items each (this versus that). If the
+  section really contrasts just two things, this is the shape: a two-node flow
+  or two-layer stack shows nothing.
+- "before_after": exactly 2 columns, the old way then the new way
+- "venn": 2-3 overlapping sets (disciplines, skills, concerns that share
+  ground), with "overlap" naming what sits where they all meet
+- "grid": a matrix, 2-4 "columns" (titles only) by 2-5 "rows", each row a label
+  and one short cell per column (a blueprint, options against criteria)
+- "quadrant": 3-8 options placed on two axes (cost against difficulty, effort
+  against impact). "axes" names x and y; each node gets "x" and "y" from 0 (low)
+  to 1 (high), judged only from what the section says
+- "spectrum": 2-6 options along one scale; "axes" low and high name its ends,
+  each node gets "x" from 0 to 1
+- "bar": 2-8 numbers worth comparing (prices, hours, counts) in "data", each
+  value copied exactly from the section, with "unit"
+- "line": 3-8 values over time in order in "data"; the labels are the times"""
+
+
+def _marker_parts(match) -> tuple[str, str, set]:
+    """A marker's title, what it must show, and its trailing flags."""
+    title = match.group(1).strip()
+    parts = [p.strip() for p in match.group(2).split("|")]
+    flags = {p.lower() for p in parts[1:] if p.lower() in DIAGRAM_FLAGS}
+    shows = " | ".join([parts[0]] + [p for p in parts[1:] if p.lower() not in DIAGRAM_FLAGS])
+    return title, shows, flags
 
 
 def _section_around(content: str, pos: int) -> str:
@@ -1289,10 +1374,79 @@ def _section_around(content: str, pos: int) -> str:
     return (before[start:] + (after if end < 0 else after[:end])).strip()
 
 
-def _clean_diagram_spec(spec: dict) -> dict | None:
+_NUM_RE = re.compile(r"(?<![\w.])-?\d[\d,]*(?:\.\d+)?")
+
+
+def _numbers_in(text: str) -> set:
+    """Every number the text states, so a chart can only plot what was written."""
+    out = set()
+    for m in _NUM_RE.finditer(str(text)):
+        try:
+            out.add(round(float(m.group(0).replace(",", "")), 4))
+        except ValueError:
+            continue
+    return out
+
+
+def _to_number(value) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    m = _NUM_RE.search(str(value or ""))
+    try:
+        return float(m.group(0).replace(",", "")) if m else None
+    except ValueError:
+        return None
+
+
+def _unit01(value, default: float = 0.5) -> float:
+    n = _to_number(value)
+    return default if n is None else max(0.0, min(1.0, n))
+
+
+def _part_count(spec: dict) -> int:
+    kind = spec["type"]
+    if kind in ("bar", "line"):
+        return len(spec["data"])
+    if kind == "grid":
+        return len(spec["rows"])
+    if kind in ("compare", "before_after"):
+        return len(spec["columns"])
+    return len(spec["nodes"])
+
+
+def _finish_spec(out: dict, spec: dict) -> dict:
+    """Highlight and callouts, kept only when they point at a part that exists."""
+    count = _part_count(out)
+    try:
+        hl = int(spec.get("highlight", -1))
+    except (TypeError, ValueError):
+        hl = -1
+    out["highlight"] = hl if 0 <= hl < count else -1
+    for c in (spec.get("callouts") or []):
+        if not isinstance(c, dict):
+            continue
+        try:
+            target = int(c.get("target"))
+        except (TypeError, ValueError):
+            continue
+        text = " ".join(str(c.get("text") or "").split())[:70]
+        if 0 <= target < count and text:
+            out["callouts"].append({"target": target, "text": text})
+        if len(out["callouts"]) == 3:
+            break
+    return out
+
+
+def _clean_diagram_spec(spec: dict, section_text: str = "",
+                        max_nodes: int = DIAGRAM_MAX_NODES) -> dict | None:
+    """A model's spec, reduced to what the layouts can draw. None when what is
+    left would not teach anything. With `section_text`, chart values the
+    section does not state are dropped."""
     if not isinstance(spec, dict):
         return None
-    kind = str(spec.get("type", "flow")).strip().lower()
+    kind = str(spec.get("type", "flow")).strip().lower().replace("-", "_").replace(" ", "_")
     if kind not in DIAGRAM_KINDS:
         kind = "flow"
     clip = lambda v, n: " ".join(str(v or "").split())[:n]
@@ -1302,6 +1456,8 @@ def _clean_diagram_spec(spec: dict) -> dict | None:
         "alt": clip(spec.get("alt"), 240),
         "caption": clip(spec.get("caption"), 160),
         "nodes": [], "edges": [], "columns": [], "overlap": "", "rows": [],
+        "axes": {}, "quadrants": [], "data": [], "unit": "", "slider": {},
+        "highlight": -1, "callouts": [],
     }
     if kind == "grid":
         heads = [clip(c.get("title") if isinstance(c, dict) else c, 30)
@@ -1316,8 +1472,8 @@ def _clean_diagram_spec(spec: dict) -> dict | None:
                 out["rows"].append({"label": label,
                                     "cells": cells + [""] * (len(heads) - len(cells))})
         out["columns"] = [{"title": h, "items": []} for h in heads]
-        return out if len(heads) >= 2 and len(out["rows"]) >= 2 else None
-    if kind == "compare":
+        return _finish_spec(out, spec) if len(heads) >= 2 and len(out["rows"]) >= 2 else None
+    if kind in ("compare", "before_after"):
         for c in (spec.get("columns") or [])[:3]:
             if not isinstance(c, dict):
                 continue
@@ -1326,22 +1482,55 @@ def _clean_diagram_spec(spec: dict) -> dict | None:
                      for i in (c.get("items") or []) if str(i).strip()][:5]
             if title and items:
                 out["columns"].append({"title": title, "items": items})
-        return out if len(out["columns"]) >= 2 else None
-    for n in (spec.get("nodes") or [])[:DIAGRAM_MAX_NODES]:
+        if kind == "before_after":
+            out["columns"] = out["columns"][:2]
+            return _finish_spec(out, spec) if len(out["columns"]) == 2 else None
+        return _finish_spec(out, spec) if len(out["columns"]) >= 2 else None
+    if kind in ("bar", "line"):
+        known = _numbers_in(section_text) if section_text else None
+        for d in (spec.get("data") or [])[:8]:
+            if not isinstance(d, dict):
+                continue
+            label, value = clip(d.get("label"), 40), _to_number(d.get("value"))
+            if not label or value is None:
+                continue
+            if known is not None and round(value, 4) not in known:
+                print(f"  Chart value {value:g} for '{label}' is not in the section; left out.")
+                continue
+            out["data"].append({"label": label, "value": value})
+        out["unit"] = clip(spec.get("unit"), 8)
+        slider = spec.get("slider")
+        if kind == "bar" and isinstance(slider, dict) and clip(slider.get("label"), 40):
+            out["slider"] = {"label": clip(slider.get("label"), 40),
+                             "keep": "above" if str(slider.get("keep", "")).strip().lower() == "above"
+                             else "below"}
+        need = 2 if kind == "bar" else 3
+        return _finish_spec(out, spec) if len(out["data"]) >= need else None
+    for n in (spec.get("nodes") or [])[:max_nodes]:
         if isinstance(n, str):
             n = {"label": n}
         if not isinstance(n, dict):
             continue
         label = " ".join(str(n.get("label", "")).split())[:40]
         if label:
-            out["nodes"].append({"label": label,
-                                 "note": " ".join(str(n.get("note", "") or "").split())[:70]})
-    if len(out["nodes"]) < 2:
+            node = {"label": label, "note": " ".join(str(n.get("note", "") or "").split())[:70]}
+            if kind in ("quadrant", "spectrum"):
+                node["x"] = _unit01(n.get("x"))
+            if kind == "quadrant":
+                node["y"] = _unit01(n.get("y"))
+            out["nodes"].append(node)
+    if len(out["nodes"]) < _MIN_NODES.get(kind, 2):
         return None
     if kind == "venn":
         out["nodes"] = out["nodes"][:3]
         out["overlap"] = clip(spec.get("overlap"), 40)
-        return out
+        return _finish_spec(out, spec)
+    if kind in ("quadrant", "spectrum"):
+        axes = spec.get("axes") if isinstance(spec.get("axes"), dict) else {}
+        out["axes"] = {k: clip(axes.get(k), 40) for k in ("x", "y", "low", "high") if axes.get(k)}
+        quads = [clip(q, 30) for q in (spec.get("quadrants") or []) if isinstance(q, str)][:4]
+        out["quadrants"] = quads if kind == "quadrant" and len(quads) == 4 else []
+        return _finish_spec(out, spec)
     count = len(out["nodes"])
     for e in (spec.get("edges") or []):
         try:
@@ -1351,50 +1540,75 @@ def _clean_diagram_spec(spec: dict) -> dict | None:
         if 0 <= a < count and 0 <= b < count and a != b:
             out["edges"].append({"from": a, "to": b,
                                  "label": " ".join(str(e.get("label", "") or "").split())[:24]})
-    return out
+    if kind in ("tree", "graph") and not out["edges"]:
+        return None
+    return _finish_spec(out, spec)
 
 
-def generate_diagram_spec(title: str, shows: str, section_text: str) -> dict | None:
-    prompt = f"""Design a simple explanatory diagram for an article section.
+def generate_diagram_spec(title: str, shows: str, section_text: str,
+                          flags: set | frozenset = frozenset()) -> dict | None:
+    signature, explore = "signature" in flags, "explore" in flags
+    max_nodes = DIAGRAM_SIGNATURE_MAX_NODES if signature else DIAGRAM_MAX_NODES
+    brief = ""
+    if signature:
+        brief += ("\nTHIS IS THE ARTICLE'S SIGNATURE VISUAL: the one picture someone would save and "
+                  "share on its own. Make it complete and dense: the whole process, the full map of "
+                  "options or the decision the reader came to make, using up to "
+                  f"{max_nodes} parts, a highlight and callouts. It must read without the article.\n")
+    if explore:
+        brief += ('\nTHIS VISUAL IS INTERACTIVE ON THE WEB: use "bar" with the section\'s numbers, '
+                  'and fill "slider" with what the reader sets ("Your budget") and "keep": "below" '
+                  'when options at or under the reader\'s value fit, "above" when the ones over it do.\n')
+    prompt = f"""Design an explanatory diagram for an article section. It exists to teach:
+a reader should understand something from the picture that the sentence alone does
+not give them.
 
 DIAGRAM TITLE: {title}
 IT MUST MAKE OBVIOUS: {shows}
-
+{brief}
 THE SECTION IT SITS IN
 {section_text[:3500]}
 
-Pick the one shape that fits:
-- "flow": 3-{DIAGRAM_MAX_NODES} steps in order (a process, a pipeline, a request's path)
-- "cycle": 3-6 steps that repeat (a loop, a lifecycle)
-- "layers": 3-6 stacked levels (a stack, tiers, a hierarchy; top level first)
-- "compare": 2-3 columns of 3-5 short items each (this versus that). If the
-  section really contrasts just two things, this is the shape: a two-node flow
-  or two-layer stack shows nothing.
-- "venn": 2-3 overlapping sets (disciplines, skills, concerns that share
-  ground), with "overlap" naming what sits where they all meet
-- "grid": a matrix, 2-4 "columns" (titles only) by 2-5 "rows", each row a label
-  and one short cell per column (a blueprint, a story map, options against
-  criteria)
+Pick the one shape that fits the idea, not the first that comes to mind:
+{_shapes_guide(max_nodes)}
+
+Then direct the reader's eye:
+- "highlight": the index of the one part that is the point (the step where it
+  usually breaks, the option most readers should pick, the layer doing the work).
+  -1 only when no part matters more than the others.
+- "callouts": up to 3 numbered notes pinned to parts, each saying what to notice
+  there in under 10 words ("this is where the cost doubles"). Only when they add
+  something the labels do not.
 
 Rules: labels are 2-5 words a beginner understands; a note adds one detail only
-when it earns its place; no fact, price or figure that is not in the section;
-at most {DIAGRAM_MAX_NODES} nodes. For "compare" fill "columns" and leave "nodes"
-empty. For "grid" fill "columns" and "rows". For the others fill "nodes" and
-leave "columns" empty; "edges" is optional and only for arrows that are not
-simply step-to-next-step. "alt" describes what is drawn and how the parts
+when it earns its place; no fact, price or figure that is not in the section,
+and every chart value copied exactly from it; at most {max_nodes} nodes. Fill
+only the fields your shape uses and leave the rest empty. "edges" is only for
+arrows that are not simply step-to-next-step, except in "tree" and "graph",
+where it carries every arrow. "alt" describes what is drawn and how the parts
 relate, so a screen reader or an image search learns what the diagram says;
 never "diagram" or "image" alone.
 
 Return ONLY valid JSON in exactly this shape:
 {DIAGRAM_SPEC_SCHEMA}"""
-    try:
-        spec = extract_json(call_claude(prompt, max_tokens=2000))
-    except Exception as e:
-        print(f"  Diagram spec failed ({str(e)[:80]}).")
-        return None
-    if isinstance(spec, dict) and not spec.get("title"):
-        spec["title"] = title
-    return _clean_diagram_spec(spec)
+    for attempt in range(2):
+        try:
+            spec = extract_json(call_claude(prompt, max_tokens=3000))
+        except Exception as e:
+            print(f"  Diagram spec failed ({str(e)[:80]}).")
+            return None
+        if isinstance(spec, dict) and not spec.get("title"):
+            spec["title"] = title
+        cleaned = _clean_diagram_spec(spec, section_text, max_nodes)
+        if cleaned:
+            return cleaned
+        if attempt == 0:
+            print("  Diagram spec could not be drawn; asking once more.")
+            prompt += ("\n\nYOUR LAST ANSWER COULD NOT BE DRAWN. Check it against the shape list: "
+                       "flow, cycle, layers, timeline and funnel need at least 3 nodes, hub 4, tree "
+                       "and graph need edges, compare needs 2-3 columns with items, grid 2+ columns "
+                       "and 2+ rows, charts need values that appear in the section. Answer again.")
+    return None
 
 
 # -- layout: one geometry, two renderers ------------------------------------
@@ -1402,10 +1616,29 @@ Return ONLY valid JSON in exactly this shape:
 _DG_W = 1200
 _DG_PAD = 48
 _DG_FONT = {"title": 26, "label": 19, "note": 14, "item": 15, "col": 20,
-            "edge": 13, "caption": 15, "credit": 12}
-_DG_COLORS = {"bg": "#ffffff", "box": "#eef3fb", "border": "#3b5bdb",
-              "text": "#1a1a1a", "muted": "#555555", "accent": "#3b5bdb",
-              "headtext": "#ffffff", "credit": "#999999"}
+            "edge": 13, "caption": 15, "credit": 12, "axis": 14, "value": 15, "badge": 15}
+# Three looks over one geometry. "bold" is the dense, colour-coded look that
+# travels on LinkedIn; "sketch" is a whiteboard drawing; "clean" is the default.
+_DG_STYLE_SETS = {
+    "clean": {"bg": "#ffffff", "box": "#eef3fb", "border": "#3b5bdb", "text": "#1a1a1a",
+              "muted": "#555555", "accent": "#3b5bdb", "headtext": "#ffffff",
+              "credit": "#999999", "hot": "#e8590c", "palette": None, "band": None,
+              "sketch": False, "width": 2, "font": "Arial, Helvetica, sans-serif"},
+    "bold": {"bg": "#fbfaf7", "box": "#e7f0ff", "border": "#2f6fed", "text": "#14171f",
+             "muted": "#4a5060", "accent": "#2f6fed", "headtext": "#ffffff",
+             "credit": "#8a8f9c", "hot": "#e8590c", "band": "#1b2240", "sketch": False,
+             "width": 2.5, "font": "Arial, Helvetica, sans-serif",
+             "palette": [("#e7f0ff", "#2f6fed"), ("#e3f6ec", "#12915a"), ("#fff0de", "#d9730d"),
+                         ("#f2e8ff", "#7c3aed"), ("#ffe6ec", "#d6336c"), ("#e0f6f8", "#0b8a9c")]},
+    "sketch": {"bg": "#fffdf7", "box": "#fff4cc", "border": "#1e1e1e", "text": "#1e1e1e",
+               "muted": "#4d4d4d", "accent": "#1e1e1e", "headtext": "#ffffff",
+               "credit": "#8c8c8c", "hot": "#e03131", "band": None, "sketch": True,
+               "width": 2, "font": "'Segoe Print', 'Comic Sans MS', 'Chalkboard SE', cursive",
+               "palette": [("#fff3bf", "#1e1e1e"), ("#d3f9d8", "#1e1e1e"), ("#d0ebff", "#1e1e1e"),
+                           ("#ffe3e3", "#1e1e1e"), ("#e5dbff", "#1e1e1e")]},
+}
+# The active style while a layout is being built; layout_diagram swaps it.
+_DG_COLORS = dict(_DG_STYLE_SETS["clean"])
 
 
 def _wrap_chars(text: str, max_chars: int, max_lines: int) -> list[str]:
@@ -1431,14 +1664,14 @@ def _dg_wrap(text: str, box_w: float, size: int, max_lines: int = 3) -> list[str
     return _wrap_chars(text, max(6, int((box_w - 24) / (size * 0.55))), max_lines)
 
 
-def _t(x, y, text, role, bold=False, color=None, anchor="middle") -> dict:
+def _t(x, y, text, role, bold=False, color=None, anchor="middle", rot=0) -> dict:
     return {"kind": "text", "x": x, "y": y, "text": text, "size": _DG_FONT[role],
-            "bold": bold, "color": color or _DG_COLORS["text"], "anchor": anchor}
+            "bold": bold, "color": color or _DG_COLORS["text"], "anchor": anchor, "rot": rot}
 
 
-def _r(x, y, w, h, fill=None, stroke=None, rx=10) -> dict:
+def _r(x, y, w, h, fill=None, stroke=None, rx=10, sw=None) -> dict:
     return {"kind": "rect", "x": x, "y": y, "w": w, "h": h,
-            "fill": fill, "stroke": stroke, "rx": rx}
+            "fill": fill, "stroke": stroke, "rx": rx, "sw": sw or _DG_COLORS["width"]}
 
 
 def _c(cx, cy, r, color) -> dict:
@@ -1446,15 +1679,63 @@ def _c(cx, cy, r, color) -> dict:
     return {"kind": "circle", "cx": cx, "cy": cy, "r": r, "color": color}
 
 
-def _a(x1, y1, x2, y2, label="", dashed=False) -> dict:
+def _a(x1, y1, x2, y2, label="", dashed=False, color=None) -> dict:
     return {"kind": "arrow", "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-            "label": label, "dashed": dashed}
+            "label": label, "dashed": dashed, "color": color or _DG_COLORS["accent"]}
+
+
+def _ln(x1, y1, x2, y2, color=None, width=2, dashed=False) -> dict:
+    """A plain line: no arrowhead."""
+    return {"kind": "line", "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+            "color": color or _DG_COLORS["accent"], "width": width, "dashed": dashed}
+
+
+def _poly(points, fill=None, stroke=None, closed=True, width=None) -> dict:
+    return {"kind": "poly", "points": [(float(x), float(y)) for x, y in points],
+            "fill": fill, "stroke": stroke, "closed": closed,
+            "width": width or _DG_COLORS["width"]}
+
+
+def _badge(cx, cy, r, fill, text="", size=None) -> dict:
+    """A filled disc, with a number or letter on it when `text` is given."""
+    return {"kind": "badge", "cx": cx, "cy": cy, "r": r, "fill": fill, "text": str(text),
+            "size": size or _DG_FONT["badge"]}
+
+
+def _tag(els: list, start: int, node: int):
+    """Mark everything drawn since `start` as part of one node, so the web page
+    can dim or reveal it."""
+    for e in els[start:]:
+        e.setdefault("node", node)
+
+
+def _dg_fill(i: int) -> tuple[str, str]:
+    """Fill and border for part i: the style's palette, or the house blue."""
+    pal = _DG_COLORS.get("palette")
+    if pal:
+        return pal[i % len(pal)]
+    return _DG_COLORS["box"], _DG_COLORS["border"]
 
 
 def _tint(t: float) -> str:
     """Blend from a deeper to a paler blue-grey as t goes 0 -> 1."""
     a, b = (0xDC, 0xE6, 0xFA), (0xF7, 0xF9, 0xFD)
     return "#" + "".join(f"{int(round(a[i] + (b[i] - a[i]) * t)):02x}" for i in range(3))
+
+
+def _blend(c1: str, c2: str, t: float) -> str:
+    a = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]
+    b = [int(c2[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{int(round(a[i] + (b[i] - a[i]) * t)):02x}" for i in range(3))
+
+
+def _fmt_value(v: float, unit: str = "") -> str:
+    s = f"{v:,.0f}" if float(v).is_integer() else f"{v:,.2f}".rstrip("0").rstrip(".")
+    if unit in ("$", "€", "£", "¥"):
+        return unit + s
+    if unit == "%":
+        return s + "%"
+    return f"{s} {unit}".strip()
 
 
 def _clip_to_rect(cx, cy, w, h, tx, ty):
@@ -1467,8 +1748,14 @@ def _clip_to_rect(cx, cy, w, h, tx, ty):
     return cx + dx * t, cy + dy * t
 
 
-def _node_box(els: list, x, y, w, h, node: dict):
-    els.append(_r(x, y, w, h, fill=_DG_COLORS["box"], stroke=_DG_COLORS["border"]))
+def _text_w(lines: list, size: int, cap: float) -> float:
+    """A fair estimate of how wide the longest line draws, capped at `cap`."""
+    return min(cap, max([len(str(l)) for l in lines if l] + [4]) * size * 0.56 + 24)
+
+
+def _node_box(els: list, x, y, w, h, node: dict, i: int = 0):
+    fill, stroke = _dg_fill(i)
+    els.append(_r(x, y, w, h, fill=fill, stroke=stroke))
     label_lines = _dg_wrap(node["label"], w, _DG_FONT["label"], 2)
     note_lines = _dg_wrap(node["note"], w, _DG_FONT["note"], 2) if node.get("note") else []
     lh, nh = _DG_FONT["label"] + 4, _DG_FONT["note"] + 3
@@ -1484,7 +1771,7 @@ def _node_box(els: list, x, y, w, h, node: dict):
             ty += nh
 
 
-def _lay_flow(spec: dict, els: list, y: float, cycle: bool = False) -> float:
+def _lay_flow(spec: dict, els: list, y: float, anc: dict, cycle: bool = False) -> float:
     nodes, W, pad = spec["nodes"], _DG_W, _DG_PAD
     n = len(nodes)
     per_row = min(4, n)
@@ -1500,9 +1787,13 @@ def _lay_flow(spec: dict, els: list, y: float, cycle: bool = False) -> float:
         x = pad + c * (box_w + gap)
         yy = y + r * (box_h + row_gap)
         pos.append((x, yy))
-        _node_box(els, x, yy, box_w, box_h, nd)
+        start = len(els)
+        _node_box(els, x, yy, box_w, box_h, nd, i)
+        _tag(els, start, i)
+        anc[i] = (x, yy, box_w, box_h)
     for i in range(n - 1):
         (x1, y1), (x2, y2) = pos[i], pos[i + 1]
+        start = len(els)
         if abs(y1 - y2) < 1:
             if x2 > x1:
                 els.append(_a(x1 + box_w, y1 + box_h / 2, x2, y2 + box_h / 2))
@@ -1510,6 +1801,7 @@ def _lay_flow(spec: dict, els: list, y: float, cycle: bool = False) -> float:
                 els.append(_a(x1, y1 + box_h / 2, x2 + box_w, y2 + box_h / 2))
         else:
             els.append(_a(x1 + box_w / 2, y1 + box_h, x2 + box_w / 2, y2))
+        _tag(els, start, i + 1)
     for e in spec.get("edges", []):
         a, b = e["from"], e["to"]
         if b == a + 1:
@@ -1521,7 +1813,9 @@ def _lay_flow(spec: dict, els: list, y: float, cycle: bool = False) -> float:
         # never lands on a label.
         sx, sy = _clip_to_rect(*c1, box_w, box_h, *c2)
         ex, ey = _clip_to_rect(*c2, box_w, box_h, *c1)
+        start = len(els)
         els.append(_a(sx, sy, ex, ey, label=e["label"], dashed=True))
+        _tag(els, start, max(a, b))
     bottom = y + (rows - 1) * (box_h + row_gap) + box_h
     if cycle and n >= 2:
         (xl, yl), (xf, yf) = pos[-1], pos[0]
@@ -1533,14 +1827,16 @@ def _lay_flow(spec: dict, els: list, y: float, cycle: bool = False) -> float:
     return bottom
 
 
-def _lay_layers(spec: dict, els: list, y: float) -> float:
+def _lay_layers(spec: dict, els: list, y: float, anc: dict) -> float:
     nodes, W, pad = spec["nodes"], _DG_W, _DG_PAD
     band_w, gap = W - 2 * pad, 10
     n = len(nodes)
     for i, nd in enumerate(nodes):
         h = 84 if nd["note"] else 62
-        els.append(_r(pad, y, band_w, h, fill=_tint(i / max(1, n - 1)),
-                      stroke=_DG_COLORS["border"], rx=8))
+        start = len(els)
+        fill, stroke = (_dg_fill(i) if _DG_COLORS.get("palette")
+                        else (_tint(i / max(1, n - 1)), _DG_COLORS["border"]))
+        els.append(_r(pad, y, band_w, h, fill=fill, stroke=stroke, rx=8))
         block = _DG_FONT["label"] + 4 + (_DG_FONT["note"] + 3 if nd["note"] else 0)
         ty = y + (h - block) / 2 + _DG_FONT["label"] - 3
         els.append(_t(pad + 24, ty, nd["label"], "label", bold=True, anchor="start"))
@@ -1550,13 +1846,15 @@ def _lay_layers(spec: dict, els: list, y: float) -> float:
                           "note", color=_DG_COLORS["muted"], anchor="start"))
         els.append(_t(W - pad - 20, y + h / 2 + 7, str(i + 1), "label",
                       color=_DG_COLORS["muted"], anchor="end"))
+        _tag(els, start, i)
+        anc[i] = (pad, y, band_w, h)
         y += h + gap
     return y - gap
 
 
-def _lay_compare(spec: dict, els: list, y: float) -> float:
+def _lay_compare(spec: dict, els: list, y: float, anc: dict, before_after: bool = False) -> float:
     cols, W, pad = spec["columns"], _DG_W, _DG_PAD
-    k, gap = len(cols), 36
+    k, gap = len(cols), (96 if before_after else 36)
     col_w = (W - 2 * pad - (k - 1) * gap) / k
     head_h, line_h, item_gap = 52, _DG_FONT["item"] + 6, 12
     wrapped = [[_dg_wrap(it, col_w - 40, _DG_FONT["item"], 2) for it in c["items"]] for c in cols]
@@ -1567,30 +1865,39 @@ def _lay_compare(spec: dict, els: list, y: float) -> float:
     body_h = 16 + sum(lines * line_h + item_gap for lines in per_item)
     for j, c in enumerate(cols):
         x = pad + j * (col_w + gap)
+        if before_after:
+            head = _DG_COLORS["muted"] if j == 0 else _DG_COLORS["accent"]
+        elif _DG_COLORS.get("palette"):
+            head = _dg_fill(j)[1]
+        else:
+            head = _DG_COLORS["accent"]
         els.append(_r(x, y, col_w, head_h + body_h, fill=_DG_COLORS["bg"], stroke=None))
-        els.append(_r(x, y, col_w, head_h, fill=_DG_COLORS["accent"], stroke=None))
-        els.append(_r(x, y + head_h / 2, col_w, head_h / 2, fill=_DG_COLORS["accent"],
-                      stroke=None, rx=0))
+        els.append(_r(x, y, col_w, head_h, fill=head, stroke=None))
+        els.append(_r(x, y + head_h / 2, col_w, head_h / 2, fill=head, stroke=None, rx=0))
         els.append(_t(x + col_w / 2, y + head_h / 2 + 7,
                       _dg_wrap(c["title"], col_w, _DG_FONT["col"], 1)[0],
                       "col", bold=True, color=_DG_COLORS["headtext"]))
         ty = y + head_h + 16
         for i, lines in enumerate(wrapped[j]):
             ty += line_h
-            els.append(_t(x + 18, ty, "•", "item", color=_DG_COLORS["accent"], anchor="start"))
+            els.append(_t(x + 18, ty, "•", "item", color=head, anchor="start"))
             for li, line in enumerate(lines):
                 if li:
                     ty += line_h
                 els.append(_t(x + 36, ty, line, "item", anchor="start"))
             ty += item_gap + (per_item[i] - len(lines)) * line_h
-        els.append(_r(x, y, col_w, head_h + body_h, fill=None, stroke=_DG_COLORS["border"]))
+        els.append(_r(x, y, col_w, head_h + body_h, fill=None, stroke=head))
+        anc[j] = (x, y, col_w, head_h + body_h)
+    if before_after:
+        mid_x, mid_y = pad + col_w + gap / 2, y + (head_h + body_h) / 2
+        els.append(_a(mid_x - 30, mid_y, mid_x + 30, mid_y, color=_DG_COLORS["hot"]))
     return y + head_h + body_h
 
 
 _VENN_COLORS = ("#3b5bdb", "#0ca678", "#e8590c")
 
 
-def _lay_venn(spec: dict, els: list, y: float) -> float:
+def _lay_venn(spec: dict, els: list, y: float, anc: dict) -> float:
     nodes, W = spec["nodes"], _DG_W
     k = len(nodes)
     if k == 2:
@@ -1601,8 +1908,9 @@ def _lay_venn(spec: dict, els: list, y: float) -> float:
         centres = [(W / 2 - 115, y + r), (W / 2 + 115, y + r), (W / 2, y + r + 195)]
     mx = sum(c[0] for c in centres) / k
     my = sum(c[1] for c in centres) / k
-    for (cx, cy), color in zip(centres, _VENN_COLORS):
+    for i, ((cx, cy), color) in enumerate(zip(centres, _VENN_COLORS)):
         els.append(_c(cx, cy, r, color))
+        anc[i] = (cx - r, cy - r, 2 * r, 2 * r)
     for (cx, cy), nd in zip(centres, nodes):
         # Each label sits in the part of its circle nobody else covers: pushed
         # away from the shared centre.
@@ -1627,7 +1935,7 @@ def _lay_venn(spec: dict, els: list, y: float) -> float:
     return max(cy for _, cy in centres) + r
 
 
-def _lay_grid(spec: dict, els: list, y: float) -> float:
+def _lay_grid(spec: dict, els: list, y: float, anc: dict) -> float:
     heads, rows, W, pad = [c["title"] for c in spec["columns"]], spec["rows"], _DG_W, _DG_PAD
     label_w = 220
     col_w = (W - 2 * pad - label_w) / len(heads)
@@ -1643,7 +1951,9 @@ def _lay_grid(spec: dict, els: list, y: float) -> float:
         wrapped = [_dg_wrap(c, col_w - 16, _DG_FONT["item"], 3) if c else [] for c in row["cells"]]
         label = _dg_wrap(row["label"], label_w - 8, _DG_FONT["label"], 2)
         h = max(56, 24 + max([len(w) for w in wrapped] + [len(label)]) * line_h)
-        els.append(_r(pad, y, label_w - 8, h, fill=_DG_COLORS["box"], stroke=_DG_COLORS["border"], rx=8))
+        start = len(els)
+        fill, stroke = _dg_fill(i)
+        els.append(_r(pad, y, label_w - 8, h, fill=fill, stroke=stroke, rx=8))
         ty = y + (h - len(label) * (_DG_FONT["label"] + 4)) / 2 + _DG_FONT["label"] - 3
         for line in label:
             els.append(_t(pad + (label_w - 8) / 2, ty, line, "label", bold=True))
@@ -1656,31 +1966,491 @@ def _lay_grid(spec: dict, els: list, y: float) -> float:
             for line in lines:
                 els.append(_t(x + col_w / 2, ty, line, "item"))
                 ty += line_h
+        _tag(els, start, i)
+        anc[i] = (pad, y, W - 2 * pad, h)
         y += h + 8
     return y - 8
 
 
-def layout_diagram(spec: dict) -> dict:
-    """Turn a cleaned spec into primitives (rects, text lines, arrows) on a
-    1200-wide canvas. Both renderers draw exactly this."""
-    W, pad = _DG_W, _DG_PAD
-    els, y = [], pad
-    if spec.get("title"):
-        for line in _dg_wrap(spec["title"], W - 2 * pad, _DG_FONT["title"], 2):
-            y += _DG_FONT["title"]
-            els.append(_t(W / 2, y, line, "title", bold=True))
-        y += 24
-    kind = spec["type"]
-    if kind == "compare":
-        y = _lay_compare(spec, els, y)
-    elif kind == "venn":
-        y = _lay_venn(spec, els, y)
-    elif kind == "grid":
-        y = _lay_grid(spec, els, y)
-    elif kind == "layers":
-        y = _lay_layers(spec, els, y)
+def _lay_timeline(spec: dict, els: list, y: float, anc: dict) -> float:
+    """Events on one line, labels alternating above and below so neighbours
+    never collide."""
+    nodes, W, pad = spec["nodes"], _DG_W, _DG_PAD
+    n = len(nodes)
+    inset = 90
+    step = (W - 2 * pad - 2 * inset) / max(1, n - 1)
+    ww = min(250, step * 1.9)
+    line_y = y + 130
+    lh = _DG_FONT["label"] + 4
+    els.append(_ln(pad, line_y, W - pad, line_y, _DG_COLORS["accent"], 4))
+    for i, nd in enumerate(nodes):
+        x = pad + inset + i * step
+        _, stroke = _dg_fill(i)
+        start = len(els)
+        els.append(_badge(x, line_y, 11, stroke))
+        label = _dg_wrap(nd["label"], ww, _DG_FONT["label"], 2)
+        note = _dg_wrap(nd["note"], ww, _DG_FONT["note"], 1)[0] if nd["note"] else ""
+        if i % 2 == 0:
+            els.append(_ln(x, line_y - 12, x, line_y - 30, stroke, 2))
+            ty = line_y - 42
+            if note:
+                els.append(_t(x, ty, note, "note", bold=True, color=stroke))
+                ty -= _DG_FONT["note"] + 12
+            for line in reversed(label):
+                els.append(_t(x, ty, line, "label", bold=True))
+                ty -= lh
+            tw = _text_w(label + [note], _DG_FONT["label"], ww)
+            anc[i] = (x - tw / 2, ty + lh - _DG_FONT["label"] - 4, tw, line_y - 4 - (ty + lh - _DG_FONT["label"] - 4))
+        else:
+            els.append(_ln(x, line_y + 12, x, line_y + 30, stroke, 2))
+            ty = line_y + 30 + _DG_FONT["note"] + 8
+            if note:
+                els.append(_t(x, ty, note, "note", bold=True, color=stroke))
+                ty += _DG_FONT["label"] + 8
+            for line in label:
+                els.append(_t(x, ty, line, "label", bold=True))
+                ty += lh
+            tw = _text_w(label + [note], _DG_FONT["label"], ww)
+            anc[i] = (x - tw / 2, line_y + 34, tw, ty - lh + 10 - (line_y + 34))
+        _tag(els, start, i)
+    return line_y + 130
+
+
+def _lay_funnel(spec: dict, els: list, y: float, anc: dict) -> float:
+    nodes, W, pad = spec["nodes"], _DG_W, _DG_PAD
+    n = len(nodes)
+    full = W - 2 * pad
+    narrow = full * 0.38
+    h, gap, cx = (84 if any(nd["note"] for nd in nodes) else 66), 8, W / 2
+    for i, nd in enumerate(nodes):
+        top_w = full - (full - narrow) * i / n
+        bot_w = full - (full - narrow) * (i + 1) / n
+        fill, stroke = (_dg_fill(i) if _DG_COLORS.get("palette")
+                        else (_tint(i / max(1, n - 1)), _DG_COLORS["border"]))
+        start = len(els)
+        els.append(_poly([(cx - top_w / 2, y), (cx + top_w / 2, y),
+                          (cx + bot_w / 2, y + h), (cx - bot_w / 2, y + h)], fill, stroke))
+        block = _DG_FONT["label"] + (_DG_FONT["note"] + 8 if nd["note"] else 0)
+        ty = y + (h - block) / 2 + _DG_FONT["label"] - 2
+        els.append(_t(cx, ty, _dg_wrap(nd["label"], bot_w - 40, _DG_FONT["label"], 1)[0],
+                      "label", bold=True))
+        if nd["note"]:
+            els.append(_t(cx, ty + _DG_FONT["note"] + 8,
+                          _dg_wrap(nd["note"], bot_w - 40, _DG_FONT["note"], 1)[0],
+                          "note", color=_DG_COLORS["muted"]))
+        _tag(els, start, i)
+        anc[i] = (cx - bot_w / 2, y, bot_w, h)
+        y += h + gap
+    return y - gap
+
+
+def _lay_hub(spec: dict, els: list, y: float, anc: dict) -> float:
+    """Node 0 in the middle, the rest on an ellipse around it."""
+    import math
+    nodes, W = spec["nodes"], _DG_W
+    hub, spokes = nodes[0], nodes[1:]
+    cx, cy = W / 2, y + 250
+    rx, ry = 405, 196
+    bw, bh = 220, (92 if any(nd["note"] for nd in spokes) else 74)
+    hw, hh = 280, 100
+    k = len(spokes)
+    pos = [(cx + rx * math.cos(-math.pi / 2 + 2 * math.pi * j / k),
+            cy + ry * math.sin(-math.pi / 2 + 2 * math.pi * j / k)) for j in range(k)]
+    for j, (px, py) in enumerate(pos):
+        sx, sy = _clip_to_rect(cx, cy, hw, hh, px, py)
+        ex, ey = _clip_to_rect(px, py, bw, bh, cx, cy)
+        start = len(els)
+        els.append(_ln(sx, sy, ex, ey, _dg_fill(j + 1)[1], 2.5))
+        _tag(els, start, j + 1)
+    start = len(els)
+    els.append(_r(cx - hw / 2, cy - hh / 2, hw, hh, fill=_DG_COLORS["accent"],
+                  stroke=_DG_COLORS["accent"], rx=14))
+    label = _dg_wrap(hub["label"], hw, _DG_FONT["title"] - 4, 2)
+    note = _dg_wrap(hub["note"], hw, _DG_FONT["note"], 1) if hub["note"] else []
+    ty = cy - (len(label) * 26 + len(note) * 18) / 2 + 20
+    for line in label:
+        els.append({**_t(cx, ty, line, "label", bold=True, color=_DG_COLORS["headtext"]),
+                    "size": _DG_FONT["title"] - 4})
+        ty += 26
+    for line in note:
+        els.append(_t(cx, ty, line, "note", color=_DG_COLORS["headtext"]))
+    _tag(els, start, 0)
+    anc[0] = (cx - hw / 2, cy - hh / 2, hw, hh)
+    for j, (px, py) in enumerate(pos):
+        start = len(els)
+        _node_box(els, px - bw / 2, py - bh / 2, bw, bh, spokes[j], j + 1)
+        _tag(els, start, j + 1)
+        anc[j + 1] = (px - bw / 2, py - bh / 2, bw, bh)
+    return cy + ry + bh / 2
+
+
+def _graph_layers(n: int, edges: list) -> tuple[list, set]:
+    """Longest-path layering over a topological order. Edges that close a cycle
+    are returned separately and drawn dashed instead of bending the layout."""
+    out = [[] for _ in range(n)]
+    indeg = [0] * n
+    for e in edges:
+        out[e["from"]].append(e["to"])
+        indeg[e["to"]] += 1
+    order, queue = [], [i for i in range(n) if indeg[i] == 0]
+    while queue:
+        a = queue.pop(0)
+        order.append(a)
+        for b in out[a]:
+            indeg[b] -= 1
+            if indeg[b] == 0:
+                queue.append(b)
+    order += [i for i in range(n) if i not in order]
+    rank = {v: k for k, v in enumerate(order)}
+    back = {(e["from"], e["to"]) for e in edges if rank[e["to"]] <= rank[e["from"]]}
+    layer = [0] * n
+    for a in order:
+        for b in out[a]:
+            if (a, b) not in back:
+                layer[b] = max(layer[b], layer[a] + 1)
+    return layer, back
+
+
+def _lay_graph(spec: dict, els: list, y: float, anc: dict, top_down: bool) -> float:
+    nodes, edges, W, pad = spec["nodes"], spec["edges"], _DG_W, _DG_PAD
+    n = len(nodes)
+    layer, back = _graph_layers(n, edges)
+    L = max(layer) + 1
+    rows = [[i for i in range(n) if layer[i] == l] for l in range(L)]
+    # Order each layer by where its parents sit, so arrows cross as little as possible.
+    preds = {i: [e["from"] for e in edges if e["to"] == i and (e["from"], i) not in back]
+             for i in range(n)}
+    place = {}
+    for l, row in enumerate(rows):
+        if l:
+            row.sort(key=lambda v: (sum(place.get(p, 0.5) for p in preds[v]) / len(preds[v])
+                                    if preds[v] else 0.5, v))
+        for k, v in enumerate(row):
+            place[v] = k / (len(row) - 1) if len(row) > 1 else 0.5
+    if not top_down and L > 5:
+        top_down = True
+    box_h = 92 if any(nd["note"] for nd in nodes) else 74
+    box = {}
+    if top_down:
+        gap, row_gap = 28, 70
+        for l, row in enumerate(rows):
+            k = len(row)
+            bw = min(250, (W - 2 * pad - (k - 1) * gap) / k)
+            x0 = (W - (k * bw + (k - 1) * gap)) / 2
+            for j, v in enumerate(row):
+                box[v] = (x0 + j * (bw + gap), y + l * (box_h + row_gap), bw, box_h)
+        bottom = y + L * (box_h + row_gap) - row_gap
     else:
-        y = _lay_flow(spec, els, y, cycle=(kind == "cycle"))
+        col_gap, vgap = 64, 26
+        bw = min(260, (W - 2 * pad - (L - 1) * col_gap) / L)
+        x0 = (W - (L * bw + (L - 1) * col_gap)) / 2
+        tallest = max(len(r) for r in rows)
+        height = tallest * box_h + (tallest - 1) * vgap
+        for l, row in enumerate(rows):
+            col_h = len(row) * box_h + (len(row) - 1) * vgap
+            y0 = y + (height - col_h) / 2
+            for j, v in enumerate(row):
+                box[v] = (x0 + l * (bw + col_gap), y0 + j * (box_h + vgap), bw, box_h)
+        bottom = y + height
+    labels, detours = [], 0
+    for e in edges:
+        a, b = e["from"], e["to"]
+        ax, ay, aw, ah = box[a]
+        bx, by, bw_, bh_ = box[b]
+        if top_down and layer[b] == layer[a] + 1:
+            sx, sy, ex, ey = ax + aw / 2, ay + ah, bx + bw_ / 2, by
+        elif not top_down and layer[b] == layer[a] + 1:
+            sx, sy, ex, ey = ax + aw, ay + ah / 2, bx, by + bh_ / 2
+        elif not top_down and layer[b] > layer[a] + 1:
+            # A forward edge that skips a column goes round underneath the
+            # row, so it never reads as passing through the boxes between.
+            lane = bottom + 22 + 16 * detours
+            detours += 1
+            start = len(els)
+            els.append({"kind": "path", "label": e["label"], "points": [
+                (ax + aw / 2, ay + ah), (ax + aw / 2, lane), (bx + bw_ / 2, lane),
+                (bx + bw_ / 2, by + bh_)]})
+            _tag(els, start, b)
+            continue
+        else:
+            c1, c2 = (ax + aw / 2, ay + ah / 2), (bx + bw_ / 2, by + bh_ / 2)
+            sx, sy = _clip_to_rect(*c1, aw, ah, *c2)
+            ex, ey = _clip_to_rect(*c2, bw_, bh_, *c1)
+        start = len(els)
+        els.append(_a(sx, sy, ex, ey, dashed=(a, b) in back))
+        _tag(els, start, b)
+        if e["label"]:
+            labels.append(({**_t((sx + ex) / 2, (sy + ey) / 2 + 4, e["label"], "edge",
+                                 color=_DG_COLORS["muted"]), "halo": True}, b))
+    # Boxes after the edges, so a long edge passes behind them; labels last.
+    for v in range(n):
+        start = len(els)
+        _node_box(els, *box[v], nodes[v], v)
+        _tag(els, start, v)
+        anc[v] = box[v]
+    for label, b in labels:
+        label["node"] = b
+        els.append(label)
+    return bottom + (30 + 16 * detours if detours else 0)
+
+
+def _lay_quadrant(spec: dict, els: list, y: float, anc: dict) -> float:
+    W, pad = _DG_W, _DG_PAD
+    axes = spec.get("axes") or {}
+    x0, x1 = pad + 64, W - pad - 16
+    y0, y1 = y + 12, y + 512
+    mx, my = (x0 + x1) / 2, (y0 + y1) / 2
+    quads = [(x0, y0), (mx, y0), (x0, my), (mx, my)]
+    fills = ([_dg_fill(i)[0] for i in range(4)] if _DG_COLORS.get("palette")
+             else [_tint(0.55), _tint(0.15), _tint(0.95), _tint(0.55)])
+    for (qx, qy), f in zip(quads, fills):
+        els.append(_r(qx, qy, mx - x0, my - y0, fill=f, stroke=None, rx=0))
+    els.append(_r(x0, y0, x1 - x0, y1 - y0, fill=None, stroke=_DG_COLORS["border"], rx=0))
+    els.append(_ln(mx, y0, mx, y1, _DG_COLORS["muted"], 1.5, dashed=True))
+    els.append(_ln(x0, my, x1, my, _DG_COLORS["muted"], 1.5, dashed=True))
+    for k, name in enumerate(spec.get("quadrants") or []):
+        qx = x0 + 16 if k % 2 == 0 else x1 - 16
+        qy = y0 + 30 if k < 2 else y1 - 16
+        els.append(_t(qx, qy, name, "col", bold=True, color=_DG_COLORS["muted"],
+                      anchor="start" if k % 2 == 0 else "end"))
+    els.append(_a(x0, y1 + 22, x1, y1 + 22, color=_DG_COLORS["muted"]))
+    els.append(_t(mx, y1 + 50, axes.get("x", ""), "axis", bold=True, color=_DG_COLORS["muted"]))
+    els.append(_a(x0 - 22, y1, x0 - 22, y0, color=_DG_COLORS["muted"]))
+    els.append(_t(x0 - 34, my, axes.get("y", ""), "axis", bold=True, color=_DG_COLORS["muted"],
+                  rot=-90))
+    for i, nd in enumerate(spec["nodes"]):
+        px = x0 + (0.05 + 0.9 * nd["x"]) * (x1 - x0)
+        py = y1 - (0.05 + 0.9 * nd["y"]) * (y1 - y0)
+        _, stroke = _dg_fill(i)
+        left = nd["x"] > 0.7
+        tx, anchor = (px - 18, "end") if left else (px + 18, "start")
+        start = len(els)
+        els.append(_badge(px, py, 10, stroke))
+        els.append(_t(tx, py + 6, _dg_wrap(nd["label"], 260, _DG_FONT["label"], 1)[0],
+                      "label", bold=True, anchor=anchor))
+        if nd["note"]:
+            els.append(_t(tx, py + 26, _dg_wrap(nd["note"], 260, _DG_FONT["note"], 1)[0],
+                          "note", color=_DG_COLORS["muted"], anchor=anchor))
+        _tag(els, start, i)
+        tw = _text_w([nd["label"], nd["note"]], _DG_FONT["label"], 260) + 30
+        anc[i] = (px - tw + 14 if left else px - 14, py - 18, tw, 50 if nd["note"] else 36)
+    return y1 + 62
+
+
+def _lay_spectrum(spec: dict, els: list, y: float, anc: dict) -> float:
+    W, pad = _DG_W, _DG_PAD
+    axes = spec.get("axes") or {}
+    x0, x1 = pad + 30, W - pad - 30
+    bar_y, bh = y + 130, 22
+    segs = 30
+    seg_w = (x1 - x0) / segs
+    for k in range(segs):
+        els.append(_r(x0 + k * seg_w, bar_y, seg_w + 0.5, bh,
+                      fill=_blend(_DG_COLORS["box"], _DG_COLORS["accent"], k / (segs - 1)),
+                      stroke=None, rx=0))
+    els.append(_r(x0, bar_y, x1 - x0, bh, fill=None, stroke=_DG_COLORS["border"], rx=4))
+    els.append(_t(x0, bar_y + bh + 30, axes.get("low", ""), "label", bold=True, anchor="start"))
+    els.append(_t(x1, bar_y + bh + 30, axes.get("high", ""), "label", bold=True, anchor="end"))
+    order = sorted(range(len(spec["nodes"])), key=lambda i: spec["nodes"][i]["x"])
+    for rank, i in enumerate(order):
+        nd = spec["nodes"][i]
+        px = x0 + nd["x"] * (x1 - x0)
+        _, stroke = _dg_fill(i)
+        start = len(els)
+        els.append(_badge(px, bar_y + bh / 2, 12, stroke))
+        label = _dg_wrap(nd["label"], 230, _DG_FONT["label"], 2)
+        if rank % 2 == 0:
+            els.append(_ln(px, bar_y - 4, px, bar_y - 26, stroke, 2))
+            ty = bar_y - 38
+            if nd["note"]:
+                els.append(_t(px, ty, _dg_wrap(nd["note"], 230, _DG_FONT["note"], 1)[0], "note",
+                              color=_DG_COLORS["muted"]))
+                ty -= _DG_FONT["note"] + 10
+            for line in reversed(label):
+                els.append(_t(px, ty, line, "label", bold=True))
+                ty -= _DG_FONT["label"] + 4
+            anc[i] = (px - 115, bar_y - 118, 230, 108)
+        else:
+            els.append(_ln(px, bar_y + bh + 4, px, bar_y + bh + 50, stroke, 2))
+            ty = bar_y + bh + 72
+            for line in label:
+                els.append(_t(px, ty, line, "label", bold=True))
+                ty += _DG_FONT["label"] + 4
+            if nd["note"]:
+                els.append(_t(px, ty, _dg_wrap(nd["note"], 230, _DG_FONT["note"], 1)[0], "note",
+                              color=_DG_COLORS["muted"]))
+            anc[i] = (px - 115, bar_y + bh + 52, 230, 80)
+        _tag(els, start, i)
+    return bar_y + bh + 150
+
+
+def _lay_bar(spec: dict, els: list, y: float, anc: dict) -> float:
+    data, W, pad = spec["data"], _DG_W, _DG_PAD
+    label_w = 320
+    x0, x1 = pad + label_w, W - pad - 140
+    vmax = max(d["value"] for d in data) or 1
+    bh, gap = 36, 14
+    top = y
+    for i, d in enumerate(data):
+        hot = i == spec.get("highlight", -1)
+        fill = _DG_COLORS["hot"] if hot else _DG_COLORS["accent"]
+        w = max(4, (x1 - x0) * max(0.0, d["value"]) / vmax)
+        start = len(els)
+        els.append(_t(x0 - 16, y + bh / 2 + 7,
+                      _dg_wrap(d["label"], label_w - 20, _DG_FONT["label"], 1)[0],
+                      "label", bold=True, anchor="end"))
+        els.append({**_r(x0, y, w, bh, fill=fill, stroke=None, rx=6), "val": d["value"]})
+        els.append(_t(x0 + w + 12, y + bh / 2 + 6, _fmt_value(d["value"], spec.get("unit", "")),
+                      "value", bold=True, color=fill, anchor="start"))
+        _tag(els, start, i)
+        anc[i] = (pad, y - 4, W - 2 * pad, bh + 8)
+        y += bh + gap
+    els.append(_ln(x0, top - 8, x0, y - gap + 8, _DG_COLORS["muted"], 2))
+    return y - gap
+
+
+def _nice_step(raw: float) -> float:
+    """The 1, 2 or 5 times a power of ten at or above `raw`: axis ticks a
+    reader can add up in their head."""
+    import math
+    power = 10 ** math.floor(math.log10(raw))
+    return next(m * power for m in (1, 2, 5, 10) if m * power >= raw)
+
+
+def _lay_line(spec: dict, els: list, y: float, anc: dict) -> float:
+    data, W, pad = spec["data"], _DG_W, _DG_PAD
+    x0, x1, top, bot = pad + 80, W - pad - 30, y + 36, y + 336
+    vals = [d["value"] for d in data]
+    lo = min(0.0, min(vals))
+    step = _nice_step((max(vals) - lo) / 4 or 1.0)
+    ticks = int(-(-(max(vals) - lo) // step)) + 1
+    hi = lo + step * ticks
+    unit = spec.get("unit", "")
+    for k in range(ticks + 1):
+        gy = bot - k * (bot - top) / ticks
+        els.append(_ln(x0, gy, x1, gy, "#e3e6ec", 1))
+        els.append(_t(x0 - 12, gy + 5, _fmt_value(round(lo + step * k, 6), unit),
+                      "axis", color=_DG_COLORS["muted"], anchor="end"))
+    n = len(data)
+    span = x1 - x0
+    pts = [(x0 + span * (0.05 + 0.9 * i / max(1, n - 1)),
+            bot - (d["value"] - lo) / (hi - lo) * (bot - top)) for i, d in enumerate(data)]
+    els.append(_poly(pts, None, _DG_COLORS["accent"], closed=False, width=3.5))
+    for i, ((px, py), d) in enumerate(zip(pts, data)):
+        color = _DG_COLORS["hot"] if i == spec.get("highlight", -1) else _DG_COLORS["accent"]
+        start = len(els)
+        els.append(_badge(px, py, 7, color))
+        els.append(_t(px, py - 16, _fmt_value(d["value"], unit), "value", bold=True, color=color))
+        els.append(_t(px, bot + 28, _dg_wrap(d["label"], span / max(1, n) + 30,
+                                             _DG_FONT["axis"], 1)[0], "axis",
+                      color=_DG_COLORS["muted"]))
+        _tag(els, start, i)
+        anc[i] = (px - 40, py - 36, 80, 50)
+    return bot + 40
+
+
+def _lay_card(spec: dict, els: list, y: float, anc: dict) -> float:
+    """The closing mental model: numbered points a reader can carry away."""
+    W, pad = _DG_W, _DG_PAD
+    for i, nd in enumerate(spec["nodes"]):
+        h = 92 if nd["note"] else 70
+        fill, stroke = _dg_fill(i)
+        start = len(els)
+        els.append(_r(pad, y, W - 2 * pad, h, fill=fill, stroke=stroke, rx=12))
+        els.append(_badge(pad + 44, y + h / 2, 24, stroke, str(i + 1), size=22))
+        ty = y + (h - (_DG_FONT["label"] + (_DG_FONT["note"] + 10 if nd["note"] else 0))) / 2 \
+            + _DG_FONT["label"] - 2
+        els.append(_t(pad + 92, ty, nd["label"], "label", bold=True, anchor="start"))
+        if nd["note"]:
+            els.append(_t(pad + 92, ty + _DG_FONT["note"] + 10,
+                          _dg_wrap(nd["note"], W - 2 * pad - 120, _DG_FONT["note"], 1)[0],
+                          "note", color=_DG_COLORS["muted"], anchor="start"))
+        _tag(els, start, i)
+        anc[i] = (pad, y, W - 2 * pad, h)
+        y += h + 12
+    return y - 12
+
+
+_LAYOUTS = {
+    "flow": _lay_flow,
+    "cycle": lambda s, e, y, a: _lay_flow(s, e, y, a, cycle=True),
+    "layers": _lay_layers,
+    "compare": _lay_compare,
+    "before_after": lambda s, e, y, a: _lay_compare(s, e, y, a, before_after=True),
+    "venn": _lay_venn,
+    "grid": _lay_grid,
+    "timeline": _lay_timeline,
+    "funnel": _lay_funnel,
+    "hub": _lay_hub,
+    "tree": lambda s, e, y, a: _lay_graph(s, e, y, a, top_down=True),
+    "graph": lambda s, e, y, a: _lay_graph(s, e, y, a, top_down=False),
+    "quadrant": _lay_quadrant,
+    "spectrum": _lay_spectrum,
+    "bar": _lay_bar,
+    "line": _lay_line,
+    "card": _lay_card,
+}
+
+
+def _focus(spec: dict, els: list, anc: dict, callouts: list):
+    """The highlight ring around the part that is the point, and a numbered
+    badge on each callout's part."""
+    hl = spec.get("highlight", -1)
+    if isinstance(hl, int) and hl in anc and spec["type"] not in ("bar", "line"):
+        x, y, w, h = anc[hl]
+        start = len(els)
+        els.append(_r(x - 6, y - 6, w + 12, h + 12, fill=None, stroke=_DG_COLORS["hot"],
+                      rx=14, sw=3.5))
+        _tag(els, start, hl)
+    for k, c in enumerate(callouts, 1):
+        x, y, w, h = anc[c["target"]]
+        start = len(els)
+        els.append(_badge(x + w - 4, y + 4, 15, _DG_COLORS["hot"], str(k)))
+        _tag(els, start, c["target"])
+
+
+def layout_diagram(spec: dict, style: str | None = None) -> dict:
+    """Turn a cleaned spec into primitives (rects, text, arrows, badges) on a
+    1200-wide canvas. Both renderers draw exactly this."""
+    if style not in _DG_STYLE_SETS:
+        style = DIAGRAM_STYLE if DIAGRAM_STYLE in _DG_STYLE_SETS else "clean"
+    saved = dict(_DG_COLORS)
+    _DG_COLORS.clear()
+    _DG_COLORS.update(_DG_STYLE_SETS[style])
+    try:
+        return _layout(spec, style)
+    finally:
+        _DG_COLORS.clear()
+        _DG_COLORS.update(saved)
+
+
+def _layout(spec: dict, style: str) -> dict:
+    W, pad = _DG_W, _DG_PAD
+    els, anc, y = [], {}, pad
+    if spec.get("title"):
+        lines = _dg_wrap(spec["title"], W - 2 * pad, _DG_FONT["title"], 2)
+        if _DG_COLORS.get("band"):
+            band_h = 44 + len(lines) * (_DG_FONT["title"] + 8)
+            els.append(_r(0, 0, W, band_h, fill=_DG_COLORS["band"], stroke=None, rx=0))
+            ty = 24
+            for line in lines:
+                ty += _DG_FONT["title"] + 8
+                els.append(_t(W / 2, ty, line, "title", bold=True, color="#ffffff"))
+            y = band_h + 30
+        else:
+            for line in lines:
+                y += _DG_FONT["title"]
+                els.append(_t(W / 2, y, line, "title", bold=True))
+            y += 24
+    y = _LAYOUTS.get(spec["type"], _lay_flow)(spec, els, y, anc)
+    callouts = [c for c in spec.get("callouts") or [] if c.get("target") in anc]
+    _focus(spec, els, anc, callouts)
+    if callouts:
+        y += 18
+        for k, c in enumerate(callouts, 1):
+            y += 32
+            els.append(_badge(pad + 14, y - 6, 13, _DG_COLORS["hot"], str(k), size=13))
+            els.append(_t(pad + 38, y, c["text"], "caption", anchor="start"))
     if spec.get("caption"):
         y += 26
         for line in _dg_wrap(spec["caption"], W - 2 * pad, _DG_FONT["caption"], 2):
@@ -1689,58 +2459,175 @@ def layout_diagram(spec: dict) -> dict:
     y += 22
     els.append(_t(W - pad, y, f"Diagram: {AUTHOR_NAME}", "credit",
                   color=_DG_COLORS["credit"], anchor="end"))
-    return {"w": W, "h": int(y + pad - 10), "elements": els}
+    return {"w": W, "h": int(y + pad - 10), "elements": els, "style": style}
+
+
+def _rough(points: list, seed: int, closed: bool = True, amp: float = 1.6) -> list:
+    """A hand-drawn version of a polyline: each segment split once and every
+    point nudged, the same way every time for the same shape."""
+    import random
+    rnd = random.Random(seed)
+    pts = list(points) + ([points[0]] if closed else [])
+    out = []
+    for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+        out.append((x1 + rnd.uniform(-amp, amp), y1 + rnd.uniform(-amp, amp)))
+        out.append(((x1 + x2) / 2 + rnd.uniform(-amp, amp) * 1.5,
+                    (y1 + y2) / 2 + rnd.uniform(-amp, amp) * 1.5))
+    out.append((pts[-1][0] + rnd.uniform(-amp, amp), pts[-1][1] + rnd.uniform(-amp, amp)))
+    return out
+
+
+def _rect_points(e: dict) -> list:
+    x, y, w, h = e["x"], e["y"], e["w"], e["h"]
+    return [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+
+
+def _seed(e: dict, k: int) -> int:
+    return int(e.get("x", e.get("x1", e.get("cx", 0))) * 7 + e.get("y", e.get("y1", e.get("cy", 0))) * 13) + k
+
+
+def _svg_attrs(e: dict) -> str:
+    out = ""
+    if "node" in e:
+        out += f' data-node="{e["node"]}"'
+    if "val" in e:
+        out += f' data-value="{e["val"]:g}"'
+    return out
+
+
+def _svg_d(points: list, closed: bool) -> str:
+    return "M" + " L".join(f"{x:.1f},{y:.1f}" for x, y in points) + (" Z" if closed else "")
 
 
 def diagram_svg(layout: dict) -> str:
     """The layout as one self-contained SVG, on a single line so it survives
-    Markdown's raw-HTML handling."""
+    Markdown's raw-HTML handling. Parts carry data-node, so the web page can
+    step through them."""
+    C = _DG_STYLE_SETS.get(layout.get("style", "clean"), _DG_STYLE_SETS["clean"])
+    sketch = C.get("sketch")
     W, H = layout["w"], layout["h"]
-    stroke = _DG_COLORS["accent"]
+    stroke = C["accent"]
+    font = C["font"].replace('"', "'")
+    # One arrowhead per colour, named by the colour, so several diagrams inline
+    # on one page never point at each other's markers with the wrong fill.
+    arrow_colors = sorted({e.get("color") or stroke for e in layout["elements"]
+                           if e["kind"] == "arrow"} | {stroke})
+    head = lambda c: f'marker-end="url(#dgA{c.lstrip("#")})"'
     out = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" '
-        f'viewBox="0 0 {W} {H}" role="img" font-family="Arial, Helvetica, sans-serif">',
-        '<defs><marker id="dgArrow" viewBox="0 0 10 10" refX="9" refY="5" '
-        'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
-        f'<path d="M0,0 L10,5 L0,10 z" fill="{stroke}"/></marker></defs>',
-        f'<rect x="0" y="0" width="{W}" height="{H}" fill="{_DG_COLORS["bg"]}"/>',
+        f'viewBox="0 0 {W} {H}" role="img" class="dg" font-family="{font}">',
+        "<defs>" + "".join(
+            f'<marker id="dgA{c.lstrip("#")}" viewBox="0 0 10 10" refX="9" refY="5" '
+            'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
+            f'<path d="M0,0 L10,5 L0,10 z" fill="{c}"/></marker>' for c in arrow_colors) + "</defs>",
+        f'<rect x="0" y="0" width="{W}" height="{H}" fill="{C["bg"]}"/>',
     ]
-    for e in layout["elements"]:
-        k = e["kind"]
+    for idx, e in enumerate(layout["elements"]):
+        k, data = e["kind"], _svg_attrs(e)
         if k == "rect":
+            if sketch and (e["stroke"] or e["fill"]):
+                pts = _rect_points(e)
+                if e["fill"]:
+                    out.append(f'<path d="{_svg_d(_rough(pts, _seed(e, idx)), True)}" '
+                               f'fill="{e["fill"]}" stroke="none"{data}/>')
+                if e["stroke"]:
+                    for p in (0, 1):
+                        out.append(f'<path d="{_svg_d(_rough(pts, _seed(e, idx + p * 97)), False)}" '
+                                   f'fill="none" stroke="{e["stroke"]}" stroke-width="{e["sw"] - p * 0.8:.1f}" '
+                                   f'stroke-linecap="round"{data}/>')
+                continue
             out.append(f'<rect x="{e["x"]:.1f}" y="{e["y"]:.1f}" width="{e["w"]:.1f}" '
                        f'height="{e["h"]:.1f}" rx="{e["rx"]}" fill="{e["fill"] or "none"}" '
-                       f'stroke="{e["stroke"] or "none"}" stroke-width="2"/>')
+                       f'stroke="{e["stroke"] or "none"}" stroke-width="{e["sw"]}"{data}/>')
         elif k == "circle":
             out.append(f'<circle cx="{e["cx"]:.1f}" cy="{e["cy"]:.1f}" r="{e["r"]:.1f}" '
                        f'fill="{e["color"]}" fill-opacity="0.16" stroke="{e["color"]}" '
-                       'stroke-width="2.5"/>')
+                       f'stroke-width="2.5"{data}/>')
         elif k == "text":
             weight = ' font-weight="bold"' if e["bold"] else ""
+            rot = (f' transform="rotate({e["rot"]} {e["x"]:.1f} {e["y"]:.1f})"'
+                   if e.get("rot") else "")
+            halo = (f' paint-order="stroke" stroke="{C["bg"]}" stroke-width="5"'
+                    if e.get("halo") else "")
             out.append(f'<text x="{e["x"]:.1f}" y="{e["y"]:.1f}" font-size="{e["size"]}" '
-                       f'text-anchor="{e["anchor"]}" fill="{e["color"]}"{weight}>'
+                       f'text-anchor="{e["anchor"]}" fill="{e["color"]}"{weight}{rot}{halo}{data}>'
                        f'{_svg_escape(e["text"])}</text>')
         elif k == "arrow":
+            color = e.get("color") or stroke
             dash = ' stroke-dasharray="7 5"' if e["dashed"] else ""
-            out.append(f'<line x1="{e["x1"]:.1f}" y1="{e["y1"]:.1f}" x2="{e["x2"]:.1f}" '
-                       f'y2="{e["y2"]:.1f}" stroke="{stroke}" stroke-width="2.5"{dash} '
-                       'marker-end="url(#dgArrow)"/>')
+            if sketch:
+                pts = _rough([(e["x1"], e["y1"]), (e["x2"], e["y2"])], _seed(e, idx), closed=False)
+                out.append(f'<path d="{_svg_d(pts, False)}" fill="none" stroke="{color}" '
+                           f'stroke-width="2.5"{dash} stroke-linecap="round" '
+                           f'{head(color)}{data}/>')
+            else:
+                out.append(f'<line x1="{e["x1"]:.1f}" y1="{e["y1"]:.1f}" x2="{e["x2"]:.1f}" '
+                           f'y2="{e["y2"]:.1f}" stroke="{color}" stroke-width="2.5"{dash} '
+                           f'{head(color)}{data}/>')
             if e["label"]:
                 mx, my = (e["x1"] + e["x2"]) / 2, (e["y1"] + e["y2"]) / 2 - 8
                 out.append(f'<text x="{mx:.1f}" y="{my:.1f}" font-size="{_DG_FONT["edge"]}" '
-                           f'text-anchor="middle" fill="{_DG_COLORS["muted"]}">'
+                           f'text-anchor="middle" fill="{C["muted"]}" paint-order="stroke" '
+                           f'stroke="{C["bg"]}" stroke-width="4"{data}>'
                            f'{_svg_escape(e["label"])}</text>')
         elif k == "path":
             pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in e["points"])
             out.append(f'<polyline points="{pts}" fill="none" stroke="{stroke}" '
-                       'stroke-width="2.5" marker-end="url(#dgArrow)"/>')
+                       f'stroke-width="2.5" {head(stroke)}{data}/>')
             if e.get("label"):
                 (x1, y1), (x2, y2) = e["points"][1], e["points"][2]
                 out.append(f'<text x="{(x1 + x2) / 2:.1f}" y="{y1 + 17:.1f}" '
                            f'font-size="{_DG_FONT["edge"]}" text-anchor="middle" '
-                           f'fill="{_DG_COLORS["muted"]}">{_svg_escape(e["label"])}</text>')
+                           f'fill="{C["muted"]}">{_svg_escape(e["label"])}</text>')
+        elif k == "line":
+            dash = ' stroke-dasharray="6 5"' if e["dashed"] else ""
+            if sketch:
+                pts = _rough([(e["x1"], e["y1"]), (e["x2"], e["y2"])], _seed(e, idx), closed=False)
+                out.append(f'<path d="{_svg_d(pts, False)}" fill="none" stroke="{e["color"]}" '
+                           f'stroke-width="{e["width"]}"{dash} stroke-linecap="round"{data}/>')
+            else:
+                out.append(f'<line x1="{e["x1"]:.1f}" y1="{e["y1"]:.1f}" x2="{e["x2"]:.1f}" '
+                           f'y2="{e["y2"]:.1f}" stroke="{e["color"]}" stroke-width="{e["width"]}"'
+                           f'{dash}{data}/>')
+        elif k == "poly":
+            pts = _rough(e["points"], _seed({"x": e["points"][0][0], "y": e["points"][0][1]}, idx),
+                         closed=e["closed"]) if sketch else e["points"]
+            out.append(f'<path d="{_svg_d(pts, e["closed"] and not sketch)}" '
+                       f'fill="{e["fill"] or "none"}" stroke="{e["stroke"] or "none"}" '
+                       f'stroke-width="{e["width"]}" stroke-linejoin="round"{data}/>')
+        elif k == "badge":
+            out.append(f'<circle cx="{e["cx"]:.1f}" cy="{e["cy"]:.1f}" r="{e["r"]:.1f}" '
+                       f'fill="{e["fill"]}" stroke="{C["bg"]}" stroke-width="2"{data}/>')
+            if e["text"]:
+                out.append(f'<text x="{e["cx"]:.1f}" y="{e["cy"] + e["size"] * 0.36:.1f}" '
+                           f'font-size="{e["size"]}" font-weight="bold" text-anchor="middle" '
+                           f'fill="#ffffff"{data}>{_svg_escape(e["text"])}</text>')
     out.append("</svg>")
     return "".join(out)
+
+
+_PIL_FONTS: dict = {}
+
+
+def _pil_font(px: int, bold: bool, sketch: bool = False):
+    """A TrueType face at `px`, and whether bold has to be faked with a stroke."""
+    key = (px, bold, sketch)
+    if key not in _PIL_FONTS:
+        from PIL import ImageFont
+        names = (("segoeprb.ttf", "comicbd.ttf") if bold else ("segoepr.ttf", "comic.ttf")) \
+            if sketch else ()
+        names += ("arialbd.ttf", "DejaVuSans-Bold.ttf") if bold else ("arial.ttf", "DejaVuSans.ttf")
+        face, faux_bold = None, bold
+        for name in names:
+            try:
+                face, faux_bold = ImageFont.truetype(name, px), False
+                break
+            except Exception:
+                continue
+        if face is None:
+            face = ImageFont.load_default(size=px)   # Pillow's bundled scalable face
+        _PIL_FONTS[key] = (face, faux_bold)
+    return _PIL_FONTS[key]
 
 
 def _png_arrow(draw, pts: list, scale: float, color: str):
@@ -1755,38 +2642,34 @@ def _png_arrow(draw, pts: list, scale: float, color: str):
     draw.polygon([(x2, y2), (base_x + px, base_y + py), (base_x - px, base_y - py)], fill=color)
 
 
+def _png_dashed(draw, p1, p2, color, width, dash=12, gap=9):
+    (x1, y1), (x2, y2) = p1, p2
+    length = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5 or 1.0
+    ux, uy = (x2 - x1) / length, (y2 - y1) / length
+    t = 0.0
+    while t < length:
+        e = min(length, t + dash)
+        draw.line([(x1 + ux * t, y1 + uy * t), (x1 + ux * e, y1 + uy * e)], fill=color, width=width)
+        t = e + gap
+
+
 def diagram_png(layout: dict, path: Path, scale: float = 1.5) -> bool:
     """Rasterise the layout with Pillow. False when Pillow is missing, in which
     case the SVG stands alone."""
     try:
-        from PIL import Image, ImageDraw, ImageFont
+        from PIL import Image, ImageDraw
     except ImportError:
         print("  Pillow not installed; diagram PNG skipped, SVG still written.")
         return False
+    C = _DG_STYLE_SETS.get(layout.get("style", "clean"), _DG_STYLE_SETS["clean"])
+    sketch = C.get("sketch")
     W, H = int(layout["w"] * scale), int(layout["h"] * scale)
-    im = Image.new("RGB", (W, H), _DG_COLORS["bg"])
+    im = Image.new("RGB", (W, H), C["bg"])
     draw = ImageDraw.Draw(im)
-    fonts: dict = {}
-
-    def font(size: int, bold: bool):
-        key = (size, bold)
-        if key not in fonts:
-            px = int(size * scale)
-            face, faux_bold = None, bold
-            for name in (("arialbd.ttf", "DejaVuSans-Bold.ttf") if bold
-                         else ("arial.ttf", "DejaVuSans.ttf")):
-                try:
-                    face, faux_bold = ImageFont.truetype(name, px), False
-                    break
-                except Exception:
-                    continue
-            if face is None:
-                face = ImageFont.load_default(size=px)   # Pillow's bundled scalable face
-            fonts[key] = (face, faux_bold)
-        return fonts[key]
-
+    font = lambda size, bold: _pil_font(int(size * scale), bold, sketch)
     S = lambda v: v * scale
-    for e in layout["elements"]:
+    SP = lambda pts: [(S(x), S(y)) for x, y in pts]
+    for idx, e in enumerate(layout["elements"]):
         k = e["kind"]
         if k == "circle":
             # Pillow has no fill opacity on an RGB canvas: draw the set on a
@@ -1800,63 +2683,245 @@ def diagram_png(layout: dict, path: Path, scale: float = 1.5) -> bool:
             draw = ImageDraw.Draw(im)
             draw.ellipse(box, outline=e["color"], width=max(2, int(2.5 * scale)))
         elif k == "rect":
+            width = max(2, int(e["sw"] * scale)) if e["stroke"] else 0
+            if sketch and (e["stroke"] or e["fill"]):
+                pts = _rect_points(e)
+                if e["fill"]:
+                    draw.polygon(SP(_rough(pts, _seed(e, idx))), fill=e["fill"])
+                if e["stroke"]:
+                    for p in (0, 1):
+                        draw.line(SP(_rough(pts, _seed(e, idx + p * 97))), fill=e["stroke"],
+                                  width=max(1, width - p), joint="curve")
+                continue
             draw.rounded_rectangle(
                 [S(e["x"]), S(e["y"]), S(e["x"] + e["w"]), S(e["y"] + e["h"])],
-                radius=S(e["rx"]), fill=e["fill"], outline=e["stroke"],
-                width=max(2, int(2 * scale)) if e["stroke"] else 0)
+                radius=S(e["rx"]), fill=e["fill"], outline=e["stroke"], width=width)
         elif k == "text":
             face, faux = font(e["size"], e["bold"])
+            if e.get("rot"):
+                bbox = draw.textbbox((0, 0), e["text"], font=face)
+                tw, th = bbox[2] - bbox[0] + 6, bbox[3] - bbox[1] + 10
+                layer = Image.new("RGBA", (max(1, tw), max(1, th)), (0, 0, 0, 0))
+                ImageDraw.Draw(layer).text((-bbox[0] + 3, -bbox[1] + 5), e["text"], font=face,
+                                           fill=e["color"])
+                layer = layer.rotate(-e["rot"], expand=True)
+                im.paste(layer, (int(S(e["x"]) - layer.width * 0.8),
+                                 int(S(e["y"]) - layer.height / 2)), layer)
+                draw = ImageDraw.Draw(im)
+                continue
+            anchor = {"middle": "ms", "start": "ls", "end": "rs"}[e["anchor"]]
+            if e.get("halo"):
+                draw.text((S(e["x"]), S(e["y"])), e["text"], font=face, fill=C["bg"],
+                          anchor=anchor, stroke_width=int(4 * scale), stroke_fill=C["bg"])
             draw.text((S(e["x"]), S(e["y"])), e["text"], font=face, fill=e["color"],
-                      anchor={"middle": "ms", "start": "ls", "end": "rs"}[e["anchor"]],
-                      stroke_width=1 if faux else 0, stroke_fill=e["color"])
+                      anchor=anchor, stroke_width=1 if faux else 0, stroke_fill=e["color"])
         elif k == "arrow":
-            _png_arrow(draw, [(S(e["x1"]), S(e["y1"])), (S(e["x2"]), S(e["y2"]))],
-                       scale, _DG_COLORS["accent"])
+            color = e.get("color") or C["accent"]
+            pts = [(e["x1"], e["y1"]), (e["x2"], e["y2"])]
+            if e["dashed"]:
+                _png_dashed(draw, *SP(pts), color, max(2, int(2.5 * scale)))
+                _png_arrow(draw, SP([((e["x1"] + 9 * e["x2"]) / 10, (e["y1"] + 9 * e["y2"]) / 10),
+                                     pts[1]]), scale, color)
+            else:
+                _png_arrow(draw, SP(_rough(pts, _seed(e, idx), closed=False)[:-1] + [pts[1]]
+                                    if sketch else pts), scale, color)
             if e["label"]:
                 face, _ = font(_DG_FONT["edge"], False)
                 draw.text((S((e["x1"] + e["x2"]) / 2), S((e["y1"] + e["y2"]) / 2 - 8)),
-                          e["label"], font=face, fill=_DG_COLORS["muted"], anchor="ms")
+                          e["label"], font=face, fill=C["muted"], anchor="ms",
+                          stroke_width=int(3 * scale), stroke_fill=C["bg"])
         elif k == "path":
-            _png_arrow(draw, [(S(x), S(y)) for x, y in e["points"]], scale, _DG_COLORS["accent"])
+            _png_arrow(draw, SP(e["points"]), scale, C["accent"])
             if e.get("label"):
                 (x1, y1), (x2, _) = e["points"][1], e["points"][2]
                 face, _ = font(_DG_FONT["edge"], False)
                 draw.text((S((x1 + x2) / 2), S(y1 + 17)), e["label"], font=face,
-                          fill=_DG_COLORS["muted"], anchor="ms")
+                          fill=C["muted"], anchor="ms")
+        elif k == "line":
+            width = max(1, int(e["width"] * scale))
+            pts = [(e["x1"], e["y1"]), (e["x2"], e["y2"])]
+            if e["dashed"]:
+                _png_dashed(draw, *SP(pts), e["color"], width)
+            else:
+                draw.line(SP(_rough(pts, _seed(e, idx), closed=False) if sketch else pts),
+                          fill=e["color"], width=width, joint="curve")
+        elif k == "poly":
+            width = max(1, int(e["width"] * scale))
+            pts = SP(e["points"])
+            if e["closed"]:
+                draw.polygon(pts, fill=e["fill"], outline=e["stroke"],
+                             width=width if e["stroke"] else 0)
+            elif e["stroke"]:
+                draw.line(pts, fill=e["stroke"], width=width, joint="curve")
+        elif k == "badge":
+            r = S(e["r"])
+            draw.ellipse([S(e["cx"]) - r, S(e["cy"]) - r, S(e["cx"]) + r, S(e["cy"]) + r],
+                         fill=e["fill"], outline=C["bg"], width=max(1, int(2 * scale)))
+            if e["text"]:
+                face, _ = font(e["size"], True)
+                draw.text((S(e["cx"]), S(e["cy"])), e["text"], font=face, fill="#ffffff",
+                          anchor="mm")
     im.save(path, "PNG", optimize=True)
     return True
 
 
-def render_diagrams(content: str, slug: str, output_dir: Path) -> dict[str, dict]:
-    """Every [DIAGRAM: ...] marker -> a spec from Claude -> SVG and PNG on disk.
-    Returns marker -> {alt, caption, svg, png, svg_name}."""
+def signature_card(png_path: Path, title: str, out_path: Path) -> bool:
+    """The signature diagram on a 1080x1350 portrait card: the shape LinkedIn
+    and Instagram show largest in a feed."""
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return False
+    C = _DG_STYLE_SETS["bold"]
+    W, H = 1080, 1350
+    card = Image.new("RGB", (W, H), C["bg"])
+    draw = ImageDraw.Draw(card)
+    face, faux = _pil_font(52, True)
+    y = 84
+    for line in _wrap_chars(title, 30, 3):
+        draw.text((W / 2, y), line, font=face, fill=C["text"], anchor="ms",
+                  stroke_width=1 if faux else 0, stroke_fill=C["text"])
+        y += 64
+    diagram = Image.open(png_path).convert("RGB")
+    box_w, box_h = W - 72, H - y - 110
+    ratio = min(box_w / diagram.width, box_h / diagram.height)
+    diagram = diagram.resize((int(diagram.width * ratio), int(diagram.height * ratio)),
+                             Image.LANCZOS)
+    top = y + (box_h - diagram.height) // 2 + 10
+    card.paste(diagram, ((W - diagram.width) // 2, top))
+    small, _ = _pil_font(26, True)
+    draw.text((48, H - 52), AUTHOR_NAME, font=small, fill=C["muted"], anchor="ls")
+    draw.text((W - 48, H - 52), "Save this for later", font=small, fill=C["accent"], anchor="rs")
+    card.save(out_path, "PNG", optimize=True)
+    return True
+
+
+# -- the teacher's eye: Claude looks at what was drawn ---------------------
+
+def critique_diagram(spec: dict, png: bytes, shows: str, section_text: str,
+                     flags: set | frozenset = frozenset()) -> dict:
+    """Keep, revise or drop a drawn diagram, judged by looking at the PNG.
+    Returns {"verdict", "problems", "spec"}; any failure keeps the picture."""
+    can_drop = "signature" not in flags
+    prompt = f"""The picture above is a diagram the pipeline just drew for an article section.
+Judge it the way a good teacher would.
+
+IT WAS MEANT TO MAKE OBVIOUS: {shows}
+
+THE SPEC IT WAS DRAWN FROM
+{json.dumps(spec, ensure_ascii=False)}
+
+THE SECTION
+{section_text[:3000]}
+
+Ask:
+1. Would a beginner who read the section learn something from this picture that the
+   words alone do not give them? A picture that restates one sentence, or has only two
+   meaningful parts, fails.
+2. Is it the right shape for the idea? An order is a flow, a choice is a tree or a
+   quadrant, numbers are a chart, a trade-off is a compare, parts of a whole are a hub.
+3. Can every label be read: nothing cut off with "…", overlapping, crowded or too long?
+4. Is the highlighted part really the point, and do callouts say something the labels do not?
+
+Verdict: "keep" when it teaches and reads cleanly; "revise" when the idea deserves a
+picture but this one is wrong, and then give the full corrected spec (same fields as
+above, shapes: flow, cycle, layers, compare, venn, grid, timeline, tree, graph, hub,
+funnel, before_after, quadrant, spectrum, bar, line){'; "drop" when the idea is clearer in words' if can_drop else '. This is the article' + "'" + 's signature visual, so never drop it'}.
+
+Return ONLY valid JSON in exactly this shape:
+{{"verdict": "keep | revise{' | drop' if can_drop else ''}", "problems": ["<what is wrong, specifically>"], "spec": <the full corrected spec when the verdict is revise, otherwise null>}}"""
+    try:
+        data = extract_json(call_claude(prompt, max_tokens=4000, images=[png]))
+    except Exception as e:
+        print(f"  Diagram critique skipped ({str(e)[:80]}).")
+        return {"verdict": "keep", "problems": [], "spec": None}
+    verdict = str(data.get("verdict", "keep")).strip().lower()
+    if verdict not in ("keep", "revise", "drop") or (verdict == "drop" and not can_drop):
+        verdict = "keep"
+    problems = [str(p)[:200] for p in (data.get("problems") or []) if str(p).strip()][:5]
+    return {"verdict": verdict, "problems": problems,
+            "spec": data.get("spec") if isinstance(data.get("spec"), dict) else None}
+
+
+def _draw_diagram(spec: dict, style: str, output_dir: Path, base: str, flags: set) -> dict:
+    layout = layout_diagram(spec, style)
+    svg = diagram_svg(layout)
+    (output_dir / f"{base}.svg").write_text(svg, encoding="utf-8")
+    png_ok = diagram_png(layout, output_dir / f"{base}.png")
+    (output_dir / f"{base}.json").write_text(json.dumps(
+        {"spec": spec, "style": style, "flags": sorted(flags)}, indent=2, ensure_ascii=False),
+        encoding="utf-8")
+    return {"svg": svg, "svg_name": f"{base}.svg", "png": f"{base}.png" if png_ok else None}
+
+
+def render_diagrams(content: str, slug: str, output_dir: Path, style: str | None = None,
+                    critique: bool = True, presets: dict | None = None) -> dict[str, dict]:
+    """Every [DIAGRAM: ...] marker -> a spec from Claude -> SVG, PNG and spec on
+    disk -> a look at the PNG, and a redraw or a drop when it does not teach.
+    `presets` maps a marker to a spec that is already made (the mental model).
+    Returns marker -> {alt, caption, type, svg, svg_name, png, spec, flags}."""
     markers = list(DIAGRAM_MARKER_RE.finditer(content))
     if not markers:
         print("  No [DIAGRAM: ...] markers found in article.")
         return {}
     log("STEP 8.5", f"Drawing {len(markers)} diagram(s)")
     output_dir.mkdir(parents=True, exist_ok=True)
-    out = {}
-    for n, m in enumerate(markers, 1):
-        title, shows = m.group(1).strip(), m.group(2).strip()
-        spec = generate_diagram_spec(title, shows, _section_around(content, m.start()))
+    style = style if style in DIAGRAM_STYLES else (
+        DIAGRAM_STYLE if DIAGRAM_STYLE in DIAGRAM_STYLES else "clean")
+    out, n = {}, 0
+    for m in markers:
+        title, shows, flags = _marker_parts(m)
+        section = _section_around(content, m.start())
+        max_nodes = DIAGRAM_SIGNATURE_MAX_NODES if "signature" in flags else DIAGRAM_MAX_NODES
+        spec = (presets or {}).get(m.group(0)) or generate_diagram_spec(title, shows, section, flags)
         if not spec:
-            print(f"  Diagram {n}: no usable spec; the marker will be dropped.")
+            print(f"  Diagram '{title[:50]}': no usable spec; the marker will be dropped.")
             continue
-        layout = layout_diagram(spec)
-        svg_name, png_name = f"{slug}_diagram_{n}.svg", f"{slug}_diagram_{n}.png"
-        svg = diagram_svg(layout)
-        (output_dir / svg_name).write_text(svg, encoding="utf-8")
-        png_ok = diagram_png(layout, output_dir / png_name)
-        parts = len(spec["nodes"]) or len(spec["rows"]) or len(spec["columns"])
-        out[m.group(0)] = {
+        n += 1
+        base = f"{slug}_diagram_{n}"
+        # The signature and the mental model stand out from the rest of the page.
+        st = "bold" if flags & {"signature", "summary"} and style == "clean" else style
+        drawn = _draw_diagram(spec, st, output_dir, base, flags)
+        if critique and drawn["png"] and "summary" not in flags:
+            for _ in range(DIAGRAM_CRITIQUE_ROUNDS):
+                review = critique_diagram(spec, (output_dir / drawn["png"]).read_bytes(),
+                                          shows, section, flags)
+                if review["verdict"] == "keep":
+                    break
+                if review["verdict"] == "drop":
+                    print(f"  Diagram {n}: dropped on review ({'; '.join(review['problems'])[:120]}).")
+                    for ext in (".svg", ".png", ".json"):
+                        (output_dir / f"{base}{ext}").unlink(missing_ok=True)
+                    drawn = None
+                    break
+                revised = _clean_diagram_spec(review["spec"], section, max_nodes)
+                if not revised:
+                    break
+                print(f"  Diagram {n}: redrawn on review ({'; '.join(review['problems'])[:120]}).")
+                spec = revised
+                drawn = _draw_diagram(spec, st, output_dir, base, flags)
+        if drawn is None:
+            n -= 1
+            continue
+        record = {
             "alt": spec.get("alt") or spec["title"] or title,
             "caption": spec["caption"] or shows,
-            "type": spec["type"], "svg": svg, "svg_name": svg_name,
-            "png": png_name if png_ok else None,
+            "type": spec["type"], "spec": spec, "flags": sorted(flags), "style": st,
+            **drawn,
         }
-        print(f"  Diagram {n}: {spec['type']} with {parts} parts -> "
-              f"{png_name if png_ok else svg_name}")
+        if "signature" in flags and drawn["png"]:
+            card = f"{slug}_signature.png"
+            if signature_card(output_dir / drawn["png"], spec["title"] or title, output_dir / card):
+                record["card"] = card
+        out[m.group(0)] = record
+        print(f"  Diagram {n}: {spec['type']} with {_part_count(spec)} parts, {st} -> "
+              f"{drawn['png'] or drawn['svg_name']}" + (" (signature)" if "signature" in flags else ""))
+    # A rerun of the same article can leave higher-numbered files from the last
+    # run; they would come back on a re-render.
+    for stale in output_dir.glob(f"{slug}_diagram_*"):
+        num = stale.stem.rsplit("_", 1)[-1]
+        if num.isdigit() and int(num) > n:
+            stale.unlink(missing_ok=True)
     return out
 
 
@@ -1868,6 +2933,246 @@ def inject_diagrams(content: str, diagrams: dict[str, dict]) -> str:
         src = d["png"] or d["svg_name"]
         content = content.replace(marker, f"\n![{d['alt']}]({src})\n*Diagram: {d['caption']}*\n")
     return content
+
+
+# -- deciding what to draw --------------------------------------------------
+#
+# The outline places markers before a word is written, so some land on ideas
+# nobody gets wrong. Once the article exists, plan_visuals reads it whole and
+# spends the pictures on the ideas that are hard to hold in your head.
+
+_NO_VISUAL_SECTIONS = re.compile(
+    r"\b(faq|frequently asked|conclusion|sources|references|further reading)\b", re.I)
+_HEADING_RE = re.compile(r"^(#{2,3})\s+(.+?)\s*$", re.M)
+
+
+def _norm_heading(text: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9 ]+", " ", str(text).lower()).split())
+
+
+def _find_section(content: str, heading: str) -> tuple[int, int] | None:
+    """The span of the section under `heading`, up to the next heading of the
+    same or a higher level."""
+    want = _norm_heading(heading)
+    if not want:
+        return None
+    heads = list(_HEADING_RE.finditer(content))
+    match = next((h for h in heads if _norm_heading(h.group(2)) == want), None) or \
+        next((h for h in heads if want in _norm_heading(h.group(2))), None)
+    if not match:
+        return None
+    level = len(match.group(1))
+    end = next((h.start() for h in heads if h.start() > match.start() and len(h.group(1)) <= level),
+               len(content))
+    return match.start(), end
+
+
+def _heading_above(content: str, pos: int) -> str:
+    heads = [h for h in _HEADING_RE.finditer(content) if h.start() < pos]
+    return heads[-1].group(2) if heads else ""
+
+
+def _insert_after(content: str, span: tuple[int, int], phrase: str, block: str) -> str:
+    """Put `block` after the paragraph holding `phrase`, or at the end of the section."""
+    start, end = span
+    seg = content[start:end]
+    phrase = " ".join(str(phrase or "").split())
+    i = seg.lower().find(phrase.lower()) if len(phrase) >= 8 else -1
+    if i >= 0:
+        j = seg.find("\n\n", i)
+        j = len(seg.rstrip()) if j < 0 else j
+    else:
+        j = len(seg.rstrip())
+    pos = start + j
+    return content[:pos] + "\n\n" + block + "\n" + content[pos:]
+
+
+def _marker_text(title: str, shows: str, flags: list) -> str:
+    clean = lambda s: " ".join(re.sub(r"[\[\]|]", " ", str(s)).split())
+    return f"[DIAGRAM: {clean(title)[:80]} | Shows: {clean(shows)[:200]}" + \
+        "".join(f" | {f}" for f in flags) + "]"
+
+
+def plan_visuals(content: str, title: str, max_total: int = DIAGRAM_MAX_VISUALS) -> str:
+    """Spend the article's pictures on the ideas that are hard to picture.
+    Keeps, drops and adds [DIAGRAM: ...] markers and flags one as the signature.
+    Any failure leaves the article as it was."""
+    existing = list(DIAGRAM_MARKER_RE.finditer(content))
+    numbered = content
+    for k, m in reversed(list(enumerate(existing, 1))):
+        numbered = (numbered[:m.start()] + f"[DIAGRAM #{k}: {m.group(1)} | Shows: {m.group(2)}]"
+                    + numbered[m.end():])
+    log("STEP 8.3", "Planning the visuals around the hardest ideas")
+    prompt = f"""You are the visual editor for the article below. Its pictures exist to teach: each
+one must make an idea click that words alone leave fuzzy, the way the best explainers
+do (a ByteByteGo system diagram, a good textbook figure).
+
+ARTICLE TITLE: {title}
+
+THE ARTICLE (existing picture markers are numbered)
+{numbered[:24000]}
+
+Do this:
+1. Name the 2-4 ideas in this article a reader is most likely to misunderstand or fail
+   to picture: a process whose order matters, a structure with parts, a trade-off
+   between options, a decision with branches, a change over time, numbers worth
+   comparing.
+2. For each numbered marker, keep it only if it shows one of those ideas. Drop one
+   that restates a single sentence, would have fewer than three parts, or
+   illustrates something nobody gets wrong.
+3. Add a picture for each hard idea that has none.
+4. Choose ONE signature visual: the picture that carries the whole article, dense
+   enough that someone would save and share it on its own (the full process, the map
+   of options, the decision the reader came to make). It belongs early, in the first
+   or second section after the introduction. It can be a kept marker or a new one.
+5. If the article states three or more comparable numbers for options a reader
+   chooses between (prices, hours, salaries), one picture may be "explore": on the
+   web it becomes a chart the reader filters with a slider.
+
+Rules: at most {max_total} pictures in total; none in the FAQ, conclusion or sources;
+never two in one paragraph; "after" is copied exactly from the article, so the
+picture lands next to the words it explains.
+
+Return ONLY valid JSON in exactly this shape:
+{{
+  "hard_ideas": ["<the idea, and what a reader gets wrong about it>"],
+  "keep": [<numbers of the markers to keep>],
+  "signature": <number of the kept marker that is the signature, or 0 when it is an addition>,
+  "explore": <number of a kept marker to make interactive, or 0>,
+  "add": [ {{"section": "<the exact heading text of the section, without the #>", "after": "<5-12 words copied exactly from the paragraph the picture follows>", "title": "<picture title>", "shows": "<the one thing the picture must make obvious>", "signature": false, "explore": false}} ]
+}}"""
+    try:
+        plan = extract_json(call_claude(prompt, max_tokens=4000))
+    except Exception as e:
+        print(f"  Visual plan skipped ({str(e)[:80]}).")
+        return content
+    if not isinstance(plan.get("keep"), list):
+        print("  Visual plan skipped (no keep list in the answer).")
+        return content
+    as_int = lambda v: int(v) if str(v).strip().isdigit() else 0
+    keep = {as_int(k) for k in plan["keep"]} & set(range(1, len(existing) + 1))
+    sig, explore = as_int(plan.get("signature")), as_int(plan.get("explore"))
+    adds = [a for a in (plan.get("add") or []) if isinstance(a, dict)
+            and a.get("title") and a.get("shows") and a.get("section")
+            and not _NO_VISUAL_SECTIONS.search(str(a["section"]))]
+    # The simple-version section always keeps a picture: drop its marker only
+    # when the plan puts a better one in the same section.
+    if existing and 1 not in keep:
+        first = _norm_heading(_heading_above(content, existing[0].start()))
+        if not any(_norm_heading(a["section"]) == first for a in adds):
+            keep.add(1)
+    adds.sort(key=lambda a: not a.get("signature"))
+    adds = adds[:max(0, max_total - len(keep))]
+    for k, m in reversed(list(enumerate(existing, 1))):
+        if k not in keep:
+            replacement = ""
+        else:
+            flags = (["Signature"] if k == sig else []) + (["Explore"] if k == explore else [])
+            replacement = _marker_text(*_marker_parts(m)[:2], flags) if flags else m.group(0)
+        content = content[:m.start()] + replacement + content[m.end():]
+    has_sig, has_explore = sig in keep, explore in keep
+    added = 0
+    for a in adds:
+        flags = []
+        if a.get("signature") and not has_sig:
+            flags.append("Signature")
+        if a.get("explore") and not has_explore:
+            flags.append("Explore")
+        span = _find_section(content, a["section"])
+        if not span:
+            print(f"  Visual plan: no section '{str(a['section'])[:50]}'; '{a['title'][:40]}' skipped.")
+            continue
+        content = _insert_after(content, span, a.get("after", ""),
+                                _marker_text(a["title"], a["shows"], flags))
+        has_sig |= "Signature" in flags
+        has_explore |= "Explore" in flags
+        added += 1
+    for idea in (plan.get("hard_ideas") or [])[:4]:
+        print(f"  Hard idea: {str(idea)[:110]}")
+    print(f"  Visual plan: kept {len(keep)} of {len(existing)}, added {added}"
+          + (", signature chosen" if has_sig else ""))
+    return re.sub(r"\n{3,}", "\n\n", content)
+
+
+# -- learning aids: retrieval questions and the mental model ---------------
+
+LEARNING_SCHEMA = """{
+  "checks": [ {"section": "<the exact heading text of the section, without the #>", "question": "<one question>", "answer": "<1-2 sentences>"} ],
+  "mental_model": {"title": "<under 8 words>", "points": [ {"label": "<2-5 words>", "note": "<under 14 words>"} ], "caption": "<the one sentence to remember, under 20 words>", "alt": "<what the card shows, under 30 words>"}
+}"""
+
+
+def generate_learning_aids(content: str, title: str) -> dict:
+    """Up to three "check yourself" questions and a mental-model card. Empty
+    on any failure."""
+    log("STEP 8.4", "Writing the check-yourself questions and the mental model")
+    prompt = f"""Readers remember what they have to retrieve. Help the readers of the article below
+keep what they read.
+
+ARTICLE TITLE: {title}
+
+THE ARTICLE
+{content[:24000]}
+
+1. Write up to 3 "check yourself" questions, each for a section that carries one of
+   the harder ideas (never the introduction, FAQ or conclusion). A good question makes
+   the reader apply the idea to a case or predict what happens ("Your cache hit rate
+   drops after a deploy. Which step do you look at first?"); it never asks them to
+   recall a number. The answer is 1-2 sentences using only what that section says.
+2. Distil the article into a mental model: 3-5 points, each a 2-5 word label and a
+   short note, that together are the picture a reader should carry away. Only claims
+   the article makes, in the order a reader would use them.
+
+Return ONLY valid JSON in exactly this shape:
+{LEARNING_SCHEMA}"""
+    try:
+        data = extract_json(call_claude(prompt, max_tokens=3000))
+    except Exception as e:
+        print(f"  Learning aids skipped ({str(e)[:80]}).")
+        return {}
+    clip = lambda v, n: " ".join(str(v or "").split())[:n]
+    checks = []
+    for c in (data.get("checks") or [])[:3]:
+        if isinstance(c, dict) and c.get("section") and c.get("question") and c.get("answer"):
+            checks.append({"section": clip(c["section"], 120), "question": clip(c["question"], 300),
+                           "answer": clip(c["answer"], 400)})
+    card = None
+    mm = data.get("mental_model")
+    if isinstance(mm, dict):
+        card = _clean_diagram_spec({"type": "card", "title": mm.get("title") or "The mental model",
+                                    "nodes": mm.get("points") or [], "caption": mm.get("caption"),
+                                    "alt": mm.get("alt")})
+    return {"checks": checks, "card": card}
+
+
+def apply_learning_aids(content: str, aids: dict, card: bool = True) -> tuple[str, dict]:
+    """Each question goes at the end of its section as a "Check yourself"
+    quote; the mental model goes before the FAQ or conclusion as a Summary
+    marker. Returns the article and {marker: spec} for render_diagrams."""
+    presets = {}
+    placed = 0
+    for c in (aids or {}).get("checks", []):
+        if _NO_VISUAL_SECTIONS.search(c["section"]) or "introduction" in c["section"].lower():
+            continue
+        span = _find_section(content, c["section"])
+        if not span:
+            continue
+        pos = span[0] + len(content[span[0]:span[1]].rstrip())
+        content = (content[:pos] + f"\n\n> **Check yourself:** {c['question']}\n>\n"
+                   f"> **Answer:** {c['answer']}\n" + content[pos:])
+        placed += 1
+    spec = (aids or {}).get("card")
+    if card and spec:
+        marker = _marker_text(spec["title"], "the whole article in one picture", ["Summary"])
+        m = re.search(r"^##\s+(frequently asked|faq|conclusion|sources|references)", content,
+                      re.I | re.M)
+        pos = m.start() if m else len(content)
+        content = content[:pos].rstrip() + "\n\n" + marker + "\n\n" + content[pos:].lstrip("\n")
+        presets[marker] = spec
+    if placed or presets:
+        print(f"  Learning aids: {placed} check-yourself question(s)"
+              + (", mental model card" if presets else ""))
+    return content, presets
 
 
 # ---------------------------------------------------------------------------
@@ -3587,11 +4892,16 @@ Produce a detailed markdown outline with:
 4. For each section: brief description of what to cover (1–2 sentences), and the
    one concrete example, worked case or first-hand observation it will carry.
 5. Diagrams are the main visuals: they show how things relate, which a stock photo
-   cannot. Exactly one diagram marker inside the Level 1 section, plus one in each
-   Level 2 section where a process, a stack, overlapping disciplines, a matrix or a
-   comparison is clearer drawn than described, each formatted as:
+   cannot. A diagram goes only where an idea is hard to picture from words: an
+   order that matters, a structure with parts, a trade-off, a decision that
+   branches, a change over time, numbers worth comparing. Exactly one diagram
+   marker inside the Level 1 section, plus one in each Level 2 section that
+   carries such an idea, each formatted as:
    [DIAGRAM: <title> | Shows: <the one thing the picture must make obvious>]
-   Across the article, use {profile['images']} visuals in total, at least half of
+   "Shows" names the point a reader would miss without the picture, never a
+   topic: "Shows: the exam tiers" is a topic; "Shows: Professional costs more
+   and assumes the Associate skills" is a point. Across the article, use up to
+   {profile['images']} visuals in total, at least half of
    them diagrams. The rest are image markers (never in Level 1), and only for a
    real photo or screenshot of a real, named thing (a product's dashboard, a
    piece of hardware, a person quoted). Never generic stock imagery: no
@@ -5733,9 +7043,15 @@ def rerender(slug: str, output_dir: Path) -> Path | None:
     diagrams = {}
     for svg_file in sorted(output_dir.glob(f"{slug}_diagram_*.svg")):
         png = svg_file.with_suffix(".png")
+        try:
+            saved = json.loads(svg_file.with_suffix(".json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            saved = {}
         diagrams[svg_file.stem] = {"svg": svg_file.read_text(encoding="utf-8"),
                                    "svg_name": svg_file.name,
-                                   "png": png.name if png.exists() else ""}
+                                   "png": png.name if png.exists() else "",
+                                   "spec": saved.get("spec") or {},
+                                   "flags": saved.get("flags") or []}
     html_path = _write_html(slug, branded, output_dir, meta=meta_payload.get("seo_meta") or {},
                             images=images, generated_at=meta_payload.get("generated_at", ""),
                             diagrams=diagrams)
@@ -5757,6 +7073,161 @@ def _esc(text: str) -> str:
     """Escape a value going into an HTML attribute."""
     return (str(text).replace("&", "&amp;").replace('"', "&quot;")
             .replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _diagram_interaction(d: dict) -> tuple[str, str]:
+    """Figure attributes and controls that make a diagram interactive on the
+    web: a step-through for ordered shapes, a slider for an explorable chart."""
+    spec = d.get("spec") or {}
+    attrs, controls = "", ""
+    nodes = spec.get("nodes") or []
+    if spec.get("type") in STEP_KINDS and len(nodes) >= 3:
+        steps = [{"label": n.get("label", ""), "note": n.get("note", "")} for n in nodes]
+        attrs += f' data-steps="{_esc(json.dumps(steps, ensure_ascii=False))}"'
+        controls += ('<div class="dg-controls">'
+                     '<button type="button" class="dg-prev" aria-label="Previous step">&larr;</button>'
+                     '<span class="dg-status" aria-live="polite"></span>'
+                     '<button type="button" class="dg-next" aria-label="Next step">&rarr;</button>'
+                     '<button type="button" class="dg-all">Show all</button></div>'
+                     '<p class="dg-note" aria-live="polite"></p>')
+    data, slider = spec.get("data") or [], spec.get("slider") or {}
+    if spec.get("type") == "bar" and slider and len(data) >= 2:
+        top = max(x["value"] for x in data)
+        step = 10 ** max(0, len(str(int(top))) - 2) if top >= 100 else (1 if top >= 10 else 0.1)
+        cfg = {"keep": slider.get("keep", "below"), "unit": spec.get("unit", "")}
+        attrs += f' data-explore="{_esc(json.dumps(cfg, ensure_ascii=False))}"'
+        controls += (f'<div class="dg-explore"><label>{_esc(slider.get("label", "Your value"))} '
+                     f'<input type="range" min="0" max="{top:g}" step="{step:g}" value="{top:g}"> '
+                     '<output></output></label><p class="dg-result" aria-live="polite"></p></div>')
+    return attrs, controls
+
+
+def _check_yourself_blocks(html_body: str) -> str:
+    """A "Check yourself" quote becomes a question whose answer stays folded
+    until the reader has tried it."""
+    return re.sub(
+        r"<blockquote>\s*<p><strong>Check yourself:</strong>\s*(.*?)</p>\s*"
+        r"<p><strong>Answer:</strong>\s*(.*?)</p>\s*</blockquote>",
+        lambda m: (f'<details class="check"><summary><strong>Check yourself:</strong> '
+                   f'{m.group(1)}</summary><p><strong>Answer:</strong> {m.group(2)}</p></details>'),
+        html_body, flags=re.S)
+
+
+def _scrollytell(html_body: str) -> str:
+    """The first diagram you can step through, followed by three or more
+    paragraphs in its section, becomes a scrollytelling block: on a wide
+    screen the figure stays put while the text scrolls, and each paragraph
+    lights up the part it talks about."""
+    import html as html_lib
+    m = re.search(r'<figure class="diagram[^"]*" data-steps="([^"]*)".*?</figure>', html_body, re.S)
+    if not m:
+        return html_body
+    end = html_body.find("<h2", m.end())
+    end = len(html_body) if end < 0 else end
+    tail = html_body[m.end():end]
+    if len(re.findall(r"<p>", tail)) < 3:
+        return html_body
+    try:
+        steps = json.loads(html_lib.unescape(m.group(1)))
+    except ValueError:
+        return html_body
+    # Five-letter stems, so "stored" still matches a step called "Store answer".
+    words = lambda t: {w[:5] for w in re.findall(r"[a-z0-9]{4,}", re.sub(r"<[^>]+>", " ", t).lower())}
+    step_words = [words(f'{st.get("label", "")} {st.get("note", "")}') for st in steps]
+
+    def tag(pm):
+        para = words(pm.group(0))
+        scores = [len(para & sw) for sw in step_words]
+        best = max(range(len(scores)), key=scores.__getitem__) if scores else 0
+        if not scores or scores[best] == 0:
+            return pm.group(0)
+        return pm.group(0).replace("<p>", f'<p data-step="{best}">', 1)
+
+    tagged = re.sub(r"<p>.*?</p>", tag, tail, flags=re.S)
+    if tagged.count("data-step=") < 2:
+        return html_body
+    # Markdown may have wrapped the raw figure in a paragraph of its own.
+    start, fig = m.start(), m.group(0)
+    if html_body[max(0, start - 3):start] == "<p>" and tagged.startswith("</p>"):
+        start, tagged = start - 3, tagged[4:]
+    block = (f'<div class="scrolly"><div class="scrolly-text">{tagged}</div>'
+             f'<div class="scrolly-fig">{fig}</div></div>')
+    return html_body[:start] + block + html_body[end:]
+
+
+# The page script for interactive diagrams: vanilla, no network, and the page
+# reads fine without it (every part is drawn; the controls just do nothing).
+_DIAGRAM_SCRIPT = """<script>
+(function () {
+  function fmt(v, unit) {
+    var s = (+v).toLocaleString();
+    if (/^[$\\u20ac\\u00a3\\u00a5]$/.test(unit)) return unit + s;
+    return unit === '%' ? s + '%' : (s + ' ' + (unit || '')).trim();
+  }
+  function stepper(fig) {
+    var steps = JSON.parse(fig.getAttribute('data-steps') || '[]');
+    var parts = fig.querySelectorAll('svg [data-node]');
+    var status = fig.querySelector('.dg-status'), note = fig.querySelector('.dg-note');
+    var cur = -1;
+    function show(i) {
+      cur = i;
+      parts.forEach(function (el) {
+        el.classList.toggle('dg-off', i >= 0 && +el.getAttribute('data-node') > i);
+      });
+      status.textContent = i >= 0 ? 'Step ' + (i + 1) + ' of ' + steps.length : steps.length + ' steps';
+      note.textContent = i >= 0 ? steps[i].label + (steps[i].note ? ': ' + steps[i].note : '') : '';
+    }
+    fig.querySelector('.dg-prev').addEventListener('click', function () {
+      show(cur <= 0 ? 0 : cur - 1);
+    });
+    fig.querySelector('.dg-next').addEventListener('click', function () {
+      show(cur + 1 >= steps.length ? -1 : cur + 1);
+    });
+    fig.querySelector('.dg-all').addEventListener('click', function () { show(-1); });
+    fig.dgShow = show;
+    show(-1);
+  }
+  function explore(fig) {
+    var cfg = JSON.parse(fig.getAttribute('data-explore') || '{}');
+    var input = fig.querySelector('.dg-explore input');
+    var out = fig.querySelector('.dg-explore output'), res = fig.querySelector('.dg-result');
+    var bars = fig.querySelectorAll('svg [data-value]');
+    function update() {
+      var v = +input.value, fits = {}, n = 0;
+      bars.forEach(function (b) {
+        var x = +b.getAttribute('data-value');
+        var ok = cfg.keep === 'above' ? x >= v : x <= v;
+        fits[b.getAttribute('data-node')] = ok;
+        if (ok) n++;
+      });
+      fig.querySelectorAll('svg [data-node]').forEach(function (el) {
+        el.classList.toggle('dg-off', fits[el.getAttribute('data-node')] === false);
+      });
+      out.textContent = fmt(v, cfg.unit);
+      res.textContent = n + ' of ' + bars.length + ' fit';
+    }
+    input.addEventListener('input', update);
+    update();
+  }
+  document.querySelectorAll('figure.diagram[data-steps]').forEach(stepper);
+  document.querySelectorAll('figure.diagram[data-explore]').forEach(explore);
+  if (!('IntersectionObserver' in window)) return;
+  document.querySelectorAll('.scrolly').forEach(function (box) {
+    var fig = box.querySelector('figure');
+    if (!fig || !fig.dgShow) return;
+    var paras = box.querySelectorAll('.scrolly-text [data-step]');
+    var obs = new IntersectionObserver(function (entries) {
+      entries.forEach(function (en) {
+        if (!en.isIntersecting || window.innerWidth < 1000) return;
+        paras.forEach(function (p) { p.classList.remove('active'); });
+        en.target.classList.add('active');
+        fig.dgShow(+en.target.getAttribute('data-step'));
+      });
+    }, {rootMargin: '-45% 0px -45% 0px'});
+    paras.forEach(function (p) { obs.observe(p); });
+  });
+})();
+</script>"""
 
 
 def _write_html(slug: str, branded: str, output_dir: Path, meta: dict | None = None,
@@ -5787,7 +7258,9 @@ def _write_html(slug: str, branded: str, output_dir: Path, meta: dict | None = N
         d = by_src.get(src)
         inner = d["svg"] if d else (
             f'<img src="{src}" alt="{_esc(alt)}" style="max-width:100%;height:auto;">')
-        return (f'<figure class="diagram">{inner}'
+        attrs, controls = _diagram_interaction(d or {})
+        cls = "diagram signature" if "signature" in (d or {}).get("flags", []) else "diagram"
+        return (f'<figure class="{cls}"{attrs}>{inner}{controls}'
                 f'<figcaption style="font-size:0.85em;color:#555;">Diagram: {cap}</figcaption>'
                 f'</figure>')
 
@@ -5803,6 +7276,9 @@ def _write_html(slug: str, branded: str, output_dir: Path, meta: dict | None = N
     )
     html_body = md_lib.markdown(src_patched, extensions=['tables', 'fenced_code'])
     html_body = _linkify(html_body)
+    html_body = _check_yourself_blocks(html_body)
+    html_body = _scrollytell(html_body)
+    script = _DIAGRAM_SCRIPT if ("data-steps=" in html_body or "data-explore=" in html_body) else ""
 
     canonical = public_url(slug)
     seo_title = (meta or {}).get("title") or slug.replace("-", " ").title()
@@ -5858,11 +7334,32 @@ def _write_html(slug: str, branded: str, output_dir: Path, meta: dict | None = N
   figure {{ margin: 1.5em 0; }}
   figcaption {{ margin-top: 6px; }}
   figure.diagram svg {{ max-width: 100%; height: auto; }}
+  figure.diagram.signature {{ border: 1px solid #e3e6ee; border-radius: 10px; padding: 10px; }}
+  figure.diagram svg [data-node] {{ transition: opacity .25s; }}
+  figure.diagram svg .dg-off {{ opacity: .14; }}
+  .dg-controls {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; font-size: .9em; }}
+  .dg-controls button {{ font: inherit; border: 1px solid #c8ced8; background: #fff; border-radius: 6px; padding: 4px 12px; min-height: 34px; cursor: pointer; }}
+  .dg-controls button:hover {{ border-color: #3b5bdb; }}
+  .dg-status {{ color: #555; min-width: 7em; }}
+  .dg-note {{ margin: 6px 0 0; min-height: 1.6em; font-size: .95em; }}
+  .dg-explore {{ margin-top: 10px; font-size: .95em; }}
+  .dg-explore input {{ width: min(320px, 100%); vertical-align: middle; }}
+  .dg-result {{ margin: 4px 0 0; color: #555; }}
+  details.check {{ border: 1px solid #d0d7e2; border-left: 4px solid #3b5bdb; border-radius: 6px; padding: 10px 14px; margin: 1.5em 0; background: #f7f9fd; }}
+  details.check summary {{ cursor: pointer; }}
+  details.check p {{ margin: .6em 0 0; }}
+  @media (min-width: 1000px) {{
+    .scrolly {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); gap: 36px; width: min(1180px, 96vw); margin-left: calc(50% - min(590px, 48vw)); }}
+    .scrolly-fig {{ position: sticky; top: 16px; align-self: start; }}
+    .scrolly-text [data-step] {{ opacity: .5; transition: opacity .2s; }}
+    .scrolly-text [data-step].active {{ opacity: 1; }}
+  }}
   code {{ background: #f4f4f4; padding: 2px 5px; border-radius: 3px; font-size: 0.9em; }}
   ol li {{ margin-bottom: 4px; word-break: break-all; }}
 </style>
 </head><body>
 {html_body}
+{script}
 </body></html>"""
 
     html_path = output_dir / f"{slug}.html"
@@ -6502,7 +7999,8 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
         linkedin: bool = False, video: bool = False, thumbnail: bool = False,
         take: str = "", facts: bool = True, diagram: bool = True,
         voiceover: bool = False, mp4: bool = False, from_theme: str = "", avatar: bool = False,
-        notes=None, resolve_gaps: bool = False):
+        notes=None, resolve_gaps: bool = False, diagram_style: str = "",
+        visual_plan: bool = True, learning_aids: bool = True):
     profile = length_profile(words)
     take = (take or "").strip()
     if not take:
@@ -6612,16 +8110,31 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
     # Step 8: Image Search
     images = search_images(humanized, research)
 
+    # Step 8.3: Decide what to draw now the article exists: the hardest ideas
+    # get the pictures, and one of them becomes the signature visual.
+    page = humanized
+    if diagram and visual_plan:
+        page = plan_visuals(page, refined_title)
+
+    # Step 8.4: Check-yourself questions and the closing mental model. They go
+    # on the published page only; the LinkedIn post and the script read
+    # `humanized`.
+    presets = {}
+    if learning_aids:
+        page, presets = apply_learning_aids(page, generate_learning_aids(page, refined_title),
+                                            card=diagram)
+
     # Step 8.5: Diagrams, drawn from the article's own [DIAGRAM: ...] markers
     if diagram:
-        diagrams = render_diagrams(humanized, slug, output_dir)
+        diagrams = render_diagrams(page, slug, output_dir, style=diagram_style or None,
+                                   presets=presets)
     else:
         log("STEP 8.5", "Diagrams skipped (--no-diagram)")
         diagrams = {}
 
     # Inject images and diagrams, then drop any marker that found nothing
     final_article = strip_orphan_image_markers(
-        inject_diagrams(inject_images(strip_placeholder_links(humanized), images), diagrams))
+        inject_diagrams(inject_images(strip_placeholder_links(page), images), diagrams))
 
     # Write outputs. Diagrams ride along in the image list so _meta.json and the
     # callback payload know about them.
@@ -6690,6 +8203,9 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
     print(f"  Word count : {word_count:,}")
     print(f"  Images     : {len(images)}")
     print(f"  Diagrams   : {len(diagrams)}")
+    card = next((d["card"] for d in diagrams.values() if d.get("card")), None)
+    if card:
+        print(f"  Share card : {output_dir / card}")
     print(f"  Article    : {md_path}")
     print(f"  Meta JSON  : {meta_path}")
     fp = research.get("fact_pack", {})
@@ -6876,6 +8392,30 @@ def main():
             "Skip the Step 8.5 diagram. The [DIAGRAM: ...] marker in the Level 1 "
             "section is then dropped instead of drawn."
         ),
+    )
+    parser.add_argument(
+        "--diagram-style",
+        choices=DIAGRAM_STYLES,
+        default=None,
+        help=(
+            "How the diagrams look: clean (default), bold (dense and colour-coded, the "
+            "look that travels on LinkedIn) or sketch (a whiteboard drawing). The "
+            "signature visual and the mental model are drawn bold when this is clean. "
+            "Also settable with the DIAGRAM_STYLE environment variable."
+        ),
+    )
+    parser.add_argument(
+        "--no-visual-plan",
+        action="store_true",
+        help=(
+            "Draw the outline's diagram markers as they are, instead of re-planning "
+            "them around the article's hardest ideas and choosing a signature visual."
+        ),
+    )
+    parser.add_argument(
+        "--no-learning-aids",
+        action="store_true",
+        help="Skip the check-yourself questions and the closing mental-model card.",
     )
     parser.add_argument(
         "--keywords",
@@ -7073,6 +8613,9 @@ def main():
             take=read_take(args.take),
             facts=not args.no_facts,
             diagram=not args.no_diagram,
+            diagram_style=args.diagram_style or "",
+            visual_plan=not args.no_visual_plan,
+            learning_aids=not args.no_learning_aids,
             from_theme=args.from_theme,
             notes=args.notes,
             resolve_gaps=args.resolve_gaps,

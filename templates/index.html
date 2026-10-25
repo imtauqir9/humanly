@@ -40,6 +40,7 @@
   .counter.warn { color: var(--warn); }
   .row-2 { display: grid; grid-template-columns: 1fr 96px; gap: 12px; }
   .row-3 { display: grid; grid-template-columns: 1.25fr 1fr 84px; gap: 12px; }
+  .row-full { margin-top: 12px; }
   .overlap { display: none; gap: 8px; margin-top: 8px; font-size: 13px; line-height: 1.5; color: var(--warn); background: var(--warn-soft);
              border: 1px solid color-mix(in srgb, var(--warn) 28%, transparent); border-radius: var(--radius-sm); padding: 9px 12px; }
   .overlap.show { display: flex; }
@@ -283,6 +284,14 @@
                 <input type="number" id="edition" name="edition" value="0" min="0">
               </div>
             </div>
+            <div class="row-full">
+              <label for="diagramStyle">Diagram style</label>
+              <select id="diagramStyle" name="diagram_style">
+                <option value="clean" selected>Clean · plain boxes, house blue</option>
+                <option value="bold">Bold · dense and colour-coded, made to share</option>
+                <option value="sketch">Sketch · hand-drawn whiteboard</option>
+              </select>
+            </div>
             <div class="opts">
               <label class="opt"><input type="checkbox" id="linkedin"><span>LinkedIn post<small>written from the finished article</small></span></label>
               <label class="opt"><input type="checkbox" id="video"><span>Video script<small>2–3 minutes, six timed beats</small></span></label>
@@ -292,7 +301,7 @@
               {% if avatar_video %}<label class="opt"><input type="checkbox" id="avatar"><span>My avatar presents it<small>Tavus renders you reading the script · several minutes</small></span></label>{% endif %}
               {% if has_site_notes %}<label class="opt"><input type="checkbox" id="siteNotes" checked><span>Facts from their site<small>their product pages, as research notes</small></span></label>{% endif %}
             </div>
-            <p class="hint">Every article also gets the fact pack, the layered structure, a diagram the app draws, and the three-agent audit.</p>
+            <p class="hint">Every article also gets the fact pack, the layered structure, the three-agent audit, and diagrams the app plans around the hardest ideas, checks by eye and draws itself: one signature visual made to share, check-yourself questions and a closing mental model.</p>
           </div>
 
           <div class="step submit-row">
@@ -872,6 +881,7 @@ form.addEventListener('submit', async (e) => {
   const video    = document.getElementById('video').checked || document.getElementById('voiceover').checked || mp4;
   const voiceover = document.getElementById('voiceover').checked || mp4;
   const thumbnail = document.getElementById('thumbnail').checked;
+  const diagram_style = document.getElementById('diagramStyle').value;
   const avatarBox = document.getElementById('avatar');
   const avatar = avatarBox ? avatarBox.checked : false;
   const siteNotesBox = document.getElementById('siteNotes');
@@ -888,6 +898,7 @@ form.addEventListener('submit', async (e) => {
     ...(voiceover ? ['Extra  : voiceover in your voice'] : []),
     ...(mp4 ? ['Extra  : finished video, 16:9 and 9:16, captions burned in'] : []),
     ...(thumbnail ? ['Extra  : share card'] : []),
+    `Style  : ${diagram_style} diagrams`,
     ...(avatar ? ['Extra  : your avatar presents the video'] : []),
     ...(intent ? [`Intent : ${intent}`] : []),
     ...(take ? [`Take   : ${take.split('\n').length} point(s)`] : ['Take   : none — the article will have no first-person view']),
@@ -900,7 +911,7 @@ form.addEventListener('submit', async (e) => {
     const startResp = await fetch('/api/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ topic, intent: intent || keywords, take, edition, words, linkedin, video, voiceover, mp4, thumbnail, from_theme, use_site_notes, avatar }),
+      body: JSON.stringify({ topic, intent: intent || keywords, take, edition, words, linkedin, video, voiceover, mp4, thumbnail, diagram_style, from_theme, use_site_notes, avatar }),
     });
     const startData = await startResp.json();
     if (startData.error) throw new Error(startData.error);

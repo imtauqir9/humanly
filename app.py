@@ -1889,6 +1889,9 @@ def api_start():
     voiceover = bool(data.get("voiceover"))
     mp4 = bool(data.get("mp4"))
     thumbnail = bool(data.get("thumbnail"))
+    diagram_style = str(data.get("diagram_style") or "").strip().lower()
+    if diagram_style not in {"clean", "bold", "sketch"}:
+        diagram_style = ""
     avatar = bool(data.get("avatar")) and avatar_video_available()
 
     if not topic:
@@ -1922,6 +1925,8 @@ def api_start():
         cmd.append("--mp4")
     if thumbnail:
         cmd.append("--thumbnail")
+    if diagram_style:
+        cmd += ["--diagram-style", diagram_style]
     if avatar:
         cmd.append("--avatar")
 

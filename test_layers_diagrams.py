@@ -91,13 +91,15 @@ def test_faq_answers_skip_diagram_markers():
 def test_clean_diagram_spec_handles_every_shape_and_junk():
     flow = sw._clean_diagram_spec({
         "type": "flow", "title": "t",
-        "nodes": ["A", {"label": "B", "note": "n"}, 7, {"label": ""}],
+        "nodes": ["A", {"label": "B", "note": "n"}, 7, {"label": ""}, "C"],
         "edges": [{"from": 0, "to": 1}, {"from": 9, "to": 0}, "junk", {"from": 1, "to": 1}],
     })
-    assert [n["label"] for n in flow["nodes"]] == ["A", "B"]
+    assert [n["label"] for n in flow["nodes"]] == ["A", "B", "C"]
     assert flow["edges"] == [{"from": 0, "to": 1, "label": ""}]
     assert sw._clean_diagram_spec({"type": "flow", "nodes": ["only one"]}) is None
-    assert sw._clean_diagram_spec({"type": "weird", "nodes": ["A", "B"]})["type"] == "flow"
+    # Two boxes restate a sentence: flows, stacks and cycles need three parts.
+    assert sw._clean_diagram_spec({"type": "layers", "nodes": ["Top", "Bottom"]}) is None
+    assert sw._clean_diagram_spec({"type": "weird", "nodes": ["A", "B", "C"]})["type"] == "flow"
     assert sw._clean_diagram_spec("garbage") is None
 
     cmp_ = sw._clean_diagram_spec({"type": "compare", "columns": [
@@ -229,7 +231,7 @@ def test_html_inlines_the_svg_and_docx_embeds_the_png(tmp_path: Path, monkeypatc
     html_path = sw._write_html("slug", branded, tmp_path, meta={"title": "T"}, images={},
                                generated_at="", diagrams=diagrams)
     html = html_path.read_text(encoding="utf-8")
-    assert '<figure class="diagram"><svg' in html
+    assert '<figure class="diagram" data-steps=' in html and "<svg" in html
     assert "Diagram: the order" in html
     assert 'src="slug_diagram_1.png"' not in html          # inline SVG, not a file reference
 
