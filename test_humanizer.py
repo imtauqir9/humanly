@@ -88,6 +88,36 @@ def test_flags_inline_header_bullets():
     assert kinds(r).get("inline_header_bullet") == 2, r["structural"]
 
 
+def test_bold_label_paragraphs_are_not_inline_header_bullets():
+    r = scan("**Latency:** The cache answers in 4 ms.\n\n**Cost:** No model call is billed.\n")
+    assert "inline_header_bullet" not in kinds(r), r["structural"]
+
+
+def test_flags_the_same_opener_under_many_headings():
+    text = "".join(f"## Part {i}\n\nA Forward Deployed Architect handles step {i}.\n\n"
+                   for i in range(4))
+    r = scan(text)
+    assert kinds(r).get("repeated_section_opener") == 4, r["structural"]
+    assert "a forward deployed" in sw.format_tell_report(r)
+
+
+def test_two_sections_with_one_opener_is_not_a_template():
+    text = "## A\n\nThe cache sits first.\n\n## B\n\nThe cache sits first too.\n"
+    assert "repeated_section_opener" not in kinds(scan(text))
+
+
+def test_templated_closers_are_phrase_hits():
+    r = scan("Things happen here. The goal is to ship. The objective is to learn.")
+    assert phrases(r).get("the goal is to") == 1 and phrases(r).get("the objective is to") == 1
+
+
+def test_flags_rhetorical_questions_but_not_headings_or_faq():
+    text = ("## Why it matters\n\nSo what does this mean for you? It means less cost.\n\n"
+            "## FAQ\n\n### Is it free?\n\nIs it? Yes, under 1,000 calls.\n")
+    r = scan(text)
+    assert kinds(r).get("rhetorical_question") == 1, r["structural"]
+
+
 def test_flags_em_dashes_and_emoji_headings():
     r = scan("## Results \U0001F680\n\nIt worked — mostly.\n")
     k = kinds(r)

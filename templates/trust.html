@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+{% include "_head.html" %}
+<title>Trust and data — Humanly</title>
+<meta name="description" content="How Humanly keeps each client's work separate, who can see it, where it goes, and how long it is kept.">
+<style>
+{% include "_theme.css" %}
+  .top { max-width: 860px; margin: 0 auto; padding: 28px 28px 0; display: flex; align-items: center; }
+  main { max-width: 860px; margin: 0 auto; padding: 28px 28px 80px; }
+  .lede { font-family: var(--serif); font-size: 19px; line-height: 1.6; color: var(--ink-2); margin-bottom: 8px; }
+  .item { display: grid; grid-template-columns: 200px 1fr; gap: 20px; padding: 18px 0; border-bottom: 1px solid var(--line); }
+  .item h3 { font-family: var(--serif); font-size: 18px; font-weight: 450; letter-spacing: -.01em; }
+  .item p { color: var(--ink-2); font-size: 14.5px; }
+  .item p + p { margin-top: 6px; }
+  td.use { color: var(--ink-2); font-size: 13.5px; }
+  .foot { margin-top: 32px; font-family: var(--serif); font-style: italic; color: var(--muted); font-size: 14px; }
+  @media (max-width: 640px) { .item { grid-template-columns: 1fr; gap: 4px; } main, .top { padding-left: 16px; padding-right: 16px; } }
+</style>
+</head>
+<body>
+<div class="top"><a class="brand" href="/" aria-label="Humanly home"><span class="brand-name">Human<i>ly</i></span></a></div>
+<main>
+  <div class="page-title">
+    <h1>Trust and data</h1>
+    <span class="sub">What happens to a client's material</span>
+  </div>
+  <p class="lede">Every client works in a workspace of their own. This page says who can see it, where it travels, and when it is deleted.</p>
+
+  <div class="section-label"><span class="roman">i.</span><h2>Separation and access</h2></div>
+  <div class="item"><h3>One workspace per client</h3>
+    <p>Each client's articles, research, voice samples and settings live in their own workspace. People see only the workspaces they were added to,
+       and files are only ever served from the workspace they belong to.</p></div>
+  <div class="item"><h3>Personal accounts and roles</h3>
+    <p>Everyone signs in with their own account. A role per workspace decides what they can do: owners manage it, editors approve and publish,
+       writers draft, and client reviewers read, comment and sign off without ever starting a paid run.</p>
+    </div>
+  <div class="item"><h3>Passwords and sessions</h3>
+    <p>Passwords are stored only as salted hashes. Repeated failed sign-ins from one address are locked out for five minutes.
+       Changing a password or disabling an account ends that person's other sessions.</p></div>
+  <div class="item"><h3>Approval before anything goes out</h3>
+    <p>A workspace can require an editor or the client to approve an article before it is published. An article edited after approval goes back for approval,
+       and a client's public feed carries only what was approved.</p></div>
+
+  <div class="section-label"><span class="roman">ii.</span><h2>Credentials and records</h2></div>
+  <div class="item"><h3>WordPress access</h3>
+    <p>Publishing uses a WordPress application password, which the client can revoke from their own WordPress at any time. It is stored encrypted,
+       and never shown again once saved.</p></div>
+  <div class="item"><h3>Audit log</h3>
+    <p>Sign-ins, failed sign-ins, every run, every status change, every edit, every publish and every settings change is recorded with who, when and from which address.</p></div>
+  <div class="item"><h3>Retention</h3>
+    <p>Each workspace can set how many days finished work is kept; older articles, their versions, discussion and logs are then deleted.
+       Drafts uploaded for evaluation are deleted after two days regardless.</p></div>
+  <div class="item"><h3>In transit</h3>
+    <p>The app is served over HTTPS only{% if hosted %}, with HSTS{% endif %}. A form or script on another site cannot act with a signed-in browser's session.</p></div>
+  {% if hosted %}
+  <div class="item"><h3>Where it runs</h3>
+    <p>On Fly.io{% if region %}, region <span class="mono">{{ region }}</span>{% endif %}, with articles and records on a persistent volume attached to a single machine.</p></div>
+  {% endif %}
+
+  <div class="section-label"><span class="roman">iii.</span><h2>Services that receive material</h2><span class="sub">only those switched on here</span></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Service</th><th>What it is used for</th><th></th></tr></thead>
+      <tbody>
+      {% for p in processors %}
+        <tr><td>{{ p.name }}</td><td class="use">{{ p.use }}</td><td style="white-space:nowrap"><a href="{{ p.policy }}" rel="noopener" target="_blank">Their policy</a></td></tr>
+      {% else %}
+        <tr><td colspan="3" class="muted">None configured.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="foot">Questions about a specific client's data, or a request to delete it, go to the studio that invited you.</p>
+</main>
+</body>
+</html>

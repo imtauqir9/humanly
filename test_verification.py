@@ -465,7 +465,7 @@ def test_review_report_shows_every_side():
     assert "taste, not accuracy" in md
     assert "**Result:** applied" in md
     assert "**Result:** not applied" in md
-    assert "| writer | `claude-sonnet-5` | anthropic |" in md
+    assert f"| writer | `{sw.MODEL}` | anthropic |" in md
 
 
 def test_review_report_names_silence_explicitly():

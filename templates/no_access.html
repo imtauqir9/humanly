@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+{% include "_head.html" %}
+<title>No workspace yet — Humanly</title>
+<style>
+{% include "_theme.css" %}
+  body { display: flex; align-items: center; justify-content: center; padding: 24px; }
+  .box { max-width: 440px; padding: 36px; text-align: center; }
+  h1 { font-family: var(--serif); font-weight: 350; font-size: 32px; letter-spacing: -.02em; margin-bottom: 10px; }
+  p { color: var(--ink-2); margin-bottom: 20px; }
+</style>
+</head>
+<body>
+  <div class="box card">
+    <h1>No workspace yet</h1>
+    <p>You are signed in as <span class="mono">{{ user.username }}</span>, but nobody has added you to a client workspace.
+       Ask the studio owner to add you, then reload this page.</p>
+    <a class="btn btn-ghost" href="/logout">Sign out</a>
+  </div>
+</body>
+</html>

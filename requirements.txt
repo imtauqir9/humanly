@@ -7,3 +7,4 @@ python-docx
 openai
 google-genai
 Pillow
+cryptography

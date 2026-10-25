@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+{% include "_head.html" %}
+<title>{{ title }} — Humanly</title>
+<style>
+{% include "_theme.css" %}
+  main { max-width: 1320px; margin: 0 auto; padding: 36px 28px 72px; }
+  .head { display: flex; align-items: flex-start; gap: 16px; padding-bottom: 16px; margin-bottom: 22px; border-bottom: 2px solid var(--ink); }
+  .head h1 { font-family: var(--serif); font-size: 38px; font-weight: 350; letter-spacing: -.025em; line-height: 1.08; font-variation-settings: "opsz" 144; flex: 1; min-width: 0; }
+  .head .desc { font-family: var(--serif); font-style: italic; color: var(--muted); font-size: 15.5px; margin-top: 8px; }
+  .head .status-stamp { margin-top: 10px; font-size: 11.5px; padding: 3px 9px; }
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 28px; align-items: start; }
+
+  /* the manuscript */
+  .manuscript { padding: 0; overflow: hidden; }
+  .manuscript-bar { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+  .manuscript-bar .grow { flex: 1; }
+  .manuscript iframe { width: 100%; height: 78vh; border: 0; background: #fff; display: block; }
+  .editor { display: none; padding: 16px; }
+  .editor textarea { min-height: 70vh; font-family: var(--mono); font-size: 13px; line-height: 1.6; }
+  .editing .editor { display: block; }
+  .editing iframe, .editing .reader { display: none; }
+  .reader { padding: 28px 34px; font-family: var(--serif); font-size: 17px; line-height: 1.7; white-space: pre-wrap; max-height: 78vh; overflow: auto; }
+
+  /* the margin: status, discussion, versions */
+  .margin > section { margin-bottom: 26px; }
+  .margin h2 { font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); margin-bottom: 10px;
+               display: flex; gap: 8px; align-items: baseline; }
+  .margin h2 .roman { font-size: 14px; text-transform: none; letter-spacing: 0; }
+  .moves { display: flex; flex-direction: column; gap: 8px; }
+  .moves textarea { min-height: 64px; font-size: 13.5px; }
+  .moves .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .hint { font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+  .thread { border-top: 1px solid var(--line); }
+  .note { padding: 12px 0; border-bottom: 1px solid var(--line); }
+  .note .who { font-family: var(--mono); font-size: 11.5px; color: var(--muted); display: flex; gap: 8px; }
+  .note .body { font-size: 14px; color: var(--ink); white-space: pre-wrap; margin-top: 4px; }
+  .note.k-status .body { font-family: var(--mono); font-size: 12.5px; color: var(--link); }
+  .note.k-edit .body { font-family: var(--serif); font-style: italic; color: var(--ink-2); }
+  .note.k-publish .body { font-family: var(--mono); font-size: 12.5px; color: var(--accent); }
+  .comment-form textarea { min-height: 72px; font-size: 13.5px; margin: 10px 0 8px; }
+  .versions li { list-style: none; display: flex; gap: 10px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--line); font-family: var(--mono); font-size: 12px; }
+  .versions li a { flex: 1; }
+  .artifacts { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+  @media (max-width: 1040px) { .layout { grid-template-columns: 1fr; } .manuscript iframe { height: 64vh; } }
+  @media (max-width: 640px) { main { padding: 20px 14px 48px; } .head h1 { font-size: 28px; } .reader { padding: 18px; } }
+</style>
+</head>
+<body>
+{% set active = 'library' %}
+{% include "_header.html" %}
+<main>
+  <div class="head">
+    <div style="flex:1;min-width:0">
+      <h1>{{ title }}</h1>
+      {% if description %}<div class="desc">{{ description }}</div>{% endif %}
+    </div>
+    <span class="status-stamp s-{{ state.status }}">{{ status_label[state.status] }}</span>
+  </div>
+
+  {% if msg %}<div class="notice ok" role="status"><span>✓</span><span>{{ msg }}</span></div>{% endif %}
+  {% if err %}<div class="notice bad" role="alert"><span>✕</span><span>{{ err }}</span></div>{% endif %}
+
+  <div class="layout">
+    <div class="manuscript card" id="manuscript">
+      <div class="manuscript-bar">
+        <span class="smallcaps">The article</span>
+        <span class="grow"></span>
+        {% if can('submit') %}<button type="button" class="btn btn-ghost sm" id="editBtn">Edit text</button>{% endif %}
+        {% if avatar_talk %}<a class="btn btn-dark sm" href="/a/{{ slug }}/talk" target="_blank" rel="noopener" title="Opens your avatar, briefed on this article">Ask Imran about this</a>{% endif %}
+        {% if html_file %}<a class="btn-link" href="/output/{{ html_file }}" target="_blank" rel="noopener">Open full page</a>{% endif %}
+      </div>
+      {% if html_file %}
+        <iframe src="/output/{{ html_file }}" title="Article preview" sandbox="allow-popups allow-popups-to-escape-sandbox"></iframe>
+      {% else %}
+        <div class="reader">{{ markdown }}</div>
+      {% endif %}
+      {% if can('submit') %}
+      <form class="editor" method="post" action="/a/{{ slug }}/edit">
+        <textarea name="markdown" aria-label="Article markdown">{{ markdown }}</textarea>
+        <div class="row" style="display:flex;gap:8px;margin-top:10px;align-items:center">
+          <button type="submit" class="btn btn-primary">Save changes</button>
+          <button type="button" class="btn btn-quiet" id="cancelEdit">Cancel</button>
+          <span class="hint">The current text is kept as a version.{% if approval_required and state.status in ('approved', 'published') %} Saving sends it back for approval.{% endif %}</span>
+        </div>
+      </form>
+      {% endif %}
+    </div>
+
+    <aside class="margin">
+      <section>
+        <h2><span class="roman">i.</span>Where it stands</h2>
+        <p class="hint" style="margin-bottom:10px">
+          {% if state.updated_by %}{{ status_label[state.status] }} since {{ state.updated_at[:10] }}, by <span class="mono">{{ state.updated_by }}</span>.{% else %}A fresh draft.{% endif %}
+          {% if approval_required %}This workspace needs approval before publishing.{% endif %}
+        </p>
+        {% if moves %}
+        <form class="moves" method="post" action="/a/{{ slug }}/status">
+          <textarea name="note" placeholder="A note for the next person (optional)" aria-label="Note"></textarea>
+          <div class="row">
+            {% for m in moves %}
+              <button type="submit" name="status" value="{{ m }}" class="btn sm {% if m == 'approved' or m == 'in_review' %}btn-primary{% elif m == 'changes' or m == 'published' %}btn-dark{% else %}btn-quiet{% endif %}">
+                {% if m == 'in_review' %}Send for review{% elif m == 'approved' %}Approve{% elif m == 'changes' %}Request changes{% elif m == 'published' %}Mark as published{% else %}Back to draft{% endif %}
+              </button>
+            {% endfor %}
+          </div>
+        </form>
+        {% endif %}
+      </section>
+
+      {% include "_publish.html" %}
+
+      <section id="discussion">
+        <h2><span class="roman">ii.</span>Discussion</h2>
+        <div class="thread">
+          {% for c in comments %}
+            <div class="note k-{{ c.kind }}">
+              <div class="who"><span>{{ c.username }}</span><span>{{ c.created_at[:16].replace('T', ' ') }}</span></div>
+              <div class="body">{{ c.body }}</div>
+            </div>
+          {% else %}
+            <p class="hint" style="padding:10px 0">No notes yet.</p>
+          {% endfor %}
+        </div>
+        {% if can('comment') %}
+        <form class="comment-form" method="post" action="/a/{{ slug }}/comment">
+          <textarea name="body" placeholder="Say what should change, and where" required aria-label="Comment"></textarea>
+          <button type="submit" class="btn btn-ghost sm">Add note</button>
+        </form>
+        {% endif %}
+      </section>
+
+      {% if versions %}
+      <section>
+        <h2><span class="roman">iii.</span>Versions</h2>
+        <ul class="versions">
+          {% for v in versions %}
+            <li><a href="/a/{{ slug }}/versions/{{ v.name }}" target="_blank" rel="noopener">{{ v.at }} UTC</a>
+              {% if can('submit') %}<form method="post" action="/a/{{ slug }}/restore"><input type="hidden" name="name" value="{{ v.name }}"><button class="btn btn-quiet sm" type="submit">Restore</button></form>{% endif %}</li>
+          {% endfor %}
+        </ul>
+      </section>
+      {% endif %}
+
+      <section>
+        <h2><span class="roman">{% if versions %}iv{% else %}iii{% endif %}.</span>Files</h2>
+        <div class="artifacts">
+          {% for label, name in artifacts %}<a class="btn-link" href="/output/{{ name }}" target="_blank" rel="noopener">{{ label }}</a>{% endfor %}
+          {% if has_review %}<a class="btn-link" href="/review/{{ slug }}">Audit report</a>{% endif %}
+        </div>
+        {% if public_url %}<p class="hint" style="margin-top:10px">Will live at <span class="mono">{{ public_url }}</span></p>{% endif %}
+      </section>
+    </aside>
+  </div>
+</main>
+<script>
+  (function () {
+    var box = document.getElementById('manuscript'), edit = document.getElementById('editBtn'), cancel = document.getElementById('cancelEdit');
+    if (edit) edit.addEventListener('click', function () { box.classList.add('editing'); edit.style.display = 'none'; });
+    if (cancel) cancel.addEventListener('click', function () { box.classList.remove('editing'); edit.style.display = ''; });
+  })();
+</script>
+</body>
+</html>
