@@ -13,7 +13,27 @@ Then open http://localhost:5000
 import base64
 import hashlib
 import os as _os
-_os.environ.setdefault("ANTHROPIC_API_KEY", _os.environ.get("ANTHROPIC_API_KEY", "unset"))
+
+
+def _load_dotenv():
+    env_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), ".env")
+    if not _os.path.exists(env_path):
+        return
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in _os.environ:
+                _os.environ[key] = value
+
+# Load .env before the placeholder below: seo_writer builds its Claude client
+# at import, and a placeholder set first would shadow the real key in .env.
+_load_dotenv()
+_os.environ.setdefault("ANTHROPIC_API_KEY", "unset")
 import seo_writer as sw_decisions  # noqa: E402  (decision helpers only)
 import hmac
 import json
@@ -69,23 +89,6 @@ def _notes_paths(raw) -> list:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _load_dotenv():
-    env_path = BASE_DIR / ".env"
-    if not env_path.exists():
-        return
-    with open(env_path) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            if key and key not in os.environ:
-                os.environ[key] = value
-
-_load_dotenv()
 
 # A single high-effort audit call on a 3,500-word article can run for minutes
 # with nothing to print. Emit a comment frame while waiting so neither the
