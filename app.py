@@ -1872,6 +1872,7 @@ def api_start():
             and any(notes_dir().glob("*.md")):
         notes = [str(notes_dir())]
     resolve_gaps = bool(data.get("resolve_gaps"))
+    deep = bool(data.get("deep"))
     from_theme = (data.get("from_theme") or "").strip()[:140]
     callback_url = (data.get("callback_url") or "").strip()
     external_id = str(data.get("external_id") or "")[:200]
@@ -1913,6 +1914,8 @@ def api_start():
         cmd += ["--notes", *notes]
     if resolve_gaps:
         cmd.append("--resolve-gaps")
+    if deep:
+        cmd.append("--deep")
     if from_theme:
         cmd += ["--from-theme", from_theme]
     if linkedin:

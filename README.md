@@ -58,6 +58,10 @@ Topic + Intent
       │                 writer may state no figure that is not in the pack, and may
       │                 not widen a pack value into a range. Saved as <slug>_facts.json.
       ▼
+1.55 Deep research    — optional (--deep): plans 5 sub-questions from different
+      │                 angles, researches each with its own search-and-read call,
+      │                 and merges what the pages state into the pack (cap 48 facts)
+      ▼
 1.6 Gap resolver      — optional (--resolve-gaps): an agent opens the page behind
       │                 every gap and returns a verdict; confirmed gaps join the
       │                 pack as facts, the rest stay gaps with the reason
@@ -201,6 +205,7 @@ python seo_writer.py "Semantic Caching for LLMs" --output-dir ./articles --editi
 | `--take` | Your own positions and experiences, one per line (or a path to a text file). Each is written into the article in first person and the auditor checks it survived. The run warns loudly when this is missing, because it is the single biggest reason an article reads as generic |
 | `--notes` | Your own research notes: markdown files, or a folder of them. They become the first fact pack, built from the notes alone, and the Step 1.5 web pass is merged in after. See *Write from your own research notes* below |
 | `--resolve-gaps` | Step 1.6: open the page behind every gap in the fact pack and settle it. Confirmed gaps become facts with the confirming quote; contradicted and unverifiable ones stay gaps with the reason. Up to 8 gaps a run |
+| `--deep` | Step 1.55: deep research. Plans 5 sub-questions from different angles (practitioner, buyer, skeptic, data, standards), researches each with its own search-and-read call, three at a time, and merges the findings into the fact pack under the same citation rules. See *Deep research* below |
 | `--no-facts` | Skip the Step 1.5 fact pack. The writer is then forbidden from stating any price, date, version or statistic |
 | `--radar` | Don't write; find out what to write. See *Topic radar* below |
 | `--radar-days` | How far back the radar looks (default `14`) |
@@ -278,8 +283,32 @@ figure that is itself wrong.
 
 From the API, a run request may carry `"notes": ["notes", "my-report.md"]`,
 names resolved under `research/` (or the output folder); anything outside
-those is dropped. `"resolve_gaps": true` turns the gap resolver on. `research/` is where the notes live in this repo, with the
+those is dropped. `"resolve_gaps": true` turns the gap resolver on and
+`"deep": true` turns on deep research. `research/` is where the notes live in this repo, with the
 finished pieces under `articles/`.
+
+## Deep research
+
+The fact pack is one call with one budget, so it finds what a single pass of
+searching turns up, usually the vendor's own pages. `--deep` goes wider, in
+the spirit of Stanford's STORM: a planning call splits the topic into 5
+sub-questions, each from a different reader's angle (the practitioner, the
+buyer, the skeptic, the data, the standard, what changed recently), and skips
+anything the pack already established. Each question then gets its own
+tool-using call (4 searches, 5 page reads), three at a time.
+
+Every answer is held to the fact pack's rule: only what a page that was opened
+states, with its URL and the sentence. The findings merge in after the existing
+pack, which wins on duplicates, and the cap rises from 24 facts to 48. Facts
+from this step carry the tag "from deep research" and the question they
+answer; the questions themselves, with how many facts each produced, are saved
+under `deep_questions` in `<slug>_facts.json`. A question no page answers
+becomes a gap, so `--deep --resolve-gaps` has the resolver try to settle it.
+A failed planning call or a failed question never stops the run.
+
+```bash
+python seo_writer.py "Is InfiniBand dead?" --intent "for network architects" --deep --resolve-gaps
+```
 
 ## Topic radar: what should I write?
 

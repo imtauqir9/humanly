@@ -3313,6 +3313,9 @@ Return ONLY valid JSON in exactly this shape:
 
 
 def _clean_fact_pack(pack: dict) -> dict:
+    # A deep-research pack raises its own cap, and carries it through later
+    # merges and the gap resolver so they do not cut it back to the default.
+    cap = max(int(pack.get("max_facts") or 0), FACT_PACK_MAX_FACTS)
     facts = []
     seen = set()
     for i, f in enumerate(pack.get("facts", []) or [], 1):
@@ -3328,15 +3331,20 @@ def _clean_fact_pack(pack: dict) -> dict:
         seen.add(key)
         f["id"] = f"f{len(facts) + 1}"
         facts.append(f)
-        if len(facts) >= FACT_PACK_MAX_FACTS:
+        if len(facts) >= cap:
             break
-    return {
+    out = {
         "facts": facts,
         "primary_sources": [u for u in (pack.get("primary_sources") or []) if str(u).startswith("http")],
-        "gaps": [str(g) for g in (pack.get("gaps") or [])][:12],
+        "gaps": [str(g) for g in (pack.get("gaps") or [])][:max(12, cap // 2)],
         "method": pack.get("method", "unknown"),
         "built_at": TODAY.isoformat(timespec="seconds"),
     }
+    if cap > FACT_PACK_MAX_FACTS:
+        out["max_facts"] = cap
+    if pack.get("deep_questions"):
+        out["deep_questions"] = pack["deep_questions"]
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -3478,6 +3486,8 @@ def merge_fact_packs(first: dict, second: dict) -> dict:
             list(first.get("primary_sources") or []) + list(second.get("primary_sources") or []))),
         "gaps": list(dict.fromkeys(list(first.get("gaps") or []) + list(second.get("gaps") or []))),
         "method": "+".join(methods) or "none",
+        "max_facts": max(int(first.get("max_facts") or 0), int(second.get("max_facts") or 0)),
+        "deep_questions": first.get("deep_questions") or second.get("deep_questions"),
     }
     return _clean_fact_pack(merged)
 
@@ -3613,14 +3623,17 @@ order, with "gap" copied exactly as given:
                            + [f["source_url"] for f in promoted],
         "gaps": kept,
         "method": f"{pack.get('method') or 'none'}+gap-resolver",
+        "max_facts": pack.get("max_facts"),
+        "deep_questions": pack.get("deep_questions"),
     })
     merged["resolutions"] = [r for r in (out.get("resolutions") or []) if isinstance(r, dict)]
     dropped = len(pack.get("facts") or []) + len(promoted) - len(merged["facts"])
+    cap = merged.get("max_facts") or FACT_PACK_MAX_FACTS
     print(f"  Gap resolver: {counts['confirmed']} confirmed and promoted to facts, "
           f"{counts['contradicted']} contradicted, {counts['unverifiable']} unverifiable"
           + (f", {counts['unanswered']} unanswered" if counts["unanswered"] else "")
           + f"; {len(merged['gaps'])} gap(s) remain."
-          + (f" ({dropped} promoted fact(s) did not fit under the {FACT_PACK_MAX_FACTS}-fact cap.)"
+          + (f" ({dropped} promoted fact(s) did not fit under the {cap}-fact cap.)"
              if dropped > 0 else ""))
     for f in promoted[:6]:
         print(f"    + {f['value'][:28]:28} {str(f['claim'])[:60]}")
@@ -3650,6 +3663,166 @@ def build_fact_pack(title: str, keywords: str, intent: str, research: dict) -> d
     return pack
 
 
+# ---------------------------------------------------------------------------
+# Step 1.55: Deep research - plan the questions, research each one, merge
+# ---------------------------------------------------------------------------
+#
+# The fact pack is one call with one budget: it finds what a single pass of
+# searching turns up, usually the vendor's own pages. Deep research goes wider
+# the way STORM does: a planning call splits the topic into sub-questions,
+# each from a different reader's angle (the practitioner, the buyer, the
+# skeptic, the data, the standard), then each question gets its own
+# tool-using call, a few at a time. Every answer is held to the same rule as
+# the fact pack - only what a page that was opened states, with its URL and
+# sentence - and the findings merge in after the existing pack, which wins on
+# duplicates. Opt-in: it costs several web calls a run.
+
+DEEP_QUESTIONS = 5
+DEEP_SEARCHES = 4          # per question
+DEEP_FETCHES = 5           # per question
+DEEP_FACTS_PER_QUESTION = 8
+DEEP_WORKERS = 3
+DEEP_MAX_FACTS = 48        # the merged pack's cap when deep research ran
+
+DEEP_PLAN_SCHEMA = """{
+  "questions": [
+    {
+      "question": "<one specific question a primary source can answer>",
+      "angle": "practitioner | buyer | skeptic | data | standards | history | recent-change",
+      "why": "<one sentence: what the article gains from the answer>"
+    }
+  ]
+}"""
+
+
+def plan_deep_research(title: str, keywords: str, intent: str, research: dict) -> list[dict]:
+    """The sub-questions deep research will answer, or [] when planning fails."""
+    pack = research.get("fact_pack") or {}
+    covered = "\n".join(f"- {f.get('claim', '')}" for f in (pack.get("facts") or [])[:30]) or "(nothing yet)"
+    gaps = "\n".join(f"- {g}" for g in (pack.get("gaps") or [])[:12]) or "(none)"
+    prompt = f"""You are planning the research for an article before it is written.
+
+{_fact_pack_brief(title, keywords, intent, research)}
+
+ALREADY ESTABLISHED (do not ask again):
+{covered}
+
+KNOWN GAPS (good candidates):
+{gaps}
+
+Write {DEEP_QUESTIONS} research questions that together give the article what a
+single search pass misses. Rules:
+- Each from a different angle: what someone doing the work needs to know, what
+  someone choosing or buying needs, what a skeptic would check (limits,
+  failures, criticism), what the data or benchmarks say, what the standard or
+  primary documentation says, what changed recently.
+- Each specific enough that a primary source can answer it with a figure, a
+  date, a named product or a quoted statement. No open-ended essay questions.
+- None that repeats what is already established.
+
+Return ONLY valid JSON in exactly this shape:
+{DEEP_PLAN_SCHEMA}"""
+    try:
+        data = extract_json(call_claude(prompt, max_tokens=4000))
+    except Exception as e:
+        print(f"  Deep research planning failed ({str(e)[:120]}); skipping deep research.")
+        return []
+    questions, seen = [], set()
+    for q in data.get("questions") or []:
+        if not isinstance(q, dict):
+            continue
+        text = str(q.get("question", "")).strip()
+        if not text or text.lower() in seen:
+            continue
+        seen.add(text.lower())
+        questions.append({"question": text, "angle": str(q.get("angle", "")).strip(),
+                          "why": str(q.get("why", "")).strip()})
+        if len(questions) >= DEEP_QUESTIONS:
+            break
+    if not questions:
+        print("  The planner returned no questions; skipping deep research.")
+    return questions
+
+
+def _research_question(index: int, question: dict, brief: str) -> dict:
+    """One sub-question's findings as a small fact pack; never raises."""
+    prompt = f"""You are a research assistant answering one question for an article.
+
+{brief}
+
+QUESTION ({question.get('angle') or 'general'}): {question['question']}
+WHY IT MATTERS: {question.get('why') or '(not given)'}
+
+Do this:
+1. Search for primary sources that answer the question: official documentation,
+   vendor pages, standards bodies, filings, first-party reports, peer-reviewed
+   work. Prefer these over blogs and aggregators, and recent pages over old ones.
+2. Open the most authoritative pages and read them.
+3. Record each specific that answers the question with the URL you read it on
+   and the verbatim sentence.
+
+Rules:
+- Only facts you actually read on a page you opened. Nothing from memory.
+- Exact values, never a range the source does not give.
+- If two sources disagree, include both and say so in "claim".
+- If no opened page answers the question, say what is missing in "gaps".
+- Up to {DEEP_FACTS_PER_QUESTION} facts.
+
+Return ONLY valid JSON in exactly this shape:
+{FACT_PACK_SCHEMA}"""
+    try:
+        found = _claude_web_call(prompt, max_tokens=8000, searches=DEEP_SEARCHES,
+                                 fetches=DEEP_FETCHES, label=f"deep-{index + 1}",
+                                 schema=FACT_PACK_SCHEMA)
+    except Exception as e:
+        return {"facts": [], "primary_sources": [],
+                "gaps": [f"Deep research could not answer: {question['question']}"],
+                "error": str(e)[:200]}
+    facts = []
+    for f in (found.get("facts") or [])[:DEEP_FACTS_PER_QUESTION]:
+        if isinstance(f, dict):
+            facts.append({**f, "origin": "deep-research", "question": question["question"]})
+    return {"facts": facts, "primary_sources": found.get("primary_sources") or [],
+            "gaps": found.get("gaps") or []}
+
+
+def deep_research(title: str, keywords: str, intent: str, research: dict) -> dict:
+    """The fact pack widened by planned sub-questions. Returns the pack as it
+    was when planning fails or nothing is found; never raises."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    pack = research.get("fact_pack") or {"facts": [], "primary_sources": [], "gaps": [],
+                                          "method": "none"}
+    log("STEP 1.55", "Deep research: planning the sub-questions")
+    questions = plan_deep_research(title, keywords, intent, research)
+    if not questions:
+        return pack
+    for q in questions:
+        print(f"    ? [{q['angle'] or 'general'}] {q['question'][:90]}")
+    print(f"  Researching {len(questions)} question(s), {DEEP_WORKERS} at a time")
+    brief = _fact_pack_brief(title, keywords, intent, research)
+    with ThreadPoolExecutor(max_workers=DEEP_WORKERS) as pool:
+        results = list(pool.map(lambda iq: _research_question(iq[0], iq[1], brief),
+                                enumerate(questions)))
+    deep = {
+        "facts": [f for r in results for f in r["facts"]],
+        "primary_sources": [u for r in results for u in r["primary_sources"]],
+        "gaps": [g for r in results for g in r["gaps"]],
+        "method": "deep-research",
+        "max_facts": DEEP_MAX_FACTS,
+    }
+    merged = merge_fact_packs(pack, deep)
+    merged["deep_questions"] = [
+        {**q, "facts": len(r["facts"]), **({"error": r["error"]} if r.get("error") else {})}
+        for q, r in zip(questions, results)]
+    added = len(merged["facts"]) - len(pack.get("facts") or [])
+    failed = sum(1 for r in results if r.get("error"))
+    print(f"  Deep research: {added} new fact(s) from {len(questions)} question(s)"
+          + (f", {failed} question(s) failed" if failed else "")
+          + f"; pack now {len(merged['facts'])} fact(s), {len(merged['gaps'])} gap(s).")
+    return merged
+
+
 def fact_pack_text(research: dict) -> str:
     """The pack as the writer, outliner and auditor see it."""
     pack = research.get("fact_pack") or {}
@@ -3667,7 +3840,8 @@ out. Do not fill the gap from memory.
     for f in facts:
         as_of = f.get("as_of") or "undated"
         origin = {"research-notes": " | from the author's notes",
-                  "gap-resolver": " | confirmed by the gap resolver"}.get(f.get("origin"), "")
+                  "gap-resolver": " | confirmed by the gap resolver",
+                  "deep-research": " | from deep research"}.get(f.get("origin"), "")
         lines.append(f"[{f['id']}] {f.get('claim','')} | value: {f['value']} | "
                      f"as of {as_of} | {f['source_url']}{origin}\n"
                      f"     quote: \"{str(f.get('quote',''))[:200]}\"")
@@ -7999,7 +8173,7 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
         linkedin: bool = False, video: bool = False, thumbnail: bool = False,
         take: str = "", facts: bool = True, diagram: bool = True,
         voiceover: bool = False, mp4: bool = False, from_theme: str = "", avatar: bool = False,
-        notes=None, resolve_gaps: bool = False, diagram_style: str = "",
+        notes=None, resolve_gaps: bool = False, deep: bool = False, diagram_style: str = "",
         visual_plan: bool = True, learning_aids: bool = True):
     profile = length_profile(words)
     take = (take or "").strip()
@@ -8052,6 +8226,10 @@ def run(title: str, keywords: str, output_dir: Path, edition: int = 0, intent: s
         research["fact_pack"] = merge_fact_packs(notes_pack, research["fact_pack"])
         print(f"  Fact pack after merge: {len(research['fact_pack']['facts'])} fact(s), "
               f"{len(research['fact_pack']['gaps'])} gap(s); the notes' facts come first.")
+
+    # Step 1.55: widen the pack with planned sub-questions (opt-in: it spends web calls).
+    if deep:
+        research["fact_pack"] = deep_research(title, keywords, intent, research)
 
     # Step 1.6: settle the gaps by opening the pages (opt-in: it spends web calls).
     if resolve_gaps:
@@ -8378,6 +8556,18 @@ def main():
         ),
     )
     parser.add_argument(
+        "--deep",
+        action="store_true",
+        help=(
+            "Step 1.55: deep research. A planning call splits the topic into "
+            f"{DEEP_QUESTIONS} sub-questions from different angles (practitioner, buyer, "
+            "skeptic, data, standards), each is researched with its own search-and-read "
+            "call, and the findings merge into the fact pack under the same rule: only "
+            "what an opened page states, with its URL. Runs before --resolve-gaps, so the "
+            "resolver can settle what it leaves open. Costs several web calls a run."
+        ),
+    )
+    parser.add_argument(
         "--no-facts",
         action="store_true",
         help=(
@@ -8619,6 +8809,7 @@ def main():
             from_theme=args.from_theme,
             notes=args.notes,
             resolve_gaps=args.resolve_gaps,
+            deep=args.deep,
         )
     except ClaudeError as e:
         # Flattened to one line so the web UI, which reads the log line by line,
